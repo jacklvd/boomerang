@@ -1,0 +1,10 @@
+# Terraform state — contains secrets, never commit
+*.tfstate
+*.tfstate.*
+.terraform/
+# note: .terraform.lock.hcl SHOULD be committed — it pins provider hashes
+crash.log
+
+# Real variable values (commit terraform.tfvars.example instead)
+*.tfvars
+!*.tfvars.example
