@@ -8,3 +8,8 @@ dependencies = [
     "anthropic[bedrock]>=1.0.0",
     "fastapi[standard]>=0.141.1",
 ]
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "respx>=0.21.0",
+]
