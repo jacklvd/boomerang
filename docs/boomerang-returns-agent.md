@@ -23,7 +23,7 @@ flowchart TD
     F --> G["Get it to a carrier"]
     G --> H["Refund"]
 
-    B -.->|"forgets it exists"| X["Return window closes<br/>money is simply lost"]
+    B -.->|"forgets it exists"| X["Return window closes — money is simply lost"]
     C -.->|"flow is confusing"| X
     E -.->|"no printer right now"| X
     G -.->|"never finds the time"| X
@@ -47,8 +47,12 @@ The intended interaction is a single sentence:
 
 and a single confirmation back:
 
-> "I set up the J.Crew return. Your carrier will collect it with tomorrow's mail delivery — leave
-> the box out with the printed label on it."
+> "I set up the J.Crew return. Your carrier will collect it with Wednesday's mail — leave the box
+> out with the printed label on it before your usual delivery time."
+
+The day in that sentence is whatever USPS returned, never an assumption. Free Carrier Pickup is a
+day, not a window, and "tomorrow" is itself a guess — the 2 AM Central cutoff, Sundays and holidays
+all move it.
 
 Everything between those two messages — the portal, the reason code, the label, the carrier
 booking, the reminder — is the agent's job.
@@ -95,14 +99,14 @@ flowchart LR
     subgraph A["Route A — Gmail API"]
         direction TB
         A1["Restricted scope"] --> A2["App verification"]
-        A2 --> A3["CASA assessment<br/>$540–$1,800"]
+        A2 --> A3["CASA assessment — $540–$1,800"]
         A3 --> A4["Letter of Validation"]
         A4 --> A5["Revalidate every 12 months"]
         A5 -.-> A3
     end
     subgraph B["Route B — Browser extension"]
         direction TB
-        B1["Content script reads<br/>rendered DOM"] --> B2["Host permission<br/>requested in context"]
+        B1["Content script reads the rendered DOM"] --> B2["Host permission requested in context"]
         B2 --> B3["Chrome Web Store review"]
     end
 

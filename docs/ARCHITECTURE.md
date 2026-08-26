@@ -4,6 +4,13 @@ How the pieces fit, and the settled decisions behind the shape. **Read the relev
 before proposing an alternative** — these were expensive to establish. Sources in
 [`../.claude/artifacts/`](../.claude/artifacts/).
 
+> This document is the *why*. The *what to build* is
+> [`../design/boomerang-requirements.md`](../design/boomerang-requirements.md) and
+> [`../design/boomerang-high-level-design.md`](../design/boomerang-high-level-design.md), which
+> refine several decisions here — notably a stateless server on Lambda with no VPC and no
+> database. Where they disagree with this file, they win; the decision text below is annotated
+> where that has happened.
+
 ## The one thing to understand first
 
 Boomerang holds **no OAuth grant for any user**. The backend has no independent path to user
@@ -75,23 +82,30 @@ order ID) crossing to the backend is the fallback — a different product, but a
 
 1. User picks an order and confirms intent.
 2. Extension requests host permission for that retailer if not already granted (D7).
-3. Return driver navigates the retailer's return flow → **printed label** + tracking number (D6).
+3. Return driver navigates the retailer's return flow, from configured selectors first and the
+   model only on a miss. At the choice of return method it stops and presents every option with its
+   price (FR-3.3.4). Free drop-off ends here, successfully. A printable label continues → **printed
+   label** + tracking number + which carrier's postage it is (D6).
 4. Server calls USPS eligibility for the user's address. **Hard gate** (D5). Ineligible → offer
    nearest drop-off or a priced alternative with the price stated. Never auto-escalate.
-5. Server schedules the pickup, persists `confirmationNumber` **and** `ETag` together (D5).
+5. Server schedules the pickup and returns the `confirmationNumber` and `ETag` to the extension,
+   which stores the confirmation number and the address it was booked against (D5).
 6. Extension opens the prefilled calendar URL; user reviews and saves (D2).
-7. Confirmation copy: "with tomorrow's mail delivery" — never a time window (D6).
+7. Confirmation copy names the day USPS returned — never a time window, never a guarantee (D6).
 
 ## Trust boundary
 
 | Data | Lives where | Notes |
 |---|---|---|
 | Order page DOM | Extension → server → Bedrock | Transient; not persisted raw |
-| Structured orders | Server | The working set |
+| Return-flow step DOM | Extension → server → Bedrock | Fallback path only, when no selector matches. Same minimisation rules |
+| Label page DOM | Extension only | Never transmitted — it carries the tracking number and return address |
+| Structured orders | Extension (`chrome.storage.local`) | Returned in the ingest response; the server keeps nothing |
 | Retailer session | Browser only | Content script runs in the user's own session; we never see credentials |
 | USPS credentials | Server only | App-level client-credentials OAuth, not per-user |
-| Pickup confirmation + ETag | Server | Must persist together |
+| Pickup confirmation + address | Extension | The ETag is passed through and deliberately not stored |
 | Google account | Nowhere | No scopes requested at all |
+| Item + address → Google | Sent in the calendar template URL | We hold nothing of Google's; we do send this to them. Stated rather than implied |
 
 The extension never holds an API key; the server never holds a user credential. Neither can be
 compromised into the other's capabilities.
@@ -174,29 +188,57 @@ fedex.com guest flow through the browser we already drive.
 created on *your* carrier account. A retailer-issued label is neither. They add cost and a
 dependency without removing the account requirement.
 
-## D5 — Eligibility is a hard gate; ETag stored with the confirmation
+## D5 — Eligibility is a hard gate; the ETag is refreshed, never stored
 
-Eligibility runs before every schedule call, no exceptions. `confirmationNumber` and `ETag`
-persist together.
+Eligibility runs before every schedule call, no exceptions. The extension stores the
+`confirmationNumber` and the address it was booked against; nobody stores the `ETag`.
 
 Eligibility is address-specific, so a meaningful share of users get a no — the agent needs a
-graceful second answer, not an error. And amend/cancel both require the ETag, good for one hour
-or one use. Without it stored, the user cannot cancel — and they will want to. This is the part
-most integrations get wrong.
+graceful second answer, not an error. Amend and cancel both require an ETag, but it is good for
+one hour or one use, so a stored one is worthless by the time the user changes their mind. The
+correct pattern is refresh-then-cancel: re-read the pickup to obtain a current ETag, then act on
+it. Treating a stored ETag as usable is the part most integrations get wrong.
+
+*Superseded detail:* this decision originally had the server persist both values. The server is
+now stateless — see [`../design/boomerang-high-level-design.md`](../design/boomerang-high-level-design.md) §6.3.
 
 ## D6 — The label must be printed before the pickup call
 
-The return flow ends at a printed label on the box, not a QR code. USPS Free Package Pickup only
-covers packages with prepaid postage affixed; a pickup for an unlabeled box isn't legitimate.
+A pickup needs a printed label on the box, not a QR code. USPS Free Package Pickup only covers
+packages with prepaid postage affixed; a pickup for an unlabeled box isn't legitimate. And the
+postage must be **USPS** postage — the letter carrier is collecting mail, so a prepaid UPS label
+will not be collected however printed it is.
 
 Related copy constraint: free pickup happens on the normal delivery round, Mon–Sat — a **day, not
-a window**. Same-day requests must land before 2:00 AM CT. All user-facing copy says "with
-tomorrow's mail delivery." Never auto-escalate to a paid option.
+a window**, and never a guarantee. Never auto-escalate to a paid option.
+
+*Superseded details:* two, both in
+[`../design/boomerang-requirements.md`](../design/boomerang-requirements.md).
+
+The driver no longer *selects* the printable label. Where a retailer offers a choice it presents
+every option with its price and stops (FR-3.3.4) — on Amazon the printable label is often a paid
+refund deduction while the QR drop-off is free, so auto-selecting it to satisfy this decision's own
+precondition would spend the user's money to reach a pickup they never asked for. A QR drop-off is
+now a successful outcome, not the `qr-only` error.
+
+The mandated phrase "with tomorrow's mail delivery" is withdrawn (FR-3.4.7). It was wrong at three
+edges: same-day requests before 2:00 AM CT are collected *today*, Sundays and holidays roll forward,
+and `nextAvailablePickup` can roll past an unserviceable day. USPS returns the scheduled date; copy
+renders it. The day-not-a-window invariant is unchanged.
 
 ## D7 — Minimal manifest, permissions requested in context
 
-The manifest declares `activeTab` and `scripting`. Retailer domains go in
+The manifest declares `activeTab`, `scripting` and `storage`. Retailer domains go in
 `optional_host_permissions`, requested when the user names the retailer.
+
+*Superseded detail:* this decision originally said `activeTab` and `scripting` only, which forbade
+the permission every stored entity depends on, and it had no first-run story —
+`activeTab` grants access only on a user gesture, so an extension holding it alone can never ingest
+on page load, and one holding no host permission has nothing to escalate from. The two-tier
+acquisition that fixes it is FR-3.7.2: a "Scan this page" click first, the standing grant offered
+only after the user has seen it work. The manifest also pins a generated `key` so the extension ID
+is stable enough to allowlist — see
+[`../design/boomerang-high-level-design.md`](../design/boomerang-high-level-design.md) §6.6.
 
 Broad host permissions — especially `<all_urls>` — flag an extension for in-depth Chrome Web
 Store review and often a return for revision. The quality FAQ's own example is a shopping

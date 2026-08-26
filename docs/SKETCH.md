@@ -4,6 +4,10 @@
 
 > **Status:** PoC. Product sketch — what we're building and why.
 > Architecture and settled decisions: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> The buildable spec lives in [`../design/`](../design/) —
+> [requirements](../design/boomerang-requirements.md) and
+> [high-level design](../design/boomerang-high-level-design.md). Where this sketch and those
+> disagree, they win.
 > Research sources: [`../.claude/artifacts/`](../.claude/artifacts/). Implementation tickets land
 > in [`../.claude/tickets/`](../.claude/tickets/) when the next phase starts.
 
@@ -27,15 +31,20 @@ visit, extracts what you bought and when, and tracks the return window.
 **2. Triggered action** — You tell the agent:
 > "Return the blue sweater from the J.Crew order."
 
-The agent walks the retailer's return flow — reason code, label generation — and lands on a
-**printed label**, not just a QR code. Free carrier pickup requires prepaid postage on the box.
+The agent walks the retailer's return flow — reason code, label generation — and stops where the
+retailer offers a choice of return methods, showing you each one **with its price**. Free carrier
+pickup requires prepaid USPS postage on the box, so it needs a printed label; but the printable
+label is sometimes the paid option, and that's your call to make, not the agent's.
 
 **3. The magic** — It checks USPS pickup eligibility for your address, schedules a free Carrier
 Pickup for the next delivery day, and opens a prefilled calendar event so you remember to put
 the box out.
 
 **4. The ping**
-> "I set up the J.Crew return. Your carrier will collect it with tomorrow's mail delivery — leave the box out with the printed label on it before your usual delivery time."
+> "I set up the J.Crew return. Your carrier will collect it with Wednesday's mail — leave the box out with the printed label on it before your usual delivery time."
+
+The day comes from USPS's own response, not from an assumption. Usually it's tomorrow; before 2 AM
+Central it's today; on a Saturday evening it's Monday.
 
 ---
 
@@ -50,7 +59,7 @@ Full reasoning in [`ARCHITECTURE.md`](ARCHITECTURE.md); sources in
 | Gmail API monitors the inbox | Content script reads **retailer order pages** | Every useful Gmail read scope is *restricted* — verification + CASA assessment, ~$540–$1,800/yr forever, 6–12 weeks before the first outside user. An extension reading rendered DOM needs no OAuth scope at all. Order pages also carry better data than receipts. |
 | Calendar API writes the reminder | **Prefilled `render?action=TEMPLATE` URL** | No scope, no host permission, no SDK. The user reviews and saves — which is also the consent moment. |
 | Agent reads calendar for availability | Agent **proposes**, user's eyes are the check | No scrape-free way to read Calendar, and its DOM is the most fragile surface in the product. |
-| "Porch pickup tomorrow, 9 AM–12 PM" | "With tomorrow's mail delivery" | Free USPS pickup is a **day, not a window**. The two-hour guarantee is a different product, ~$25. |
+| "Porch pickup tomorrow, 9 AM–12 PM" | The **day USPS returns**, named plainly | Free USPS pickup is a **day, not a window**. The two-hour guarantee is a different product, ~$25. And "tomorrow" is itself a guess — the cutoff, Sundays and holidays all move it. |
 | USPS/UPS, carrier unspecified | **USPS only for v1** | USPS is the only carrier whose pickup request has no account field at all. Our user is a consumer with a retailer-issued label; they'll never have a UPS or FedEx account. |
 
 One consequence reshapes the architecture rather than a feature: **with no OAuth grant, the
@@ -86,7 +95,12 @@ pushed it. "Passive monitoring" becomes "runs when the user is there."
   Request host permission for that retailer, in context
         │
         ▼
-  Drive the return flow → printed label + tracking number
+  Drive the return flow → present every option with its price
+        │
+        ├─ free drop-off ──► done, no pickup needed
+        │
+        ▼
+  Printed label + tracking number + which carrier's postage
         │
         ▼
   USPS eligibility check   ← hard gate, never skipped
@@ -94,14 +108,17 @@ pushed it. "Passive monitoring" becomes "runs when the user is there."
         ├─ ineligible ──► offer nearest drop-off, or priced UPS
         │
         ▼
-  Schedule pickup → store confirmationNumber + ETag
+  Schedule pickup → extension stores confirmationNumber + address
         │
         ▼
   Open prefilled Calendar URL → user reviews → Saves
         │
         ▼
-  Confirmation: "with tomorrow's mail delivery"
+  Confirmation names the day USPS returned
 ```
+
+The first run is different: `activeTab` can't inject on page load, so the popup offers **"Scan this
+page"** and the standing permission is offered afterwards, once the user has seen it work.
 
 ---
 
@@ -118,13 +135,13 @@ pushed it. "Passive monitoring" becomes "runs when the user is there."
 | Extension | TypeScript, Manifest V3, content scripts + `chrome.scripting` |
 | Front-end | TypeScript / Next.js 16 + shadcn-ui + Base UI + Tailwind 4 |
 | Back-end | FastAPI + Bedrock (Claude Opus 5) |
-| Infra | VPC + EC2 + Terraform |
+| Infra | Terraform — Lambda + Function URL, SSM Parameter Store, CloudWatch. No VPC, no database. |
 
 ```
 extension/   MV3 extension     (to build)
 client/      Next.js app       (scaffolded)
 server/      FastAPI service   (scaffolded)
-infra/       Terraform         (scaffolded)
+infra/       Terraform         (EC2 scaffold, superseded by the Lambda design)
 ```
 
 Each workspace has its own `AGENTS.md` with scope, phase, and local conventions.
@@ -151,7 +168,7 @@ do it before writing the client, and build against a mock adapter while it sits 
 |---|---|
 | **Order Gatherer** | Parse order-page DOM into structured orders; rank by return-window urgency |
 | **Return Driver** | Navigate the retailer's return flow to a printed label + tracking number |
-| **Pickup Scheduler** | USPS eligibility → schedule → persist `confirmationNumber` + `ETag` |
+| **Pickup Scheduler** | USPS eligibility → schedule → extension stores `confirmationNumber` + address; refresh before any cancel |
 | **Calendar Writer** | Build the prefilled Calendar template URL, or an `.ics` fallback |
 
 ---
@@ -165,6 +182,6 @@ disclosed purpose, cross-purpose reuse is prohibited, every collection needs pro
 
 - **The Bedrock hop is what a reviewer will ask about.** Comparable order-scraping extensions
   advertise that they run locally and send nothing anywhere. We differ; disclose it loudly.
-- **Keep host permissions small.** Broad `<all_urls>` flags in-depth review. Ship `activeTab` +
-  `chrome.scripting`; request retailer domains in context.
+- **Keep host permissions small.** Broad `<all_urls>` flags in-depth review. Ship `activeTab`,
+  `scripting` and `storage`; request retailer domains in context, after the first successful scan.
 - **Chrome Web Store review is the only distribution gate.** There is no second channel.

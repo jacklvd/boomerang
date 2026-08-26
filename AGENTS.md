@@ -19,8 +19,9 @@ Start with [`docs/SKETCH.md`](docs/SKETCH.md) for the product and
 | `extension/` | Reads order pages, drives return flows, opens the calendar tab | **not built** — arrives with its own `AGENTS.md` | — |
 | `client/` | Landing page, install funnel, order dashboard | scaffolded; dashboard is phase 2 | [`client/AGENTS.md`](client/AGENTS.md) |
 | `server/` | Parsing, ranking, carrier broker, credential holder | `/health` only; ingestion is phase 1 | [`server/AGENTS.md`](server/AGENTS.md) |
-| `infra/` | VPC + EC2 + Terraform | scaffolded, never applied; not PoC-critical | [`infra/AGENTS.md`](infra/AGENTS.md) |
+| `infra/` | Lambda + Function URL + SSM + CloudWatch, in Terraform | EC2 scaffold superseded, never applied; not PoC-critical | [`infra/AGENTS.md`](infra/AGENTS.md) |
 | `docs/` | Product sketch, architecture decisions, narrative proposals | — | [`docs/SKETCH.md`](docs/SKETCH.md) |
+| `design/` | Requirements and high-level design — the current spec | — | [`design/boomerang-requirements.md`](design/boomerang-requirements.md) |
 | `.claude/` | Claude Code settings, raw research artifacts, tickets | — | — |
 
 ```bash
@@ -40,22 +41,44 @@ consistency. Decision IDs refer to `docs/ARCHITECTURE.md`.
 2. **No Gmail, in any form.** Not the API, not scraping. Order data comes from retailer pages.
 
 3. **Never schedule a pickup without a successful eligibility check first.** (D5) Eligibility is
-   address-specific and a meaningful share of users get a no. Persist `confirmationNumber` and
-   `ETag` **together** — without the ETag nobody can cancel.
+   address-specific and a meaningful share of users get a no. Store the `confirmationNumber` and
+   the address it was booked against; **never store the `ETag`** — it is good for one hour or one
+   use, so a later cancellation refreshes the pickup to get a current one, then cancels.
 
-4. **The box needs a printed label, not just a QR code.** (D6) Free USPS pickup only covers
-   packages with prepaid postage affixed. A flow that stops at a QR code produces an illegitimate
-   pickup.
+4. **Free USPS pickup requires prepaid USPS postage on the box.** (D6) Two things follow, and
+   both are easy to get wrong in opposite directions. A QR code alone is not a pickup — but it is
+   not a failure either: retailer free QR drop-off is a legitimate, successful outcome that simply
+   skips the pickup step. And a *printed* label is not sufficient on its own — if the postage on it
+   is UPS or FedEx, a USPS carrier will not collect it, because the carrier is collecting mail.
+   Record which carrier's postage is on the box and gate scheduling on that, not on "a label
+   exists."
 
-5. **Never promise a pickup time window.** (D6) Free Carrier Pickup happens on the normal delivery
-   round. Say "with tomorrow's mail delivery." The two-hour window is a different, paid product.
+5. **Never promise a pickup time window, and never assume the day.** (D6) Free Carrier Pickup
+   happens on the normal delivery round, so it is a day, not a window. Name the day USPS returned
+   in its own response — usually tomorrow, but today for a request before the 2 AM Central cutoff,
+   and Monday on a Saturday evening. The two-hour window is a different, paid product.
 
-6. **Never silently escalate to a paid option.** If USPS is ineligible, offer drop-off or a priced
-   alternative with the price stated.
+6. **Never silently escalate to a paid option, and never pick the return method for the user.**
+   Where the retailer offers a choice of return methods, stop and present every one of them with
+   its price. Buying a paid printable label out of the user's refund to satisfy our own pickup
+   precondition is the exact failure this rule exists to prevent. If USPS is ineligible, offer
+   drop-off or a priced alternative with the price stated.
 
 7. **The server only ever sees what the extension sends it.** There is no background job reaching
    into user data — there's no credential that would let one work. If you're writing one, you've
    misread the architecture.
+
+8. **The manifest declares `activeTab`, `scripting` and `storage` — nothing else at install.**
+   `activeTab` grants access only on a user gesture, so the first run *cannot* inject on page load:
+   the popup offers "Scan this page", and the standing host permission for that retailer is
+   requested afterwards, in context, once the user has seen it work. Adding `<all_urls>` to "make
+   the first run work" trades the product's entire review posture for a convenience.
+
+9. **The model drives the return flow through a closed action vocabulary.** `click`,
+   `select_option`, `fill`, `pause_for_user`, `report_stuck` — forced tool choice, so there is no
+   path where attacker-influenced retailer DOM talks the model into an action outside that list.
+   `fill` never targets a password, payment or file-upload input. Selectors are tried first; the
+   model is asked only when they miss.
 
 ## Cross-cutting conventions
 
