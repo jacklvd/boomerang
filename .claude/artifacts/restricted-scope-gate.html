@@ -1,0 +1,811 @@
+<title>Gmail's Restricted Scope Gate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:   #F6F8F7;
+    --surface:  #FFFFFF;
+    --sunk:     #EDF1EF;
+    --ink:      #101F1C;
+    --body:     #23352F;
+    --muted:    #5C6E69;
+    --faint:    #86988F;
+    --rule:     #D8E1DD;
+    --rule-firm:#B9C7C2;
+    --accent:   #0E6A5E;
+    --accent-dim:#0E6A5E1A;
+    --signal:   #A85708;
+    --signal-dim:#A857081A;
+    --stop:     #97302B;
+    --stop-dim: #97302B14;
+
+    --f-display: "Bricolage Grotesque", "Helvetica Neue", Arial, sans-serif;
+    --f-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 66ch;
+    --pad: clamp(1.25rem, 4vw, 3rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0C1513;
+      --surface:  #14201D;
+      --sunk:     #101B18;
+      --ink:      #E9F0EC;
+      --body:     #C6D4CF;
+      --muted:    #90A49E;
+      --faint:    #6E827C;
+      --rule:     #23332E;
+      --rule-firm:#324540;
+      --accent:   #56C4B1;
+      --accent-dim:#56C4B11F;
+      --signal:   #E39B47;
+      --signal-dim:#E39B471F;
+      --stop:     #E2766E;
+      --stop-dim: #E2766E1A;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #0C1513;
+    --surface:  #14201D;
+    --sunk:     #101B18;
+    --ink:      #E9F0EC;
+    --body:     #C6D4CF;
+    --muted:    #90A49E;
+    --faint:    #6E827C;
+    --rule:     #23332E;
+    --rule-firm:#324540;
+    --accent:   #56C4B1;
+    --accent-dim:#56C4B11F;
+    --signal:   #E39B47;
+    --signal-dim:#E39B471F;
+    --stop:     #E2766E;
+    --stop-dim: #E2766E1A;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--body);
+    font-family: var(--f-body);
+    font-size: 17px;
+    line-height: 1.66;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+    padding: 0 var(--pad) 6rem;
+  }
+
+  .wrap {
+    max-width: 60rem;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  .prose { max-width: var(--measure); }
+
+  /* ---------- masthead ---------- */
+
+  header.masthead {
+    padding: clamp(3rem, 8vw, 5.5rem) 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .kicker {
+    font-family: var(--f-mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1rem;
+    align-items: center;
+  }
+  .kicker .sep { color: var(--rule-firm); }
+  .kicker .plain { color: var(--faint); }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(2.4rem, 6.5vw, 4rem);
+    line-height: 1.02;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: clamp(1.05rem, 2.2vw, 1.3rem);
+    line-height: 1.5;
+    color: var(--muted);
+    max-width: 46ch;
+    margin: 0;
+  }
+
+  /* ---------- verdict strip ---------- */
+
+  .verdict {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    border-top: 2px solid var(--ink);
+    border-bottom: 1px solid var(--rule);
+  }
+  .verdict div {
+    padding: 1.1rem 1.25rem 1.35rem;
+    border-right: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .verdict div:last-child { border-right: none; }
+  .verdict dt {
+    font-family: var(--f-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .verdict dd {
+    margin: 0;
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 1.5rem;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .verdict dd small {
+    display: block;
+    font-family: var(--f-body);
+    font-weight: 400;
+    font-size: 0.85rem;
+    letter-spacing: 0;
+    color: var(--muted);
+    line-height: 1.4;
+    margin-top: 0.25rem;
+  }
+
+  /* ---------- sections ---------- */
+
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(1.5rem, 3.2vw, 2rem);
+    line-height: 1.12;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    margin: 0;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--rule-firm);
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 1.14rem;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    margin: 1.5rem 0 0;
+    text-wrap: balance;
+  }
+
+  h4 {
+    font-family: var(--f-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0;
+  }
+
+  p { margin: 0; }
+  section > p, section > ul, section > ol, section > h3 + p { max-width: var(--measure); }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  strong { color: var(--ink); font-weight: 600; }
+  em.term { font-style: normal; color: var(--ink); font-weight: 600; }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.855em;
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    padding: 0.06em 0.34em;
+    border-radius: 3px;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+
+  ul, ol { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  li::marker { color: var(--faint); }
+  ol li::marker { font-family: var(--f-mono); font-size: 0.85em; }
+
+  /* ---------- tables ---------- */
+
+  .scroller { overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    min-width: 34rem;
+  }
+  caption {
+    caption-side: bottom;
+    text-align: left;
+    font-size: 0.8rem;
+    color: var(--faint);
+    padding: 0.6rem 0 0;
+    max-width: var(--measure);
+  }
+  th, td {
+    text-align: left;
+    padding: 0.62rem 0.9rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  thead th {
+    font-family: var(--f-mono);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    background: var(--sunk);
+    border-bottom: 1px solid var(--rule-firm);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ink); }
+  td code { background: none; border: none; padding: 0; white-space: nowrap; }
+
+  .tag {
+    display: inline-block;
+    font-family: var(--f-mono);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    padding: 0.16rem 0.42rem;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .tag.stop { background: var(--stop-dim); color: var(--stop); box-shadow: inset 0 0 0 1px currentColor; }
+  .tag.warn { background: var(--signal-dim); color: var(--signal); box-shadow: inset 0 0 0 1px currentColor; }
+  .tag.ok   { background: var(--accent-dim); color: var(--accent); box-shadow: inset 0 0 0 1px currentColor; }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-dim);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-width: var(--measure);
+  }
+  .note.caution { border-left-color: var(--signal); background: var(--signal-dim); }
+  .note.stopper { border-left-color: var(--stop); background: var(--stop-dim); }
+  .note p { font-size: 0.95rem; }
+
+  /* ---------- gate sequence ---------- */
+
+  .gate { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--rule); }
+  .gate-step {
+    display: grid;
+    grid-template-columns: 3.5rem 1fr;
+    gap: 0 1.25rem;
+    padding: 1.15rem 0;
+    border-bottom: 1px solid var(--rule);
+    align-items: start;
+  }
+  .gate-step .n {
+    font-family: var(--f-mono);
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    padding-top: 0.1rem;
+  }
+  .gate-step .b { display: flex; flex-direction: column; gap: 0.35rem; max-width: 58ch; }
+  .gate-step .t {
+    font-family: var(--f-display);
+    font-weight: 700;
+    color: var(--ink);
+    font-size: 1.02rem;
+    letter-spacing: -0.01em;
+  }
+  .gate-step .d { font-size: 0.94rem; }
+  .gate-step .clock {
+    font-family: var(--f-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+    text-transform: uppercase;
+  }
+
+  /* ---------- option cards ---------- */
+
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .opt { background: var(--surface); padding: 1.15rem 1.25rem 1.35rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .opt .t { font-family: var(--f-display); font-weight: 700; color: var(--ink); font-size: 1.02rem; letter-spacing: -0.01em; }
+  .opt p { font-size: 0.9rem; line-height: 1.55; }
+  .opt .verdict-line { font-family: var(--f-mono); font-size: 0.72rem; letter-spacing: 0.05em; color: var(--muted); border-top: 1px dashed var(--rule-firm); padding-top: 0.55rem; margin-top: auto; }
+
+  /* ---------- sources ---------- */
+
+  ol.sources { padding-left: 0; list-style: none; counter-reset: src; gap: 0.85rem; }
+  ol.sources li {
+    counter-increment: src;
+    display: grid;
+    grid-template-columns: 2.25rem 1fr;
+    gap: 0 0.5rem;
+    font-size: 0.92rem;
+    max-width: 74ch;
+  }
+  ol.sources li::before {
+    content: counter(src, decimal-leading-zero);
+    font-family: var(--f-mono);
+    font-size: 0.75rem;
+    color: var(--faint);
+    padding-top: 0.28rem;
+  }
+  ol.sources .desc { color: var(--muted); font-size: 0.88rem; }
+
+  .chapter-note {
+    font-size: 0.94rem;
+    color: var(--muted);
+    border-left: 2px solid var(--rule-firm);
+    padding-left: 1.1rem;
+    margin-bottom: 2.2rem;
+  }
+  footer.colophon {
+    border-top: 1px solid var(--rule-firm);
+    padding-top: 1rem;
+    font-family: var(--f-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+    text-transform: uppercase;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.2rem;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    a { transition: color 120ms ease; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="kicker">
+      <span>Research brief</span>
+      <span class="sep">/</span>
+      <span class="plain">Boomerang &middot; Order ingestion</span>
+      <span class="sep">/</span>
+      <span class="plain">25 Aug 2026</span>
+    </div>
+    <h1>Gmail's Restricted Scope Gate</h1>
+    <p class="standfirst">The Gmail API route costs about $540 a year and two months of calendar time. A browser extension can skip all of it &mdash; reading order state off the page, writing calendar events through a prefilled URL, and requesting no Google scopes at all. What is left is Chrome Web Store review and a lot of other people's HTML.</p>
+  </header>
+
+  <dl class="verdict">
+    <div>
+      <dt>Extension route</dt>
+      <dd>Viable<small>A content script reads rendered pages with no OAuth scope, no verification, no CASA.</small></dd>
+    </div>
+    <div>
+      <dt>Best target</dt>
+      <dd>Order pages<small>Retailer "Your Orders" beats receipt email, and there is shipped precedent.</small></dd>
+    </div>
+    <div>
+      <dt>Still owed</dt>
+      <dd>CWS policy<small>Limited Use and disclosure tightened 1 Aug 2026 &mdash; three weeks ago.</small></dd>
+    </div>
+    <div>
+      <dt>Google APIs used</dt>
+      <dd>None<small>No consent screen, no verification, no CASA. The road not taken costs $540&ndash;$1,800 a year.</small></dd>
+    </div>
+    <div>
+      <dt>Calendar pillar</dt>
+      <dd>No API<small>A prefilled event URL writes to Calendar with zero scopes and zero host permissions.</small></dd>
+    </div>
+  </dl>
+
+  <section>
+    <h2>Executive summary</h2>
+    <p><strong>Yes &mdash; a browser extension can read the pages the user has open, and doing so sidesteps the entire Gmail restricted-scope regime.</strong> A content script with a host permission reads the rendered DOM of any site it matches. No OAuth scope is involved, so there is no app verification, no CASA security assessment, no annual fee, and no 100-user cap. That is a real escape from a gate that otherwise costs roughly $540&ndash;$1,800 every year in perpetuity and six to twelve weeks before the first outside user can connect.</p>
+    <p>The more useful finding is that <strong>Gmail is probably the wrong page to read.</strong> Retailer "Your Orders" pages carry better data than receipt emails &mdash; authoritative order status, return eligibility, and the actual entry point to the return flow &mdash; and there is published, still-shipping precedent on the Chrome Web Store for exactly this technique. Amazon Order History Reporter and Amazon Order History Exporter both scrape order pages with auto-pagination and are live in the store today.</p>
+    <p>What you trade is not the absence of policy, just a different flavor of it. Chrome Web Store Limited Use governs all user data an extension handles, not only data from Google APIs, and it tightened on <strong>1 August 2026</strong>: collection must now be strictly necessary to the disclosed single purpose, cross-purpose collection is prohibited, and every collection needs prominent disclosure. Boomerang's server-plus-Bedrock hop is what will draw reviewer attention &mdash; the precedent extensions all advertise that they run locally and send nothing anywhere. Diverging from that is allowed, but it has to be disclosed loudly and justified.</p>
+    <p><strong>The calendar pillar does not need an API either.</strong> Google Calendar accepts a prefilled-event URL &mdash; <code>render?action=TEMPLATE</code> with title, dates, timezone, location and description in the query string. The extension opens it in a tab, Calendar renders its normal event-creation form already filled in, and the user saves. That path needs no OAuth scope and, because <code>chrome.tabs.create</code> requires no host permission merely to open a URL, no Google host permission either. Writing to the calendar is solved. <em>Reading</em> availability is the part with no clean answer, and the fix is a design change rather than a technical one.</p>
+    <p>Taken together the two pillars mean Boomerang can ship with <strong>zero Google OAuth scopes</strong>. There is no consent screen, no verification queue, no CASA lab, no annual revalidation, no 100-user cap, and no seven-day refresh-token expiry &mdash; and no unverified-app warning screen in the onboarding funnel. The entire Google compliance surface collapses to Chrome Web Store review. What replaces it is a different and more diffuse risk: every data source is now a DOM that someone else can redesign without telling you, and the number of those DOMs grows with every retailer you support. One thing genuinely does not survive the move. Truly passive monitoring gets harder, because a content script only sees what is actually rendered &mdash; "watch the inbox in the background" becomes "sync when the user visits, or when they click."</p>
+  </section>
+
+  <section>
+    <h2>Background</h2>
+    <p>Boomerang, as described in <code>SKETCH.md</code>, is a returns concierge. Its first pillar is passive monitoring: watch the user's inbox for e-commerce receipts, extract order dates and retailers, and track the 30-day return window. The stack is a Chrome extension for the front door, a FastAPI backend on EC2, and Bedrock for the model calls that parse receipts and drive tool selection.</p>
+    <p>Every one of those architectural choices interacts with Google's OAuth policy. The Gmail read is a restricted scope. The backend is what converts "verification" into "verification plus an annual audit." The Bedrock hop is a data transfer that the Limited Use policy governs. And the extension distribution model adds a second policy surface in the Chrome Web Store.</p>
+    <p>Partway through this research the framing changed: if Boomerang is a browser extension anyway, does it need the Gmail API at all, or can it simply read what is already on screen? That turns out to be the better question, and the first section below answers it. The Gmail API material that follows stays in the brief because it defines the cost of the road not taken &mdash; and because there is one scenario that forces you back onto it.</p>
+  </section>
+
+  <section>
+    <h2>Reading the page instead of the mailbox</h2>
+
+    <h3>What a content script can actually see</h3>
+    <p>Content scripts are the only part of a Chrome extension that can touch a web page's DOM. They run in an isolated JavaScript world &mdash; separate variables and functions from the page's own scripts &mdash; but they share the same live document, so they can read and modify everything the user can see. Access is granted per-site through <code>host_permissions</code> in the Manifest V3 manifest, or at runtime through <code>activeTab</code> plus <code>chrome.scripting</code>.</p>
+    <p>The key legal fact: <strong>this path involves no Google API and no OAuth scope.</strong> The Gmail restricted-scope regime attaches to scopes, and the security assessment attaches to apps that access Google user data "from or through a server" <em>via those scopes</em>. Read the rendered page and neither hook catches you. There is no verification queue, no CASA lab, no Letter of Validation, no annual revalidation, and no 100-user ceiling.</p>
+
+    <div class="note">
+      <h4>The bounded claim</h4>
+      <p>What disappears is the <em>Google API</em> compliance regime. What remains is Chrome Web Store policy, which is a real review with real rejections &mdash; just a cheaper, faster, self-serve one with no third-party auditor and no recurring invoice.</p>
+    </div>
+
+    <h3>Route A &mdash; read the Gmail web UI</h3>
+    <p>A content script matched to <code>https://mail.google.com/*</code> can read whatever Gmail has rendered. Gmail's markup is obfuscated and changes without notice, which is why nobody hand-rolls selectors for it. <a href="https://github.com/InboxSDK/InboxSDK">InboxSDK</a>, built and maintained by Streak and used in production by Streak, Mixmax and Gmelius, abstracts the DOM behind stable classes like <code>ComposeView</code> and thread/message views. Registering an App ID for production use is, in their words, "100% free."</p>
+    <p>Two limits matter more than the parsing difficulty:</p>
+    <ul>
+      <li><strong>You only see what is rendered.</strong> The thread list gives you sender, subject, date and a short snippet. Full message bodies exist in the DOM only once a thread is actually opened. There is no equivalent of a server-side search across the whole mailbox.</li>
+      <li><strong>That kills passive monitoring as specified.</strong> The sketch's "runs in background, monitors Gmail" pillar assumes something can sweep 30 days of mail unattended. A content script cannot, unless it drives navigation through the user's authenticated session &mdash; which is where this technique stops being merely fragile and starts looking like the automated access Google's terms exist to prevent.</li>
+    </ul>
+
+    <h3>Route B &mdash; read the retailer's order pages</h3>
+    <p>This is the stronger design and it barely involves Google. Retailer account pages &mdash; Amazon's Your Orders, and the equivalents at J.Crew, Target, Best Buy &mdash; are a better data source than receipt email in every dimension Boomerang cares about:</p>
+    <ul>
+      <li>They are <strong>authoritative and current</strong>. A receipt email is a snapshot from purchase day; the order page knows about cancellations, partial shipments, delivery confirmation, and whether the item is still return-eligible.</li>
+      <li>They state <strong>return windows and eligibility directly</strong>, rather than requiring you to infer a window from a purchase date and a guess at the retailer's policy.</li>
+      <li>They are <strong>where the return flow starts</strong>. The agent has to land on this page anyway to drive the return. Reading it and acting on it are the same surface.</li>
+      <li>They carry <strong>structured line items</strong> &mdash; per-item names, prices, images &mdash; which is exactly what "return the blue sweater" needs to resolve against.</li>
+    </ul>
+    <p>The precedent is unambiguous. <a href="https://chromewebstore.google.com/detail/amazon-order-history-repo/mgkilgclilajckgnedgjgnfdokkgnibi">Amazon Order History Reporter</a> (<a href="https://github.com/philipmulcahy/azad">source on GitHub</a>) and <a href="https://chromewebstore.google.com/detail/amazon-order-history-expo/naiofjbaonmbkmkhlldlcijgnimcbake">Amazon Order History Exporter</a> are both live Chrome Web Store listings that systematically fetch and parse order history pages, auto-paginate across years, and extract order dates, totals, order numbers and item names. This technique passes Chrome Web Store review and survives there.</p>
+
+    <div class="note caution">
+      <h4>Read the precedent's privacy posture carefully</h4>
+      <p>Those extensions market themselves on running entirely locally: no order history leaves the browser, and permissions are limited to storage, downloads and scripting on Amazon domains. Boomerang deliberately does the opposite &mdash; it ships parsed order data to a FastAPI backend and on to Bedrock. That is permitted, but it moves you out of the reviewer's "obviously harmless" bucket and into the one where disclosure quality decides the outcome.</p>
+    </div>
+
+    <h3>What replaces CASA: Chrome Web Store policy, tightened three weeks ago</h3>
+    <p>The <a href="https://developer.chrome.com/docs/webstore/program-policies/limited-use">Chrome Web Store Limited Use policy</a> covers <strong>all user data an extension handles</strong>, not only data received from Google APIs. Extensions may collect only what is necessary for the disclosed single purpose; transfers are allowed where "necessary to providing or improving" the service; advertising, data brokerage and credit decisions are prohibited; and human review is barred except for explicit consent, anonymized analytics, security investigation, or legal compliance. A compliance statement must be posted publicly on a site you control.</p>
+    <p>Google published a <a href="https://developer.chrome.com/blog/cws-policy-updates-2026">policy update on 1 July 2026 that took effect on 1 August 2026</a> &mdash; three weeks before this brief. Three of the four changes land directly on Boomerang's design:</p>
+    <div class="scroller">
+      <table>
+        <caption>The August 2026 Chrome Web Store changes, and what each one obliges Boomerang to do.</caption>
+        <thead><tr><th>Change</th><th>What it now requires</th></tr></thead>
+        <tbody>
+          <tr><td>Limited Use tightened</td><td>Collection must be <em>strictly necessary</em> to the disclosed single purpose. Cross-purpose collection is prohibited outright &mdash; you cannot read an order page for returns and reuse that data for anything else.</td></tr>
+          <tr><td>Disclosure requirements expanded</td><td>All data collection needs prominent user disclosure regardless of how relevant it is, and users must be proactively told when data-handling practices change after they installed.</td></tr>
+          <tr><td>AI guardrail restrictions</td><td>New prohibition on extensions built to circumvent AI service safety guardrails. Not a Boomerang problem, but it signals that AI-adjacent extensions are getting closer reads.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Notably, the Chrome Web Store version of Limited Use contains <strong>no equivalent of the Workspace policy's model-training prohibition</strong>. The blanket ban on using user data to train or improve any model beyond that user's personalized one attaches to data obtained through Google APIs. Data an extension reads off a retailer's page is not covered by it. The sketch's "teach the model the pattern of order receipts" stretch goal, which the API route rules out flatly, becomes a question of what you disclose rather than a prohibition &mdash; though it remains a promise you have to keep to your users.</p>
+
+    <h3>The review reality: single purpose and host permissions</h3>
+    <p>Two Chrome Web Store mechanics decide how painful the listing is.</p>
+    <p><strong>Single purpose</strong> requires one narrow subject matter or browser function. The <a href="https://developer.chrome.com/docs/webstore/program-policies/quality-guidelines-faq">quality guidelines FAQ</a> names "comparison shopping" as an acceptable narrow focus and offers a directly analogous example: a shopping extension may have an action button showing recent deals <em>and</em> host access to find coupons on the store the user is browsing. "E-commerce returns" is the same shape, and Boomerang's features &mdash; find orders, track windows, drive the return, schedule the pickup &mdash; are all plainly downstream of it. This is defensible, but it must be argued in the listing rather than assumed.</p>
+    <p><strong>Host permissions</strong> are the friction point. Boomerang wants many retailer domains plus possibly Gmail, and broad host permissions flag an extension for in-depth review and a longer wait. Declaring <code>&lt;all_urls&gt;</code> when the core function touches specific domains draws a "justify your use of the following permissions" response and often a return for revision. The mitigations are well established: prefer <code>activeTab</code> plus <code>chrome.scripting</code> for anything the user triggers, and move the long retailer list into <code>optional_host_permissions</code> requested in context &mdash; when the user first says "return the J.Crew order," ask for J.Crew then. That keeps the required manifest small, avoids the submission-time warning, and reads better on the install prompt.</p>
+
+    <div class="note caution">
+      <h4>The genuinely unsettled question</h4>
+      <p>Whether reading Gmail's own web UI via content script breaches Google's terms is not clearly answered in public documentation. No Google policy located in this research prohibits it, and a well-known set of extensions has done it in production for a decade through Streak's own SDK. But those products also hold OAuth grants for their server-side work, so they are not a clean precedent for a scrape-only design, and Google's API terms are written around authorized access paths. Route B avoids the question entirely by not touching Google properties &mdash; which is one more reason to prefer it.</p>
+    </div>
+
+    <h3>Calendar, without an API and without scraping</h3>
+    <p>The mail pillar has a scraping answer. The calendar pillar has a better one: a documented-by-convention URL that makes Google Calendar do the work.</p>
+    <p>Google Calendar responds to a template link at <code>https://calendar.google.com/calendar/render?action=TEMPLATE</code>. It accepts <code>text</code> for the title, <code>dates</code> as a <code>YYYYMMDDTHHMMSS/YYYYMMDDTHHMMSS</code> pair, <code>ctz</code> for the timezone, plus <code>details</code> and <code>location</code> &mdash; all URL-encoded. Opening it shows the user their own Calendar with the event-creation form already filled in. They review it and click Save. This is the mechanism behind every "Add to Google Calendar" button on the web, it has been stable for well over a decade, and it requires no JavaScript, no SDK, and no credential.</p>
+    <p>Two properties make it a particularly good fit for an extension. First, <code>chrome.tabs.create({url})</code> needs <strong>no host permission at all</strong> to open a URL &mdash; host permissions are required only to inject scripts, fetch a domain, or read sensitive tab properties like <code>url</code> and <code>title</code>. So Boomerang can write to Calendar while requesting nothing for <code>google.com</code> in its manifest. Second, the confirmation step is not friction, it is the consent moment. The sketch's UX already has a "ping" where the user learns a pickup was scheduled; the prefilled form <em>is</em> that ping, and it makes the agent's action reviewable before it commits.</p>
+    <p>For users who are not on Google Calendar, generate an <code>.ics</code> file instead. It is a plain text format the extension can build locally and hand to the browser as a download, and Apple Calendar, Outlook and Google all import it. Same shape of interaction, one more provider covered.</p>
+
+    <div class="note">
+      <h4>The part with no clean answer: reading availability</h4>
+      <p>The sketch's Calendar Scheduler is specified to "read calendar, check availability against provider policy, create task." The write half is solved above. The read half has no scrape-free equivalent &mdash; there is no template URL that returns data, and <code>calendar.google.com</code> is a heavily obfuscated, virtualized single-page app whose DOM would be the most fragile surface in the entire product. Scraping it is technically possible and strategically unwise.</p>
+      <p>The better move is to design the requirement away. Let the agent <em>propose</em> a pickup window from the carrier's available slots rather than deriving one from the user's free time, and let the prefilled event form carry the proposal. When that tab opens, the user is looking at their own calendar, in their own timezone, with the proposed block rendered in place &mdash; they can see a conflict faster than any parser could, and moving the event is a drag. The human becomes the availability check, which is both cheaper and more accurate than the alternative.</p>
+    </div>
+
+    <h3>What disappears when you use no Google APIs at all</h3>
+    <p>It is worth stating the consequence plainly, because it is larger than it first appears. With Gmail read via content script and Calendar written via template URL, Boomerang requests <strong>no Google OAuth scopes</strong>. Everything in the next chapter &mdash; consent screen configuration, the verification queue, brand review, the CASA assessment, the Letter of Validation, the twelve-month revalidation clock, the 100-new-user lifetime cap, the seven-day refresh-token revocation &mdash; simply does not apply. Neither does the unverified-app interstitial, which is a real conversion cost during a POC that is easy to forget when tallying compliance in dollars. The sketch's onboarding step "grant extension access" reduces to the Chrome install prompt.</p>
+    <p>Two consequences point the other way and should be sized honestly. Risk concentrates in one place: Chrome Web Store review is now the only gate, and if it rejects the host-permission set or the single-purpose narrative there is no second distribution channel. And the architecture shifts. With no OAuth grant there are no server-side credentials, so the backend can never see anything on its own &mdash; every byte reaches FastAPI and Bedrock because the extension pushed it there. That is favorable for the Limited Use narrative, but it means the backend's role narrows to parsing, inference and orchestration over data the client supplies, and any feature premised on the server checking something while the user is away needs to be rethought.</p>
+  </section>
+
+  <section>
+    <h2>The API route, and when it forces itself back on you</h2>
+    <p class="chapter-note">Everything below is the road not taken. Under the all-browser architecture none of it applies &mdash; but it is the cost of three specific decisions, and each one is reversible in the wrong direction. You are back here if truly unattended background monitoring becomes non-negotiable, if the server ever needs to reach a user's data without the extension pushing it, or if per-retailer parser maintenance outgrows the annual fee. Read it as a price list, and check it against the roadmap before promising anything that quietly requires it.</p>
+
+    <h3>Every useful Gmail read scope is restricted</h3>
+    <p>Google sorts OAuth scopes into non-sensitive, sensitive, and restricted. The restricted tier is where anything that reads mail lives. Per <a href="https://developers.google.com/workspace/gmail/api/auth/scopes">Google's Gmail scope reference</a> and the <a href="https://support.google.com/cloud/answer/13464325">restricted scopes list</a>:</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Gmail scopes by classification. Anything that reads message content or metadata through the Gmail API is restricted; the add-on scopes are the only read paths that are merely sensitive.</caption>
+        <thead>
+          <tr><th>Scope</th><th>Class</th><th>Grants</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>gmail.readonly</code></td><td><span class="tag stop">Restricted</span></td><td>Full read of messages and settings</td></tr>
+          <tr><td><code>gmail.metadata</code></td><td><span class="tag stop">Restricted</span></td><td>Headers and labels only &mdash; no body</td></tr>
+          <tr><td><code>gmail.modify</code></td><td><span class="tag stop">Restricted</span></td><td>Read, compose, send; no permanent delete</td></tr>
+          <tr><td><code>gmail.compose</code> / <code>gmail.insert</code></td><td><span class="tag stop">Restricted</span></td><td>Drafts, sending, inserting mail</td></tr>
+          <tr><td><code>gmail.settings.basic</code></td><td><span class="tag stop">Restricted</span></td><td>Filters and mail settings</td></tr>
+          <tr><td><code>mail.google.com/</code></td><td><span class="tag stop">Restricted</span></td><td>Everything, including permanent delete</td></tr>
+          <tr><td><code>gmail.addons.current.message.readonly</code></td><td><span class="tag warn">Sensitive</span></td><td>The one open message, inside an add-on</td></tr>
+          <tr><td><code>gmail.addons.current.message.metadata</code></td><td><span class="tag warn">Sensitive</span></td><td>Metadata of the open message only</td></tr>
+          <tr><td><code>gmail.send</code></td><td><span class="tag warn">Sensitive</span></td><td>Send only, no read</td></tr>
+          <tr><td><code>gmail.labels</code></td><td><span class="tag ok">Non-sensitive</span></td><td>See and edit labels</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note caution">
+      <h4>Common misconception</h4>
+      <p>Vendor blogs frequently suggest downgrading from <code>gmail.readonly</code> to <code>gmail.metadata</code> to dodge the assessment. It does not work &mdash; <code>gmail.metadata</code> is equally restricted and triggers exactly the same CASA requirement. What it buys is a narrower data footprint and an easier story to tell a reviewer, not a cheaper process.</p>
+    </div>
+
+    <h3>Two gates, not one</h3>
+    <p>Restricted scopes route through app verification first, then a security assessment. Google's <a href="https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification">restricted scope verification guide</a> lays out the sequence:</p>
+
+    <div class="gate">
+      <div class="gate-step">
+        <div class="n">01</div>
+        <div class="b">
+          <div class="t">Brand verification</div>
+          <div class="d">App name, logo, support email, and a homepage on a domain you own and have proved in Google Search Console. The automated review "usually completes in a few minutes"; a human pass takes 2&ndash;3 business days if branding changed.</div>
+          <div class="clock">Minutes to 3 business days</div>
+        </div>
+      </div>
+      <div class="gate-step">
+        <div class="n">02</div>
+        <div class="b">
+          <div class="t">Scope declaration and justification</div>
+          <div class="d">Declare every scope in the OAuth Verification Center with a written narrowest-necessary justification for each. Requesting <code>gmail.readonly</code> when <code>gmail.metadata</code> would do is a documented rejection reason.</div>
+          <div class="clock">Prep work</div>
+        </div>
+      </div>
+      <div class="gate-step">
+        <div class="n">03</div>
+        <div class="b">
+          <div class="t">Demo video</div>
+          <div class="d">An unlisted YouTube video showing the full OAuth consent flow and every requested scope being used in the production app. Reviewers reject videos shot against staging or mock data.</div>
+          <div class="clock">Prep work</div>
+        </div>
+      </div>
+      <div class="gate-step">
+        <div class="n">04</div>
+        <div class="b">
+          <div class="t">App-type and policy review</div>
+          <div class="d">Google confirms your app falls into a permitted category for Gmail restricted scopes and that your privacy policy discloses Limited Use compliance. This is the stage that produces clarification rounds.</div>
+          <div class="clock">Several weeks, per Google</div>
+        </div>
+      </div>
+      <div class="gate-step">
+        <div class="n">05</div>
+        <div class="b">
+          <div class="t">CASA security assessment</div>
+          <div class="d">Google Trust &amp; Safety contacts you and assigns an assurance level. You engage an authorized lab, remediate findings, complete the questionnaire, and receive a Letter of Validation.</div>
+          <div class="clock">1&ndash;4 weeks of lab time</div>
+        </div>
+      </div>
+      <div class="gate-step">
+        <div class="n">06</div>
+        <div class="b">
+          <div class="t">Annual revalidation</div>
+          <div class="d">Everything above repeats every 12 months from the Letter of Validation date. Miss the window and Google can revoke production access.</div>
+          <div class="clock">Every year, indefinitely</div>
+        </div>
+      </div>
+    </div>
+
+    <h3>The clause that puts Boomerang in scope</h3>
+    <p>Not every restricted-scope app needs the security assessment. The trigger, in Google's own phrasing, is that <strong>an app "accesses or has the capability to access Google user data from or through a server"</strong> must undergo an annual assessment by a Google-approved third party.</p>
+    <p>"Has the capability to" is doing the work in that sentence. It is not about whether you store mail &mdash; it is about whether your infrastructure could see it. Boomerang's FastAPI service on EC2 receives message content and forwards it to Bedrock for parsing. That is squarely inside the clause, and no amount of "we don't persist anything" changes it. The only Gmail architecture that plausibly escapes is one where message content never leaves the client, which the sketch's server-side agent loop rules out.</p>
+
+    <div class="note stopper">
+      <h4>Architectural consequence</h4>
+      <p>If avoiding CASA were the priority, the parsing would have to happen entirely in the extension, with only derived, non-Gmail facts (retailer name, order date, order ID) crossing to the backend. That is a real design &mdash; but it means running receipt parsing on-device rather than through Bedrock, which is a different product than the one in the sketch.</p>
+    </div>
+
+    <h3>What CASA actually costs</h3>
+    <p>Google delegates the assessment to the <a href="https://appdefensealliance.dev/casa">App Defense Alliance's CASA framework</a>, built on the OWASP Application Security Verification Standard. Per Google's <a href="https://support.google.com/cloud/answer/13465431">security assessment help page</a>, apps are assigned an assurance level &mdash; <strong>AL1</strong> (the lab reviews evidence and scan artifacts you submit, without touching your running app) or <strong>AL2</strong> (the lab tests the live application, its deployment infrastructure, and its data stores directly). Assignment is Google's call, based on user count, requested scopes, and other risk signals. Once you land at AL2, you stay there. Commercially, labs sell these as "Tier 2" and "Tier 3."</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Authorized lab pricing, compiled from secondary sources reflecting 2024&ndash;2025 rate cards. Treat as an order-of-magnitude guide and get current quotes &mdash; TAC Security is consistently named as both the cheapest and the fastest.</caption>
+        <thead>
+          <tr><th>Lab</th><th>Tier 2</th><th>Tier 3</th><th>Turnaround</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>TAC Security</td><td class="num">$540</td><td class="num">$4,500</td><td class="num">1&ndash;3 / 2&ndash;4 wks</td></tr>
+          <tr><td>Leviathan Security</td><td class="num">$800&ndash;$1,200</td><td class="num">$5,000&ndash;$8,000</td><td class="num">2&ndash;3 / 3&ndash;5 wks</td></tr>
+          <tr><td>NetSentries</td><td class="num">$900&ndash;$1,500</td><td class="num">$5,500&ndash;$7,500</td><td class="num">2&ndash;3 / 3&ndash;5 wks</td></tr>
+          <tr><td>Prescient Security</td><td class="num">$1,000+</td><td class="num">$6,000+</td><td class="num">2&ndash;4 / 4&ndash;6 wks</td></tr>
+          <tr><td>NCC Group</td><td class="num">$1,200+</td><td class="num">$7,000+</td><td class="num">3&ndash;4 / 4&ndash;6 wks</td></tr>
+          <tr><td>Bishop Fox</td><td class="num">$1,500+</td><td class="num">$8,000+</td><td class="num">2&ndash;4 / 4&ndash;6 wks</td></tr>
+          <tr><td>DEKRA, KPMG, Aon/GDS</td><td class="num">Enterprise</td><td class="num">Enterprise</td><td class="num">4&ndash;8 wks</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Two independent first-hand accounts corroborate the low end. A <a href="https://dev.to/rem4ik4ever/my-saas-passed-casa-tier-2-assessment-and-yours-can-to-here-is-how-1b20">SaaS founder writing on dev.to</a> paid TAC Security <strong>$720 with a discount, on an unlimited-revalidation plan</strong>, chose DAST over SAST specifically to avoid handing over source code, waited 3&ndash;4 days for the scan report, and completed a 50-plus-question questionnaire. The <a href="https://meetorbis.com/blog/how-we-passed-google-casa-tier-2-with-claude">Orbis team</a> paid TAC Security <strong>$540 flat</strong> including the revalidation scan, answered a 54-question questionnaire, and turned around remediation in about two days. Their four findings were all low severity and all infrastructure-level: a wildcard CORS header on static assets, missing security headers, weak TLS cipher suites, and externally loaded fonts.</p>
+
+    <div class="note caution">
+      <h4>Two numbers in circulation that will mislead you</h4>
+      <p><strong>The $15,000&ndash;$75,000 range</strong> appears on <a href="https://www.nylas.com/blog/google-oauth-app-verification/">Nylas's verification blog</a>. It reflects the pre-CASA regime, when Google required bespoke assessments from firms like Leviathan and Bishop Fox, and it still describes enterprise engagements. It is not what a small team pays for a standard Tier 2 today.</p>
+      <p><strong>Orbis's tier mapping</strong> claims <code>gmail.readonly</code> lands in Tier 3 while <code>gmail.modify</code> stays at Tier 2, and that they picked <code>gmail.modify</code> to save money. Every other source contradicts this &mdash; both are restricted, <code>gmail.modify</code> is strictly broader, and Google's own docs describe only AL1 and AL2 with AL2 as the ceiling. Their cost and process detail is credible; their tier taxonomy is not.</p>
+    </div>
+
+    <h3>Will Google even approve a returns concierge?</h3>
+    <p>Restricted Gmail scopes are limited to app types Google has pre-approved. Per the <a href="https://developers.google.com/workspace/workspace-api-user-data-developer-policy">Workspace user data and developer policy</a>, the permitted categories are email clients with a compose/send/read interface; apps that enhance email for productivity purposes &mdash; explicitly naming CRM, mail merge, delayed sending, <strong>and "providing generative AI summaries"</strong>; and <strong>apps that use information from emails to provide reporting or monitoring services</strong>. Explicitly excluded: one-time or manual email export, storing non-email data in Gmail, and multi-account abuse patterns.</p>
+    <p>Boomerang reads as a monitoring-and-productivity app and should clear the category bar. But Google's <a href="https://workspace.google.com/blog/product-announcements/elevating-user-trust-in-our-api-ecosystems">own announcement of this policy</a> carves out exactly Boomerang's shape for extra friction: users who allow apps to access mail "without their regular direct interaction (for example, services that provide reporting or monitoring to users) will be provided with additional warnings and we will require them to re-consent to access at regular intervals." A background agent is the archetype of that pattern. Plan for periodic forced re-consent as a permanent product constraint, not a bug.</p>
+
+    <h3>The Limited Use policy and the Bedrock hop</h3>
+    <p>Restricted-scope data carries Limited Use obligations that survive verification and apply to raw, aggregated, anonymized, and derived data alike. The load-bearing constraints for Boomerang:</p>
+    <ul>
+      <li><strong>Use must be visible.</strong> Data may only serve user-facing features that are prominent in the app's own interface. Background enrichment that never surfaces to the user is not permitted.</li>
+      <li><strong>No advertising, ever.</strong> Restricted-scope data may never be used or transferred for ads of any kind, including personalized or interest-based.</li>
+      <li><strong>Human access is presumptively prohibited</strong>, with narrow exceptions for explicit user consent, security investigations, legal compliance, and aggregated-anonymized internal operations. Debugging against real user mailboxes needs an explicit consent path.</li>
+      <li><strong>No model training.</strong> The policy prohibits "transferring, selling, or using user data to create, train, or improve a machine learning or artificial intelligence model beyond that specific user's personalized model for the appropriate use case or user-facing feature."</li>
+    </ul>
+    <div class="note stopper">
+      <h4>Direct hit on a sketch item</h4>
+      <p>The stretch goal to "teach the model the pattern of order receipt email / label / QR" is the prohibited case, if it means fine-tuning or improving a shared model on user mail. Per-user personalization is allowed; a model that gets better for everyone because it saw one user's receipts is not. Inference itself is fine &mdash; sending message content to Bedrock is a service-provider transfer, and AWS's no-training terms for Bedrock make that defensible &mdash; but it should be documented in the privacy policy and named in the verification submission, because reviewers ask.</p>
+    </div>
+
+    <h3>What the POC can do today, unverified</h3>
+    <p>This is where the practical answer lives, and where the default settings actively work against Boomerang. There are two unverified configurations and they behave very differently.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Testing versus unverified Production. The refresh token row is the one that decides whether passive monitoring can be demoed at all.</caption>
+        <thead>
+          <tr><th></th><th>Testing</th><th>In production, unverified</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Who can authorize</td><td>Only accounts listed as test users</td><td>Any Google account</td></tr>
+          <tr><td>User ceiling</td><td class="num">100 listed testers</td><td class="num">100 new users, lifetime</td></tr>
+          <tr><td>Cap resets?</td><td>No</td><td>No &mdash; per Google, "cannot be reset or changed"</td></tr>
+          <tr><td>Consent screen</td><td>Unverified-app warning</td><td>Unverified-app warning</td></tr>
+          <tr><td><strong>Refresh token life</strong></td><td><span class="tag stop">7 days</span> then revoked</td><td><span class="tag ok">Indefinite</span> under normal rules</td></tr>
+          <tr><td>Setup effort</td><td>Add each tester by email</td><td>One click: "Publish app"</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The seven-day rule is specific and easy to miss: for an OAuth client with External user type and Testing publishing status, Google revokes refresh tokens after seven days unless the only scopes requested are <code>openid</code>, <code>userinfo.email</code>, and <code>userinfo.profile</code>. Any Gmail scope puts you in the revoked bucket. A demo built in Testing mode will work beautifully on day one and be dead on day eight, with every tester needing to re-consent.</p>
+
+    <div class="note">
+      <h4>The single highest-leverage move for the POC</h4>
+      <p>Switch the OAuth consent screen to <strong>In production</strong> immediately, without submitting for verification. You keep the unverified warning screen and the 100-user cap &mdash; neither of which matters for a demo &mdash; and you escape the seven-day token revocation. Passive background monitoring becomes demonstrable. Spend the 100 slots deliberately: they are a lifetime allowance on that Cloud project and there is no way to get them back.</p>
+    </div>
+
+    <p>Other unverified-mode facts worth knowing: refresh tokens are also revoked when a user changes their Google password if the token carries Gmail scopes, and after six months of non-use. Google caps live refresh tokens at 100 per account per client ID, silently evicting the oldest. For push-based monitoring, <code>users.watch</code> plus Cloud Pub/Sub works while unverified, but the watch must be renewed at least every seven days regardless of publishing status, notifications are capped at one per second per user, and each watch call costs 100 quota units against a daily project budget in the hundreds of millions. API quota is not the binding constraint at POC scale; token lifetime is.</p>
+
+    <h3>If you do need the API: the alternatives, honestly rated</h3>
+
+    <div class="options">
+      <div class="opt">
+        <div class="t">Aggregator's verified project</div>
+        <p>Nylas offers a Shared GCP App and Unipile a pre-verified CASA Tier 2 OAuth client. You inherit their verification and skip both gates &mdash; days instead of months.</p>
+        <p>The catch is identity: the consent screen shows <em>their</em> brand, not Boomerang's, and Google's OAuth policies require branding to accurately represent the app. Nylas gates this behind contract plans. Per-connection pricing accumulates.</p>
+        <div class="verdict-line">Fastest path &middot; brand and cost tradeoff</div>
+      </div>
+      <div class="opt">
+        <div class="t">Workspace Add-on scopes</div>
+        <p><code>gmail.addons.current.message.readonly</code> is sensitive, not restricted &mdash; app verification only, no CASA, no annual audit.</p>
+        <p>But it grants access to exactly one message, only while the user has it open in an add-on. It cannot see history and cannot run in the background. It eliminates Boomerang's first pillar rather than enabling it.</p>
+        <div class="verdict-line">Cheap &middot; incompatible with the product</div>
+      </div>
+      <div class="opt">
+        <div class="t">Extension reads the page</div>
+        <p>The route this brief now recommends, covered in full above. No OAuth scope, so neither gate applies &mdash; and retailer order pages are richer than receipts.</p>
+        <p>Chrome Web Store Limited Use still governs the data, and the August 2026 tightening raises the disclosure bar. Passive background monitoring degrades to user-triggered sync.</p>
+        <div class="verdict-line">No CASA &middot; different policy surface</div>
+      </div>
+      <div class="opt">
+        <div class="t">User-forwarded receipts</div>
+        <p>The user sets a Gmail filter forwarding order confirmations to a Boomerang address. No Google scopes, no verification, no assessment, no annual fee.</p>
+        <p>Costs the zero-config magic and adds onboarding friction, but it is fully compliant, works today, and is a credible fallback for users who refuse inbox access even after you are verified.</p>
+        <div class="verdict-line">Fully compliant &middot; onboarding friction</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Analysis</h2>
+    <p><strong>The extension reframing is not a loophole, it is a better product.</strong> It is tempting to read "skip the Gmail API" as a compliance dodge, but the strongest argument for reading retailer order pages has nothing to do with policy. A receipt email is a stale snapshot; the order page is live state, it declares return eligibility rather than implying it, and it is the surface the agent has to operate on anyway. Boomerang's job is not to understand email &mdash; it is to understand orders. Email was only ever a proxy for that, and a lossy one. The compliance saving is a side effect of aiming at the right data.</p>
+    <p><strong>Going fully API-free changes the shape of the risk, not the amount of it.</strong> Zero OAuth scopes removes a cost that is knowable, budgetable, and bounded &mdash; $540 a year and a queue you wait in once. What it buys instead is an unbounded maintenance liability spread across Gmail's DOM, Calendar's URL contract, and one parser per retailer, none of which are versioned, documented, or under any obligation to stay put. That is very likely the right trade for a POC, where the queue would eat the whole timeline and the parser count is small. It becomes a genuinely open question at scale, when the retailer list is long and a silent layout change means the product quietly stops noticing orders. Worth deciding consciously rather than by default: the API route is not gone, it is deferred, and the moment to reconsider it is when parser maintenance starts costing more than $540 a year of engineering attention.</p>
+    <p><strong>The template-URL pattern is the cleanest thing in this design, and it generalizes.</strong> It works because it does not ask for access at all &mdash; it hands the user a prefilled form on a surface they already trust and lets them commit the action themselves. Every property that makes it attractive here (no credential, no scope, no DOM coupling, no permission prompt, and an audit point the user actually sees) is worth looking for elsewhere in the product before reaching for either an API or a scraper. It also quietly solves an agent-design problem the sketch does not address: how a user reviews what the agent decided before it takes effect.</p>
+    <p><strong>The honest cost is the passive-monitoring pillar.</strong> The sketch's first act is an agent that quietly watches and surfaces return windows before the user thinks to ask. A content script cannot do that unattended &mdash; it sees only rendered pages. The realistic designs are a sync that runs when the user naturally visits a retailer's site, an explicit "check my orders" action, or a periodic prompt. All three are weaker than the sketch's promise, and the product should decide now which compromise it is making rather than discovering it during the demo. Notably, the Gmail API route does not fully rescue this either: monitoring-class apps are exactly what Google flags for extra warnings and forced periodic re-consent.</p>
+    <p><strong>Chrome Web Store review turns on disclosure, not on technique.</strong> The precedent extensions survive because their story is airtight and simple: local only, nothing transmitted, three narrow permissions. Boomerang's story is longer &mdash; it reads order pages, sends parsed data to a server, and runs it through a model. None of that is prohibited, but every step needs to appear in the listing, the privacy policy, and the permission justifications, and the code has to match. Mismatches between stated and actual behavior are the fastest documented path to rejection. Budget real time for writing these artifacts; they are the deliverable that gets you approved.</p>
+    <p><strong>Permission architecture is worth designing early.</strong> Choosing <code>activeTab</code> plus <code>optional_host_permissions</code> over a broad static host list is a one-hour decision at the start and a painful refactor later. It avoids the in-depth review flag, shortens the wait, and makes the install prompt far less alarming for a product whose entire value proposition requires trust.</p>
+    <p><strong>The gate is cheap in dollars and expensive in everything else.</strong> Five hundred and forty dollars is a rounding error against a seed budget. The costs that actually bite are the six-to-twelve-week calendar delay before any real user can connect, the annual recurrence that never ends, and the architectural constraints the policy imposes on how Boomerang can use what it reads. Teams routinely budget for the assessment fee and get surprised by the other three.</p>
+    <p><strong>The security assessment is testing your infrastructure, not your product.</strong> Both first-hand accounts describe findings that were entirely about deployment hygiene &mdash; CORS headers, TLS ciphers, security headers, external asset loading. Boomerang's Terraform-and-EC2 setup is where those findings will land. Running OWASP ZAP and Qualys SSL Labs against a staging environment early, and fixing what they surface, converts the assessment from a multi-round negotiation into a two-day formality. The questionnaire &mdash; 50 to 54 questions on encryption, authentication, data handling, and vulnerability management &mdash; is answerable in an afternoon if the infrastructure story is already coherent.</p>
+    <p><strong>Verification pressure should shape the scope request now, not later.</strong> Reviewers reject over-broad scope requests, and the narrowest-necessary justification is a written artifact you will have to defend. It is worth asking seriously whether <code>gmail.metadata</code> can carry the MVP: sender identifies the retailer, the date establishes the return window, and subject lines routinely carry the order number verbatim. That covers "gather orders in the last 30 days and rank by urgency" without ever reading a message body. It does not reduce the compliance burden by one dollar, but it makes the verification narrative dramatically easier and shrinks the blast radius of a breach. Escalate to <code>gmail.readonly</code> only when body parsing proves necessary for return links and line items &mdash; and be ready to show why.</p>
+    <p><strong>The monitoring pattern is a permanent product tax.</strong> Google has said in writing that apps accessing mail without regular direct user interaction get extra warnings and periodic forced re-consent. Boomerang is exactly that app. The design should assume a recurring re-authorization moment and make it feel like a feature &mdash; a monthly "here's what I tracked, keep watching?" check-in &mdash; rather than a mysterious permissions prompt that churns users.</p>
+    <p><strong>For a POC, do nothing and publish anyway.</strong> This applies only if a Google OAuth scope comes back into play, which the current architecture avoids. Should one return, the correct posture for the next few months is to skip verification entirely, publish the consent screen to Production to preserve refresh tokens, keep the tester list under 100, and build. Start the verification clock only when there is a real launch date, because the twelve-month revalidation timer starts from the Letter of Validation &mdash; verifying too early means paying for a year you spend pre-launch.</p>
+  </section>
+
+  <section>
+    <h2>Open questions</h2>
+    <ul>
+      <li><strong>How stable is the Calendar template URL, contractually?</strong> It has worked for over a decade and the whole web depends on it, but it is a convention rather than a documented, versioned API surface. Nothing found in this research is a Google commitment to keep it working or to keep its parameters unchanged. The practical risk is low and the failure mode is graceful &mdash; a broken parameter yields an empty event form, not a wrong event &mdash; but it should be a monitored dependency, not an assumed one.</li>
+      <li><strong>What does the product do when it needs to know the user is free?</strong> The recommendation above is to design the requirement away and let the user resolve conflicts visually in the prefilled form. That works for a single proposed pickup. It does not obviously work if the agent later needs to choose among slots, batch several returns, or reschedule without asking. Whether the no-read design holds as the scheduling logic gets more ambitious is untested.</li>
+      <li><strong>How many retailers can you actually parse?</strong> The Amazon precedent extensions cover one retailer with a stable, well-studied layout. Boomerang implicitly promises J.Crew, Target, and the long tail. Each is a bespoke parser against an unversioned DOM that changes without notice. Nothing in this research establishes how many retailers are tractable or what the ongoing maintenance load looks like &mdash; that needs a spike against three or four real order pages before it becomes a roadmap commitment.</li>
+      <li><strong>Does reading Gmail's UI breach Google's terms?</strong> Unresolved above, and it stays unresolved. If Route A is ever seriously considered, this warrants a direct read of the Google Terms of Service and, ideally, counsel &mdash; not an inference from what Streak has gotten away with.</li>
+      <li><strong>How does Chrome Web Store review treat an AI-backed shopping agent in practice?</strong> The August 2026 update signals closer scrutiny of AI-adjacent extensions, but there is no published guidance on how reviewers weigh an extension that sends page content to a third-party model. Recent approvals and rejections of comparable extensions would be the best available evidence.</li>
+      <li><strong>AL1 or AL2?</strong> Google assigns the assurance level and does not publish the criteria beyond "user count, requested scopes, and other application-specific signals." A pre-launch consumer app with a small user base most likely draws AL1, but this is unknowable until Trust &amp; Safety makes contact, and it is the difference between roughly $540 and roughly $4,500.</li>
+      <li><strong>Current lab pricing.</strong> The comparison table reflects 2024&ndash;2025 rate cards from secondary sources. Get direct quotes from TAC Security and one alternate before budgeting; rates and the availability of unlimited-revalidation plans move.</li>
+      <li><strong>How durable is the aggregator path?</strong> Vendors market shared verified OAuth clients as a clean bypass, and Nylas documents it explicitly. Whether Google tolerates a consumer-facing product shipping under a vendor's consent-screen identity long-term is a judgment call the sources do not settle, and Google reserves the right to suspend apps that misrepresent identity.</li>
+      <li><strong>Chrome extension specifics.</strong> None of the sources address how the 100-user cap and the unverified warning behave for an OAuth client distributed through the Chrome Web Store, or whether Chrome Web Store review adds its own restricted-scope gate. Worth confirming directly before committing to the extension as the primary distribution channel.</li>
+      <li><strong>Real end-to-end timelines in 2026.</strong> Google says "several weeks" and vendors say six to twelve. Public developer-forum threads show restricted-scope submissions sitting for months. A search of recent developer forum posts for apps of comparable shape would sharpen the estimate.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Sources</h2>
+    <ol class="sources">
+      <li><a href="https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification">Restricted scope verification &mdash; Google for Developers</a><div class="desc">Primary source for the verification sequence, the five exemption categories, the "from or through a server" assessment trigger, and the "several weeks" timeline.</div></li>
+      <li><a href="https://support.google.com/cloud/answer/13464325">Restricted scopes &mdash; Google Cloud Console Help</a><div class="desc">Authoritative list of which Gmail scopes are classified restricted.</div></li>
+      <li><a href="https://developers.google.com/workspace/gmail/api/auth/scopes">Choose Gmail API scopes &mdash; Google for Developers</a><div class="desc">Full scope-by-scope classification including the sensitive add-on scopes and non-sensitive <code>gmail.labels</code>.</div></li>
+      <li><a href="https://support.google.com/cloud/answer/13465431">Security assessment &mdash; Google Cloud Console Help</a><div class="desc">Google's description of CASA, the AL1/AL2 assurance levels, assignment factors, and annual revalidation.</div></li>
+      <li><a href="https://appdefensealliance.dev/casa/casa-tiering">Assurance Levels &mdash; App Defense Alliance</a><div class="desc">Definitions of AL1 (evidence reviewed by a lab) versus AL2 (lab tests the live app and infrastructure), and who assigns them.</div></li>
+      <li><a href="https://appdefensealliance.dev/casa/tier-2/tier2-overview">CASA Tier 2 Process &mdash; App Defense Alliance</a><div class="desc">The four-phase process, the deprecation of pure self-scanning, and the Letter of Validation.</div></li>
+      <li><a href="https://developers.google.com/workspace/workspace-api-user-data-developer-policy">Google Workspace user data and developer policy</a><div class="desc">Limited Use requirements, the permitted and prohibited app types for Gmail restricted scopes, and the AI/ML training prohibition.</div></li>
+      <li><a href="https://workspace.google.com/blog/product-announcements/elevating-user-trust-in-our-api-ecosystems">Elevating user trust in our API ecosystem &mdash; Google Workspace Blog</a><div class="desc">Google's statement that monitoring/reporting apps receive additional warnings and periodic forced re-consent.</div></li>
+      <li><a href="https://support.google.com/cloud/answer/7454865">Unverified apps &mdash; Google Cloud Console Help</a><div class="desc">The unverified-app screen and the 100-new-users lifetime cap.</div></li>
+      <li><a href="https://support.google.com/cloud/answer/15549945">Manage App Audience &mdash; Google Cloud Console Help</a><div class="desc">Testing versus In production publishing status, the tester limit, and confirmation that the cap cannot be reset.</div></li>
+      <li><a href="https://developers.google.com/identity/protocols/oauth2">Using OAuth 2.0 to Access Google APIs</a><div class="desc">The seven-day refresh token rule for External + Testing, the Gmail password-reset revocation, the six-month inactivity rule, and the 100-token-per-client limit.</div></li>
+      <li><a href="https://dev.to/rem4ik4ever/my-saas-passed-casa-tier-2-assessment-and-yours-can-to-here-is-how-1b20">My SaaS passed CASA Tier 2 &mdash; dev.to</a><div class="desc">First-hand account: TAC Security at $720 with unlimited revalidation, DAST over SAST, 3&ndash;4 day scan, 50+ question questionnaire.</div></li>
+      <li><a href="https://meetorbis.com/blog/how-we-passed-google-casa-tier-2-with-claude">How We Passed Google CASA Tier 2 &mdash; Orbis</a><div class="desc">Second first-hand account: TAC Security at $540, 54-question questionnaire, and the four infrastructure-level findings. Its tier taxonomy conflicts with Google's docs.</div></li>
+      <li><a href="https://www.switchlabs.dev/post/casa-tier-2-tier-3-security-review-providers-pricing-and-the-cheapest-option">CASA Tier 2 &amp; Tier 3 providers and pricing &mdash; Switch Labs</a><div class="desc">The lab-by-lab pricing and turnaround comparison table, reflecting 2024-era rate cards.</div></li>
+      <li><a href="https://deepstrike.io/blog/google-casa-security-assessment-2025">Google CASA 2025: Tiers, Costs &amp; Compliance &mdash; DeepStrike</a><div class="desc">Corroborating cost bands ($540&ndash;$1,800 Tier 2, ~$4,500 Tier 3) and 1&ndash;3 / 2&ndash;4 week turnarounds.</div></li>
+      <li><a href="https://www.nylas.com/blog/google-oauth-app-verification/">Google OAuth Verification: Costs, Timelines, Process &mdash; Nylas</a><div class="desc">Source of the widely-quoted $15,000&ndash;$75,000 figure, and the verification checklist.</div></li>
+      <li><a href="https://developer.nylas.com/docs/provider-guides/google/google-verification-security-assessment-guide/">Google verification and security assessment guide &mdash; Nylas Docs</a><div class="desc">Documents the Shared GCP App path that lets customers skip GCP setup, verification, and CASA entirely.</div></li>
+      <li><a href="https://www.unipile.com/gmail-api-scopes-guide/">Gmail API Scopes Explained &mdash; Unipile</a><div class="desc">Vendor perspective on scope minimization and pre-verified OAuth clients; source of the metadata-instead-of-readonly advice this brief corrects.</div></li>
+      <li><a href="https://developer.chrome.com/docs/webstore/program-policies/limited-use">Limited Use &mdash; Chrome Web Store Program Policies</a><div class="desc">Confirms Limited Use covers all user data an extension handles, not just Google API data, and contains no model-training prohibition.</div></li>
+      <li><a href="https://developer.chrome.com/blog/cws-policy-updates-2026">Chrome Web Store policy updates 2026 &mdash; Chrome for Developers</a><div class="desc">The 1 July 2026 announcement, enforced from 1 August 2026: stricter Limited Use, expanded disclosure, new AI-guardrail restrictions.</div></li>
+      <li><a href="https://developer.chrome.com/docs/webstore/program-policies/quality-guidelines-faq">Extensions quality guidelines FAQ &mdash; Chrome for Developers</a><div class="desc">The single purpose policy, "comparison shopping" as an accepted narrow focus, and the shopping-extension host-access example.</div></li>
+      <li><a href="https://developer.chrome.com/docs/webstore/review-process">Chrome Web Store review process</a><div class="desc">How host permissions trigger in-depth review, and the permission justification requirements.</div></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Content_scripts">Content scripts &mdash; MDN Web Docs</a><div class="desc">Content scripts as the only extension component with DOM access, and the isolated-world execution model.</div></li>
+      <li><a href="https://github.com/InboxSDK/InboxSDK">InboxSDK &mdash; GitHub</a> and <a href="https://inboxsdk.github.io/inboxsdk-docs/">its documentation</a><div class="desc">Streak's Gmail DOM abstraction layer, free App ID registration, and the production users that establish the technique.</div></li>
+      <li><a href="https://chromewebstore.google.com/detail/amazon-order-history-repo/mgkilgclilajckgnedgjgnfdokkgnibi">Amazon Order History Reporter</a> and <a href="https://github.com/philipmulcahy/azad">its source</a><div class="desc">Live Chrome Web Store precedent for scraping retailer order pages with auto-pagination; its local-only privacy posture is the contrast case for Boomerang.</div></li>
+      <li><a href="https://chromewebstore.google.com/detail/amazon-order-history-expo/naiofjbaonmbkmkhlldlcijgnimcbake">Amazon Order History Exporter</a><div class="desc">Second shipped precedent; captures order dates, totals, order numbers and item names across paginated history.</div></li>
+      <li><a href="https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification">Sensitive scope verification &mdash; Google for Developers</a><div class="desc">Establishes that reading Google Calendar events is a sensitive scope, requiring verification but no security assessment &mdash; the cost of the Calendar API path that the template URL avoids.</div></li>
+      <li><a href="https://developer.chrome.com/docs/extensions/reference/api/tabs">chrome.tabs API reference &mdash; Chrome for Developers</a><div class="desc">Confirms that <code>chrome.tabs.create</code> needs no host permission to open a URL; host permissions gate script injection and reading sensitive tab properties such as <code>url</code>, <code>title</code> and <code>favIconUrl</code>.</div></li>
+      <li><a href="https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns">Match patterns &mdash; Chrome for Developers</a><div class="desc">The host-permission model behind the content-script and <code>optional_host_permissions</code> recommendations.</div></li>
+      <li><a href="https://support.google.com/calendar/thread/81344786">Google Calendar event template URL parameters</a><div class="desc">The <code>render?action=TEMPLATE</code> parameter set &mdash; <code>text</code>, <code>dates</code>, <code>ctz</code>, <code>details</code>, <code>location</code> &mdash; and confirmation that it is a plain link needing no JavaScript or credential. A long-standing convention rather than a documented, versioned API.</div></li>
+      <li><a href="https://icalendar.org/">iCalendar (RFC 5545)</a><div class="desc">The <code>.ics</code> format used as the cross-provider fallback for Outlook and Apple Calendar.</div></li>
+      <li><a href="https://developers.google.com/workspace/gmail/api/guides/push">Configure push notifications in Gmail API</a><div class="desc">Pub/Sub watch mechanics, the seven-day watch renewal requirement, and the one-notification-per-second-per-user ceiling.</div></li>
+    </ol>
+  </section>
+
+  <footer class="colophon">
+    <span>Boomerang research brief</span>
+    <span>&middot;</span>
+    <span>Compiled 25 August 2026</span>
+    <span>&middot;</span>
+    <span>Pricing figures are secondary-source estimates &mdash; verify before budgeting</span>
+  </footer>
+
+</div>
