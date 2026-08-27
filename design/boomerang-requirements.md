@@ -80,7 +80,7 @@ erDiagram
         string state
     }
     PICKUP {
-        string request_id
+        string booking_intent_id
         string state
         string confirmation_number
         date scheduled_date
@@ -125,7 +125,7 @@ Five attributes deserve a note, because each was added to close a specific gap:
   is indistinguishable from a printed USPS one, and a USPS carrier will not collect the former.
 - **`package_location`** and **`location_note`** hold the user's answer about where the carrier
   should look, in Boomerang's own vocabulary. See FR-3.4.8.
-- **`PICKUP.state`** and **`PICKUP.request_id`** carry the booking lifecycle — `Booking`,
+- **`PICKUP.state`** and **`PICKUP.booking_intent_id`** carry the booking lifecycle — `Booking`,
   `Confirmed`, `Cancelled`, `Collected` — written before the schedule call rather than after it.
   `confirmation_number` is nullable: a pickup in `Booking` does not have one. FR-3.1.5's eviction
   carve-out and FR-3.4.5's lost-response recovery both need this state to be expressible.
@@ -361,6 +361,9 @@ available failure mode, because the user only discovers it after the return wind
 - The extension SHALL record `label_printed` only after the user affirms the label was printed.
 - The system SHALL NOT infer printing from the label page being reached, a download completing, or
   a print dialog opening.
+- The affirmation SHALL write the field and SHALL NOT move the request out of `LabelReady`. Reaching
+  `LabelPrinted` is FR-3.3.9's separate question of whether the box has gone; a user who prints a
+  label and then does nothing with it has a return that is ready, not one that is finished.
 
 #### FR-3.3.7 Selector-first driving, model only on a miss
 
@@ -415,7 +418,7 @@ stateDiagram-v2
     AwaitingLabelChoice --> DroppedOff: user picks free drop off
     AwaitingLabelChoice --> Aborted: user cancels
     Driving --> LabelReady: label page reached
-    LabelReady --> LabelPrinted: user affirms printed
+    LabelReady --> LabelPrinted: the printed label leaves
     LabelPrinted --> [*]
     DroppedOff --> [*]
     HandedOff --> [*]
@@ -424,6 +427,31 @@ stateDiagram-v2
 
 `DroppedOff` is a success terminal. `AwaitingLabelChoice` is where the user's money is at stake and
 is the one state the driver may never pass through unattended.
+
+**This machine has exactly the four terminals named above, and nothing downstream may add a
+fifth.** A `PICKUP` is a separate entity with a lifecycle of its own — `Booking`, `Confirmed`,
+`Collected`, `Abandoned` — and it runs *alongside* this machine rather than inside it. Scheduling a
+pickup is not a transition; cancelling one is not a transition. The two records meet at exactly one
+point, `LabelReady --> LabelPrinted`, and a design that invents a `Done`, a `Cancelled` or a
+`Collected` on this machine has put two lifecycles into one field.
+
+**`LabelPrinted` is reached when the printed label leaves, not when it is printed, and this is an
+amendment to an earlier version of this requirement.** That version transitioned on the FR-3.3.6
+affirmation, which made the request terminal the moment the user said they had printed — before any
+pickup could be scheduled against it. That could not be reconciled with FR-3.4.5a and FR-3.4.6,
+which both place the request at `LabelReady` while a pickup exists and require it to be
+**non-terminal** there, for a reason those requirements state: a terminal request stops protecting
+its order from eviction while the return window is still running. The two are separated as follows,
+and the separation is the whole of the fix:
+
+- **`label_printed` is a field, and the FR-3.3.6 affirmation writes it.** The request stays at
+  `LabelReady`. This is what FR-3.4.4's schedule precondition reads.
+- **`LabelPrinted` is a state, and the box leaving is what reaches it** — a scheduled pickup
+  observed collected, or the user reporting they dropped the box off or handed it over. At that
+  point the return has completed by the route its printed label was for, and being terminal is
+  correct: there is nothing left to drop off and no window left to protect.
+
+An affirmed print is therefore a return that is *ready* to complete, not one that has.
 
 - The extension SHALL persist a `DRIVER_SESSION` — current state, retailer key, adapter step key,
   driven tab ID and tab URL, and a last-progress timestamp — into `chrome.storage.local` on
@@ -445,6 +473,23 @@ case. A `runtime.connect` port between the popup and the worker extends the work
 popup is open and is worth having, but it is an optimisation: the persisted record is what makes
 the flow correct.
 
+#### FR-3.3.10 One active return per item
+
+- The extension SHALL NOT start a return for an item that already has a return request in a
+  non-terminal state. `LabelPrinted`, `DroppedOff`, `HandedOff` and `Aborted` are terminal; every
+  other state of FR-3.3.9 is not.
+- The extension SHALL offer to resume the existing return instead, naming the state it is in.
+- The extension SHALL permit a new return for an item whose previous request reached a terminal
+  state, and SHALL retain the terminal request rather than overwriting it.
+
+Two drivers on one item is the failure this prevents, and it is not hypothetical: a user who starts
+a return, gets interrupted at `AwaitingConfirm`, and comes back through the popup an hour later has
+no way to tell that the first flow is still live. Both would drive the retailer's flow, and the
+retailer would issue two labels for one item — one of which is wasted, and neither of which the
+user can tell apart. The rule is checked against the item, not the tab, because the first flow may
+have no tab left; FR-3.3.9's persisted session is what makes a non-terminal request observable
+after the worker that created it is gone.
+
 ### 3.4 Carrier Pickup
 
 #### FR-3.4.1 Eligibility is a hard gate
@@ -452,6 +497,11 @@ the flow correct.
 - The server SHALL call USPS eligibility before every schedule call, without exception.
 - The server SHALL NOT cache an eligibility result across addresses or reuse a prior result.
 - The server SHALL return `address-not-serviceable` when eligibility fails.
+- **A negative eligibility answer is a successful response, not an error.** The eligibility endpoint
+  SHALL return its normal result body carrying an explicit negative and the `address-not-serviceable`
+  reason. The error shape of §4.2 SHALL be used only where a caller asked for something that could
+  not be done — a schedule attempted against an address eligibility has refused. One endpoint SHALL
+  NOT return two different body shapes under the same status code.
 
 #### FR-3.4.2 Graceful second answer
 
@@ -484,11 +534,11 @@ silently dropped.
   client's bugs, a stale build, and malformed requests. They SHALL NOT be described as guarantees.
 
 `label_printed` and `label_carrier` arrive in the request body from the same caller whose honesty
-they are meant to check, and the server holds no state that could corroborate either. FR-6.5's CORS
+they are meant to check, and the server holds no state that could corroborate either. NFR-6.5's CORS
 allowlist is already conceded to be forgeable by any non-browser caller, so the two claims cannot
 both stand. The residual is worth stating plainly: a forged request can book a real USPS carrier
 visit to a real address for a box that has no postage on it. Nothing in this design detects that,
-and the reserved concurrency limit of FR-6.7 is the only bound on how often it can happen.
+and the reserved concurrency limit of NFR-6.7 is the only bound on how often it can happen.
 
 #### FR-3.4.5 Schedule parameters
 
@@ -518,7 +568,11 @@ and the reserved concurrency limit of FR-6.7 is the only bound on how often it c
   produced by the schedule-time eligibility call and is never seen by the client until the response
   carries it back.
 - The extension SHALL write a provisional record before the schedule call — state `Booking`, a local
-  `request_id`, its own best-known address, `standardized` false — and SHALL promote it on response.
+  `booking_intent_id`, its own best-known address, `standardized` false — and SHALL promote it on
+  response. **This identifier is not the `request_id` of §4.2.** That one is the server's opaque
+  per-request correlator, which by its own rule correlates nothing across requests; this one is a
+  client-generated key that has to survive at least the schedule call and its response, and reusing
+  the name for both would make the §4.2 rule read as though it had been broken.
   A record left with `standardized` false SHALL require user confirmation before a refresh or a
   cancel is attempted against it.
 - The extension SHALL NOT overwrite that snapshot when the user later edits their address. Editing
@@ -527,10 +581,16 @@ and the reserved concurrency limit of FR-6.7 is the only bound on how often it c
 - The extension SHALL NOT rely on a stored `ETag` for later cancellation. The ETag is valid for
   one hour or one use; a cancellation a day later SHALL refresh the pickup to obtain a current
   ETag, then cancel.
-- Cancelling a pickup SHALL return its `RETURN_REQUEST` to `LabelReady` and SHALL NOT move it to a
+- Cancelling a pickup SHALL leave its `RETURN_REQUEST` at `LabelReady` and SHALL NOT move it to a
   terminal state. The label is printed and the box is real; the return can still complete by
   drop-off or by a second pickup. Terminating it would drop the item out of the ranked list while
   its return window is still running.
+- Where a refresh instead reveals that the carrier has already collected the box, the extension
+  SHALL move the `RETURN_REQUEST` to `LabelPrinted` and SHALL NOT attempt a cancel. This is the one
+  transition a pickup causes on the return machine, and it is the FR-3.3.9 edge for the box having
+  left: the label was printed, it went with the parcel, and there is no further step the user can
+  take. Leaving the request at `LabelReady` would keep offering a drop-off for something already in
+  the mail stream.
 - The server SHALL expose refresh and cancel operations that accept the confirmation number and
   address supplied by the caller.
 
@@ -726,7 +786,7 @@ user has seen the extension do something useful rather than before.
   adapter step key, and a per-session count of steps driven, so that adapter breakage is detectable.
 - The system SHALL NOT attach an install identifier, a session identifier, or any other correlator
   to that data. It SHALL be aggregated in the clear and SHALL NOT be reusable to link two requests
-  to one user, per FR-6.2.
+  to one user, per NFR-6.2.
 
 ---
 
@@ -757,20 +817,29 @@ a person:
 {
   "reason": "kebab-case-code",
   "message": "One sentence a human can act on.",
-  "request_id": "opaque identifier for this request"
+  "request_id": "opaque identifier for this request",
+  "details": {}
 }
 ```
+
+`details` is **optional and defaults to absent**. It exists for the one case where telling the user
+what went wrong is not enough to let them act: `location-not-serviceable` carries the reduced set of
+package locations the carrier will honour, because FR-3.4.8 forbids substituting one on the user's
+behalf and a re-ask needs the list. A reason code that adds a `details` payload SHALL say so in the
+table below; every other reason SHALL omit the key entirely rather than send it empty. Clients SHALL
+tolerate an unrecognised `details` shape the same way they tolerate an unrecognised `reason` — the
+three required fields are the contract, and `details` is an extension point with one occupant.
 
 | `reason` | Meaning |
 |---|---|
 | `unrecognized-page` | DOM did not parse as an order page |
 | `wrong-carrier-label` | The printed label is not USPS postage, so no USPS pickup is possible |
-| `address-not-serviceable` | USPS pickup unavailable at this address |
-| `location-not-serviceable` | The stored package location cannot be honoured by this carrier |
+| `address-not-serviceable` | USPS pickup unavailable at this address. On the eligibility endpoint this is **a successful negative answer**, not an error — see FR-3.4.1; as an error shape it appears only when a schedule was attempted anyway |
+| `location-not-serviceable` | The stored package location cannot be honoured by this carrier. **Carries `details.servable_locations`** — the reduced set to re-ask from |
 | `etag-expired` | Refresh the pickup before amending or cancelling |
 | `upstream-unavailable` | USPS or Bedrock failed; safe to retry |
 | `payload-too-large` | DOM payload exceeded the configured ceiling |
-
+| `label-not-printed` | The box has no printed label yet, so a pickup cannot be scheduled |
 | `client-too-old` | The installed extension predates a required API change; updating fixes it |
 
 A bare status code is insufficient; user interface branches on `reason`.
@@ -843,14 +912,23 @@ sequenceDiagram
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `BEDROCK_MODEL` | Model identifier, carries the `anthropic.` prefix on Bedrock | `anthropic.claude-opus-5` |
-| `AWS_REGION` | Region hosting the Bedrock model | `us-east-1` |
-| `USPS_CLIENT_ID` | Application client ID for USPS OAuth | none, required |
-| `USPS_CLIENT_SECRET` | Application client secret | none, required |
+| `ENVIRONMENT` | `dev` or `prod`; scopes SSM paths and selects the USPS base URL | none, required |
+| `CARRIER_ADAPTER` | Which carrier adapter the server constructs at startup: `mock` or `usps`. This is the parameter the two USPS credentials are conditionally required *by* | `mock` |
+| `BEDROCK_MODEL` | **Regional inference profile** identifier, not a bare model ID; a bare ID fails at invoke | **none, required** |
+| `BEDROCK_MODEL_PARSE` | Optional per-call-site override for the ingest parse | falls back to `BEDROCK_MODEL` |
+| `BEDROCK_MODEL_ACTION` | Optional per-call-site override for the driver fallback, which has the tighter budget of NFR-6.4 | falls back to `BEDROCK_MODEL` |
+| `AWS_REGION` | Region hosting the configured inference profile | `us-east-1` |
+| `USPS_CLIENT_ID` | Application client ID for USPS OAuth. **Read from Parameter Store, not the environment** | none; required when the USPS adapter is selected |
+| `USPS_CLIENT_SECRET` | Application client secret. **Read from Parameter Store, not the environment** | none; required when the USPS adapter is selected |
 | `USPS_BASE_URL` | Swap for sandbox; sandbox takes the same credentials | `https://apis.usps.com` |
 | `MAX_INGEST_BYTES` | Ceiling on an accepted DOM payload | `262144` |
 | `BEDROCK_MAX_TOKENS` | Output ceiling per model call | `4096` |
 | `LOG_LEVEL` | Structured log level | `INFO` |
+| `BEDROCK_TIMEOUT_PARSE_MS` | Deadline on a single Bedrock invoke at the **order-parse** call site; exceeding it raises `upstream-unavailable` | `9000` |
+| `BEDROCK_TIMEOUT_ACTION_MS` | Deadline on a single Bedrock invoke at the **action-fallback** call site; exceeding it raises `upstream-unavailable` | `4500` |
+| `USPS_TIMEOUT_MS` | Deadline on a single USPS call; exceeding it raises `upstream-unavailable` | `8000` |
+| `MIN_CLIENT_VERSION` | Lowest extension version the server will serve; below it, `client-too-old` | `0.1.0` |
+| `FUNCTION_TIMEOUT_MS` | The function's own timeout, supplied by the infrastructure from the same value it gives the function. Every upstream deadline above SHALL validate as below it | `60000` |
 
 ### 5.2 Extension configuration
 
@@ -861,7 +939,50 @@ sequenceDiagram
 | `INGEST_DEBOUNCE_MS` | Quiet period after the last mutation before extracting | `800` |
 | `URGENCY_CRITICAL_DAYS` | Days remaining at which an order is styled critical | `3` |
 | `URGENCY_WARN_DAYS` | Days remaining at which an order is styled warning | `7` |
-| `MAX_STORED_ORDERS` | Local retention ceiling before oldest-first eviction | `200` |
+| `MAX_STORED_ORDERS` | Local retention ceiling before oldest-first eviction, ordered by `first_seen_at` | `200` |
+| `PICKUP_SETTLED_AFTER_DAYS` | Days past `scheduled_date` after which a `Confirmed` pickup is inferred `Collected` | `3` |
+| `BOOKING_ABANDONED_AFTER_HOURS` | Hours in `Booking` after which a pickup that never confirmed becomes `Abandoned` | `24` |
+| `MODEL_FALLBACK_TIMEOUT_MS` | Budget for the action-fallback call; exceeding it is treated as `report_stuck`, per NFR-6.4 | `5000` |
+| `API_REQUEST_TIMEOUT_MS` | Deadline on a single request to the server, per attempt. SHALL sit **above** the server's longest upstream deadline so the server answers with a typed `reason` rather than the client giving up first | `12000` |
+| `API_RETRY_BUDGET_MS` | Ceiling on a whole bounded-retry sequence including its backoff. SHALL sit **below** three times `API_REQUEST_TIMEOUT_MS`, so the budget rather than the attempt count ends the sequence | `20000` |
+| `DASHBOARD_ORIGIN` | The single origin permitted to reach the extension through `externally_connectable`, per FR-3.6.3 | The one shipped hostname; see §11 of the high-level design |
+| `EXTENSION_KEY` | The pinned public key that fixes the extension ID, one per environment | The environment's published keypair |
+
+**Every upstream call SHALL have a deadline shorter than the function's own timeout.** The Lambda
+runs to 60 s and holds one of five reserved concurrency slots while it does. A client that has
+already given up — the extension abandons the action fallback at `MODEL_FALLBACK_TIMEOUT_MS` — does
+not release that slot, so an upstream with no deadline converts one slow dependency into an
+availability problem for every other user.
+
+**The Bedrock deadline is per call site, because NFR-6.4 requires the two budgets to be
+configurable independently.** Each SHALL be at or below the NFR-6.4 budget for the call site it
+serves: the parse deadline under 10 s, the action deadline under 5 s. The action default is set
+below the client's own `MODEL_FALLBACK_TIMEOUT_MS` so the server gives up first — a server still
+working on a request the client has already abandoned as `report_stuck` is holding a concurrency
+slot for an answer nobody will read.
+
+**The two USPS credentials are conditionally required, and they are the only two values not read
+from the environment.** `CARRIER_ADAPTER` is what selects between them: the mock carrier adapter is
+the default until USPS API access is granted, so a deployment running against the mock SHALL start
+without them. The selector SHALL be a configuration parameter rather than an inference from whether
+the credentials happen to be present — a deployment that chose its carrier by looking at its secrets
+would silently become a mock deployment the moment a credential fetch failed, which is the failure
+this parameter exists to make impossible. Under `ENVIRONMENT=prod` with `CARRIER_ADAPTER=usps` their
+absence SHALL fail startup rather than fall back — a production
+deployment that silently degrades to a mock returns fabricated confirmation numbers to real users.
+They are read from Parameter Store because a Lambda environment variable is readable by anyone
+holding `GetFunctionConfiguration`, which is a wider audience than the code.
+
+`BEDROCK_MODEL` has no default. Recent Anthropic models on Bedrock are invocable only through a
+regional inference profile, so a bare model ID raises a validation error at invoke time — on a
+user's first parse, inside a Lambda — rather than at deploy. A default here would be a default that
+fails late. It is validated at startup instead; see §8.1 of the high-level design.
+
+**The two API deadlines are a coupled pair and are stated here rather than only in the low-level
+design**, for the reason `MAX_INGEST_BYTES` is: each is defined by its relationship to a value in
+§5.1, and a client-side rule that referenced only a server-side parameter is not implementable.
+`API_REQUEST_TIMEOUT_MS` above `BEDROCK_TIMEOUT_PARSE_MS` is what lets a slow parse come back as
+`upstream-unavailable` instead of as a transport failure the client diagnosed for itself.
 
 `MAX_INGEST_BYTES` appears in both tables deliberately and the two values SHALL agree. FR-3.1.3
 requires the *extension* to enforce the ceiling before transmission; the server enforces the same
@@ -875,18 +996,32 @@ only a server-side parameter — as an earlier version of this document did — 
 | `order_page_patterns` | URL patterns identifying an order page | none |
 | `default_return_days` | Assumed window when the page states no policy | system default of 30 |
 | `step_selectors` | Selector map from return-flow step to the element that advances it | none |
-| `return_method_selector` | Where the choice of return methods and their prices is rendered | none |
+| `return_method_options` | Where the choice of return methods is rendered, and what each option means: the container, the repeated option within it, and the label and price within *that*, plus a map from option to the carrier whose postage it yields | none |
+| `label_carrier_patterns` | Per-carrier selectors and patterns — branding, and the tracking-number format — matched against a printed label page **in the browser** to recognise its carrier | none |
 | `supports_printable_label` | Whether a printable label is obtainable at all | none |
 
 `step_selectors` replaces the single `label_path_selector`. Under FR-3.3.7 the adapter drives the
 common path and the model is the exception, which requires selectors for each step rather than one
 selector for the label.
 
+`return_method_options` likewise replaces the single `return_method_selector`. FR-3.3.4 requires
+every option to be presented **with its cost stated**, an unreadable price to be marked *unknown*
+rather than omitted, and nothing to be selected while any price in the set is unknown. That is a
+rule about option/label/price *triples*, and one selector naming a region cannot express a triple —
+so each adapter would have had to re-derive the pairing, and with it the SHALL NOT. The map from
+option to carrier is the first of FR-3.3.5's three sources: the user's own choice, which is why it
+outranks reading the page.
+
+`label_carrier_patterns` is the second of those sources, and it is deliberately scoped to
+client-side matching. FR-3.1.3 prohibits *transmitting* the label page; reading it in the tab is
+not transmission, and this parameter is what lets the extension recognise a carrier without
+asking — and without ever defaulting to one.
+
 ---
 
 ## 6. Non-Functional Requirements
 
-### 6.1 Privacy and data handling
+### NFR-6.1 Privacy and data handling
 
 - The server SHALL NOT persist raw DOM, structured orders, or addresses.
 - The server SHALL NOT log order contents, item titles, addresses, or pickup confirmation numbers
@@ -907,7 +1042,7 @@ architectural claim that the server holds no user data at rest.
 - The system SHALL request no Google OAuth scope of any kind.
 - The extension SHALL never transmit the retailer session cookie or authorization header.
 
-### 6.2 Compliance
+### NFR-6.2 Compliance
 
 - Data collection SHALL be strictly necessary to the single disclosed purpose of handling returns.
 - The adapter-health fields of FR-3.7.3 SHALL be treated as within that purpose: they name
@@ -924,7 +1059,7 @@ architectural claim that the server holds no user data at rest.
   holds no state. A consent that exists only as a click nobody wrote down cannot be produced later,
   which is the only circumstance in which anyone would ask for it.
 
-### 6.3 Resilience
+### NFR-6.3 Resilience
 
 - The extension SHALL degrade to a manual handoff on any unrecognised page state rather than
   guessing.
@@ -934,7 +1069,7 @@ architectural claim that the server holds no user data at rest.
   live implementation differ only by base URL and credential.
 - Server restarts SHALL cause no user-visible data loss, since no user state lives there.
 
-### 6.4 Performance and presentation
+### NFR-6.4 Performance and presentation
 
 - Popup render SHALL NOT block on any network call.
 - The model is called at two call sites with different budgets, and they SHALL be configurable
@@ -957,7 +1092,7 @@ architectural claim that the server holds no user data at rest.
 - An order with no window at all, inferred or read, SHALL be listed as *window unknown* rather than
   omitted. Omission is indistinguishable from the order never having been seen.
 
-### 6.5 Security
+### NFR-6.5 Security
 
 - Secrets SHALL be supplied by environment locally; `.env` is gitignored and `.env.example` is not.
 - Production Bedrock credentials SHALL resolve from the **Lambda execution role**, never from an
@@ -989,7 +1124,7 @@ stored XSS in a privileged extension surface, and an injected far-future `return
 out of the urgency ranking — which is the product's *only* warning that a window is closing. The
 model is a parser operating on hostile input, not a trusted source.
 
-### 6.6 Infrastructure
+### NFR-6.6 Infrastructure
 
 - The chosen region SHALL host the configured Bedrock model.
 - Resource tagging SHALL use provider-level `default_tags` rather than per-resource tag blocks.
@@ -1002,7 +1137,7 @@ places the service on Lambda with no VPC, so there is no security group to restr
 availability zone to span. The `allowed_cidr` validation survives only in the legacy Terraform
 scaffold and is deleted with it.
 
-### 6.7 Abuse and spend containment
+### NFR-6.7 Abuse and spend containment
 
 - The function SHALL set `reserved_concurrent_executions` to a value that makes the maximum hourly
   spend computable and bounded. The PoC value is `5`.

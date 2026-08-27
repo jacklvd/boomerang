@@ -147,7 +147,7 @@ remotely configured behaviour, a category the store treats with suspicion.
 
 **The consequence is stated rather than hidden: adapter update latency is store review latency.**
 When a retailer changes its return flow, the fix is a new extension version and a review cycle,
-typically days. That is the resilience story FR-6.3 actually has, and §8.4 carries it into the
+typically days. That is the resilience story NFR-6.3 actually has, and §8.4 carries it into the
 deployment model. Selector-first driving is what makes it survivable — a miss degrades to a
 supervised model-proposed action rather than a broken flow — but it is a real limitation, and not a
 comfortable one.
@@ -234,7 +234,7 @@ erDiagram
         string state
     }
     PICKUP {
-        string request_id
+        string booking_intent_id
         string state
         string confirmation_number
         date scheduled_date
@@ -275,7 +275,7 @@ erDiagram
 | **Order** | A purchase observed on a retailer page; the root of the graph | `retailer`, `return_by`, `window_inferred` | Contains items |
 | **OrderItem** | A single returnable line | `title`, `price`, `returnable` | Belongs to an order, may have a return |
 | **ReturnRequest** | An attempt to return one item; an item may have several over time | `reason_code`, `tracking_number`, `label_carrier`, `label_printed`, `reminder_offered_at`, `state` | Belongs to an item, may have a pickup |
-| **Pickup** | A booked USPS collection, or an attempt to book one | `request_id`, `state`, `confirmation_number`, `scheduled_date` | Belongs to a return, owns one booked-address snapshot |
+| **Pickup** | A booked USPS collection, or an attempt to book one | `booking_intent_id`, `state`, `confirmation_number`, `scheduled_date` | Belongs to a return, owns one booked-address snapshot |
 | **BookedAddress** | An immutable copy of the address a pickup was actually booked against | `postal_code`, `standardized`, `package_location` | Owned by exactly one pickup, never edited |
 | **DriverSession** | The durable record of an in-progress return, rehydrated after the service worker is terminated | `retailer_key`, `adapter_step_key`, `tab_id`, `tab_url`, `last_progress_at` | Owned by at most one return request |
 | **Address** | The current collection address, standardized by USPS, plus where the carrier should look | `postal_code`, `standardized`, `package_location` | Singleton in the store, seeds new bookings |
@@ -297,7 +297,7 @@ invariant: **at most one return request per item may be in a non-terminal state*
 the current request every surface shows. Terminal requests are kept rather than overwritten, because
 "you already tried this and stopped" is the context a user needs when they come back to it.
 
-**`PICKUP` has a lifecycle, and the entity has to carry it.** `request_id` is generated locally and
+**`PICKUP` has a lifecycle, and the entity has to carry it.** `booking_intent_id` is generated locally and
 written *before* the schedule call; `state` runs over `Booking`, `Confirmed`, `Cancelled`,
 `Collected` and `Abandoned`. `confirmation_number` is therefore nullable — a pickup in `Booking` does not have one
 yet, and may never get one if the response is lost. Two mechanisms elsewhere in this design need
@@ -438,8 +438,10 @@ sequenceDiagram
     SW->>SW: merge into local storage
     POPUP->>USER: shows the orders it just found
     POPUP->>USER: offers to watch this retailer from now on
-    USER->>POPUP: grants the host permission
-    SW->>SW: permissions request, then registerContentScripts
+    USER->>POPUP: clicks grant, which is the gesture the request needs
+    POPUP->>POPUP: chrome permissions request, issued from the page
+    POPUP-->>SW: grant recorded
+    SW->>SW: registerContentScripts for the granted host
 ```
 
 The order of those last three steps is the whole of FR-3.7.2. The standing permission is requested
@@ -448,6 +450,12 @@ results in front of them — not at install time against an empty popup. Two Chr
 this the only available shape: `chrome.permissions.request` must itself be called from a user
 gesture, and `chrome.scripting.registerContentScripts` is what converts a granted host permission
 into automatic ingestion on later visits.
+
+**The request has to be issued by the popup, not by the service worker.** A worker has no user
+gesture to spend — a message forwarded to it from the click does not carry one, and
+`chrome.permissions.request` rejects. Only the registration that follows a granted permission
+belongs in the worker. This is a placement constraint rather than a policy one, and it is the
+reason the popup appears in the sequence above as the caller rather than as a relay.
 
 Declining the grant is a supported end state, not an error. The extension keeps working exactly as
 it did on the first run — every scan is a click — and does not re-prompt on a schedule.
@@ -571,7 +579,7 @@ So `POST /pickups` returns the standardized address it submitted, alongside the 
 number, the ETag and the scheduled date, and the write happens in two steps:
 
 - **Before the call**, the client persists a provisional record: a `PICKUP` in state `Booking` with
-  a locally generated `request_id` and its own best-known address, marked `standardized = false`.
+  a locally generated `booking_intent_id` and its own best-known address, marked `standardized = false`.
   This is a recovery aid, not a snapshot — it exists so a lost response leaves evidence.
 - **After the response**, the client promotes the record to `Confirmed` and overwrites the snapshot
   from the address the server returned, with `standardized = true`.
@@ -594,7 +602,7 @@ would trade the design's central property for one failure path. So the mitigatio
 client, which does have durable state:
 
 - **The extension writes a booking intent record before it calls.** A `PICKUP` in state `Booking`,
-  carrying a locally generated `request_id` and a provisional, unstandardized address, is persisted
+  carrying a locally generated `booking_intent_id` and a provisional, unstandardized address, is persisted
   first. See the preceding subsection for why that address is provisional and not the snapshot.
 - **A lost response leaves that record in `Booking`, and the UI says so honestly** — "we could not
   confirm this went through" — rather than showing either a success or a clean failure.
@@ -650,9 +658,18 @@ signal in the §6.8 sense — a retailer whose prices stop being readable has ch
 #### Cancelling a pickup does not cancel the return
 
 A cancelled `PICKUP` leaves a real, printed label and a real box. §5.3 removes the pickup; it must
-not remove or terminate the `RETURN_REQUEST`, which returns to `LabelReady` — the state it was in
-before a pickup was ever scheduled. From there the user can schedule another pickup or drop the box
-off, and the return reaches `HandedOff` by whichever route is taken.
+not remove or terminate the `RETURN_REQUEST`, which stays at `LabelReady` — where it has been for
+the whole life of the pickup, since FR-3.3.6's print affirmation writes the `label_printed` field
+without moving the state. From there the user can schedule another pickup or drop the box off, and
+the return reaches `LabelPrinted` when the box actually goes.
+
+**The pickup lifecycle runs alongside the return machine and touches it exactly once.** Scheduling
+is not a transition and cancelling is not a transition; the single point of contact is a refresh
+that reports the carrier already collected, which moves the request to `LabelPrinted` because the
+box has left. Anything else a pickup does — booked, abandoned, cancelled — is a fact about the
+`PICKUP` record alone. This is worth stating because the obvious implementation invents a return
+state per pickup outcome, and two lifecycles in one field is how a cancelled pickup ends up looking
+like a finished return.
 
 Terminating the return alongside the pickup would be the more obvious implementation and the wrong
 one: it would drop the item out of the ranked list while the return window is still running, which
@@ -719,7 +736,8 @@ sequenceDiagram
 | Return method prices unreadable | Methods presented with price shown as unknown; nothing auto-selected | "The page didn't show the prices — pick from these" |
 | Calendar tab fails to open | `reminder_offered_at` is not set; the `.ics` download is offered instead | "Couldn't open Calendar — download the reminder instead" |
 | User closes the calendar tab without saving | Indistinguishable from saving, by design. Only the offer is recorded | The reminder is offered again next time the pickup is opened |
-| Pickup cancelled | Pickup removed; the return returns to `LabelReady`, not to a terminal state | "Pickup cancelled — the label is still good, drop it off or book again" |
+| Pickup cancelled | Pickup removed; the return stays at `LabelReady`, not moved to a terminal state | "Pickup cancelled — the label is still good, drop it off or book again" |
+| Cancel finds the box already collected | No cancel is attempted; the pickup reads `Collected` and the return moves to `LabelPrinted`, its FR-3.3.9 terminal for the box having left | "The carrier already picked this up — nothing left to cancel" |
 | Label not confirmed printed | Server rejects the schedule call | "Print the label first" |
 | Reserved concurrency saturated | Requests are throttled at the platform level | "Busy, try again in a moment" |
 | ETag expired mid-flow | Returns `etag-expired` | Transparent; the client refreshes and retries |
@@ -1048,7 +1066,7 @@ count cannot.
 **The disclosure cost is close to zero, and that is the argument for doing it.** This request
 already exists and already carries a full DOM step across the trust boundary. Three identifiers
 naming our own adapter are strictly less sensitive than the payload they travel with, they describe
-Boomerang's internals rather than the user, and they add no new egress path — so FR-6.2's "strictly
+Boomerang's internals rather than the user, and they add no new egress path — so NFR-6.2's "strictly
 necessary" test is met by the same reasoning that admits the fallback itself. They are covered by
 FR-3.7.3's disclosure, which is amended to name them.
 
