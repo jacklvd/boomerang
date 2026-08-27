@@ -11,3 +11,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# husky generates this on install
+.husky/_/

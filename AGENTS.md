@@ -26,6 +26,7 @@ Start with [`docs/SKETCH.md`](docs/SKETCH.md) for the product and
 
 ```bash
 docker compose up --build     # client :3000, server :8000
+./scripts/setup-hooks.sh      # once per clone — installs the repo-wide pre-commit hook
 ```
 
 ## The rules that aren't style preferences
@@ -87,5 +88,10 @@ consistency. Decision IDs refer to `docs/ARCHITECTURE.md`.
 - **Secrets.** `.env` is gitignored, `.env.example` is not. Carrier and retailer credentials live
   server-side only — the extension must never hold one.
 - **Branching.** Branch from `main`; don't commit to it directly.
+- **Hooks are repo-wide, in `/.husky/`.** Git allows exactly one `core.hooksPath`, so there is
+  one dispatcher for the whole repo; it gates each workspace's checks on whether that workspace
+  has staged files. Don't add a second hooks directory under a workspace — it will be silently
+  ignored. Per-workspace commands live in that workspace's `AGENTS.md`
+  (`make -C server check`, `bunx lint-staged` in `client/`).
 - **Docs.** When a doc and the code disagree, the doc is stale — fix it in the same PR.
 - **Scope.** The PoC target is one retailer end to end, not two retailers halfway.

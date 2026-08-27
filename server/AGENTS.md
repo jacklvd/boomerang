@@ -41,6 +41,111 @@ uv run fastapi dev app/main.py     # :8000
 
 `uv` manages this workspace. Don't introduce `pip` or `requirements.txt`. Python 3.13.
 
+## Code Quality & Development Commands
+
+Every gate runs through `make` from `server/`. `make check` is the whole suite and is exactly
+what the pre-commit hook enforces — if it passes, the commit will.
+
+### Quick reference
+
+| Action | Command |
+|---|---|
+| Install / sync dev environment | `make install` |
+| Run tests | `make test` |
+| Run tests with coverage | `make cov` |
+| Run linter | `make lint` |
+| Auto-format and auto-fix | `make fmt` |
+| Check formatting without writing | `make fmt-check` |
+| Run static analysis | `make typecheck` |
+| Run dependency audit | `make audit` |
+| **Run all checks** | `make check` |
+| Install pre-commit hooks | `make setup-hooks` |
+
+`make` with no target lists these. Everything shells out to `uv run`, so it uses the locked
+environment rather than the ambient interpreter — you do not need an activated virtualenv.
+
+### The tools
+
+| Category | Tool | Config |
+|---|---|---|
+| Test runner | `pytest` (+ `pytest-asyncio`, auto mode) | `[tool.pytest.ini_options]` |
+| Coverage | `pytest-cov` / `coverage.py`, branch mode | `[tool.coverage.*]` |
+| Linter + formatter + docstring coverage | `ruff` | `[tool.ruff.*]` |
+| Static analysis | `mypy --strict` | `[tool.mypy]` |
+| Dependency audit | `pip-audit` over the exported lockfile | `Makefile: audit` |
+
+All of it lives in `pyproject.toml`. There is no `setup.cfg`, `.flake8`, `ruff.toml` or
+`mypy.ini` — don't add one.
+
+### Coverage requirements
+
+- **Line coverage: 95%.** **Branch coverage: 95%.** Branch mode is on, so branch misses count
+  toward the same `fail_under` total.
+- Currently **100%** on both. Adding code without tests will drop it below the floor and block
+  the commit.
+- Mark a genuinely unreachable line `# pragma: no cover` **with a reason** — never to get a
+  commit through. If the floor is in your way, the answer is a test.
+
+### Lint posture
+
+`select = ["ALL"]` minus a short, documented ignore list — a new ruff release adds its rules
+here automatically. Two consequences worth knowing before you write code:
+
+- **Every public function needs a docstring and full type annotations** (`D`, `ANN`). This is
+  the doc-coverage enforcement; there is no separate tool.
+- **Exceptions take a variable, not a literal** (`EM101`/`EM102`): assign the message to `msg`
+  first, then `raise`. `TRY003` is off on purpose — this codebase's long, actionable error
+  messages are a feature, not a smell.
+
+`tests/` relaxes `S101`, `D`, `ANN`, `PLR2004`, `INP001` and `ARG`; mypy relaxes untyped defs
+there. Tests are documented by name.
+
+### Pre-commit hooks
+
+Hooks are **repo-wide**, at `/.husky/`, not per workspace — git allows one `core.hooksPath`,
+and while it pointed at `client/.husky` the server could not have a hook at all. The dispatcher
+gates each workspace on whether it has staged files, so a docs-only commit is instant.
+
+On a commit touching `server/`, `scripts/pre-commit-server.sh` runs:
+
+1. **Format + auto-fix** the staged `.py` files, and re-stage them.
+2. **Lint** — blocks on any finding.
+3. **Static analysis** — blocks.
+4. **Tests + coverage floor** — blocks.
+5. **Dependency audit** — *warns only*. A fresh CVE in a transitive dep isn't the committer's
+   fault, and blocking every commit on it is how hooks get bypassed wholesale. Watch for the
+   warning and run `make audit`.
+
+A file with **both staged and unstaged changes** is formatted but deliberately *not* re-staged
+— the hook fails and names it, rather than sweeping unrelated working-tree edits into your
+commit. Stage what you mean to commit and retry.
+
+```bash
+make setup-hooks          # once per clone
+git commit --no-verify    # emergency bypass only
+```
+
+`make setup-hooks` uses husky when `client/node_modules` is present and otherwise points
+`core.hooksPath` at `.husky` directly, so a server-only developer never needs bun installed.
+
+### Before submitting code
+
+```bash
+make -C server check
+```
+
+Run it and paste the result. Do not report work as done on the strength of `make test` alone —
+it skips the linter, the type checker and the coverage floor.
+
+### Layout
+
+`app/` is the package under test; `tests/` mirrors it (`tests/test_bedrock.py`,
+`tests/test_main.py`) and is intentionally **not** a package — no `__init__.py`. Two config
+lines depend on that (`pythonpath = ["."]` for pytest, `explicit_package_bases` for mypy);
+adding an `__init__.py` will quietly change how modules resolve. `tests/conftest.py` clears
+every `BEDROCK_*` and `AWS_REGION` variable before each test, so a variable exported in your
+shell can't change an outcome.
+
 ## Conventions
 
 **Bedrock access goes through `app/bedrock.py`** — a single cached `AsyncAnthropicBedrockMantle`.

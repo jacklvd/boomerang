@@ -8,6 +8,20 @@
 
 ---
 
+## Resolution — both findings closed
+
+Recorded after the review, in the same pass that acted on it. The document now at
+`design/boomerang-low-level-design.md` carries both fixes; nothing below was declined.
+
+| ID | Status | How it was closed |
+|----|--------|-------------------|
+| CLASS-3 | **Closed** | §3.5's `DriverSession` gains `chosen_option`, written in the same `transact` as `AwaitingLabelChoice --> Driving` and null on the free-drop-off branch; §4.4's rehydration returns it and says why; §4.6's diagram writes "state Driving and the chosen option, one transact" and the prose replaces "carries the chosen option forward" with the persistence claim, citing §1.1 constraint 1 |
+| TEST-2 | **Closed** | §8.3 gains "Worker terminated between the choice and the label page", with the adapter fixture whose `label_carrier_patterns` deliberately cannot match the mapped carrier, so a fallthrough to source two is visible rather than silently equivalent. §8.4's FR-3.3.5 row cites it |
+
+**Verdict after resolution:** Ready for implementation, no open findings.
+
+---
+
 ## Executive Summary
 
 This is the sixth review of a document now at 2,234 lines, and the first that finds no blocking

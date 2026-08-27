@@ -831,7 +831,7 @@ so they are defined here and nowhere else.
 | Type | Fields | Why it exists |
 |---|---|---|
 | `ValidatedAction` | `kind`, `target`, `value`, `adapter_key`, `step_key` | Constructible only by `ActionValidator`. Carries the adapter and step it was checked against, so `StepExecutor` cannot be handed an action validated for a different page |
-| `DriverSession` | `state`, `item_id`, `order_id`, `retailer_key`, `tab_id`, `tab_url`, `step_key`, `attempt_count`, `started_at`, `last_written_at`, `schema_version` | The concrete form of high-level design §4.2's `DriverSession` — `adapter_step_key` is `step_key` here and `last_progress_at` is `last_written_at`, the same fields under shorter names. The *driving* position; its `state` is a mirror of the authoritative `ReturnRequest.state`, written in the same `transact` — §3.3. `tab_url` corroborates `tab_id`; `attempt_count` bounds retries; `schema_version` is what makes the §5.2 defensive read possible |
+| `DriverSession` | `state`, `item_id`, `order_id`, `retailer_key`, `tab_id`, `tab_url`, `step_key`, `chosen_option`, `attempt_count`, `started_at`, `last_written_at`, `schema_version` | The concrete form of high-level design §4.2's `DriverSession` — `adapter_step_key` is `step_key` here and `last_progress_at` is `last_written_at`, the same fields under shorter names. The *driving* position; its `state` is a mirror of the authoritative `ReturnRequest.state`, written in the same `transact` — §3.3. `tab_url` corroborates `tab_id`; `chosen_option` carries FR-3.3.5's first source across the window §4.6 opens between the choice and the label page, and is null on the free-drop-off branch that never makes one; `attempt_count` bounds retries; `schema_version` is what makes the §5.2 defensive read possible |
 | `ReturnMethodOptions` | `container`, `option`, `label`, `price`, `carrier_by_option` | Adapter data describing where FR-3.3.4's options live and what each one means. Four selectors and a map, because the requirement needs option/label/price as a *pair set*, not a single control — §3.3. `carrier_by_option` is FR-3.3.5's first source |
 | `ConsentStamp` | `consented_at`, `consent_extension_version` | NFR-6.2's record, captured at the confirmation screen and passed into `save_intent`. A type rather than two loose arguments so that the pair cannot be split, half-supplied, or reordered at the one call site that writes it |
 | `EvictedOrders` | `count` | The return of `evict_if_over_cap()`. A count of **orders** |
@@ -852,6 +852,19 @@ the field carries no information the name does not, and the name is the entire p
 what makes the §5.2 rule legible at the call site: `evict_to_fit` is the only one that runs
 **outside** `transact`, called from the quota-rejection path, and it is now the only one whose
 return type says so.
+
+**`DriverSession.chosen_option` is persisted, not carried, and that is the whole of its reason for
+existing.** §4.6 moved `derive_label_carrier` to the label page, which is correct — source two
+matches against a page that does not exist until `Driving --> LabelReady`. What the move opened is a
+window: the user's chosen option is FR-3.3.5's **source one**, it is known at
+`AwaitingLabelChoice`, and it is not consumed until two transitions later. A worker that died in
+that window and held the option only in memory would rehydrate with source one gone and begin the
+derivation at source two — no exception raised, no wrong carrier written, just a question the
+adapter could have answered, indistinguishable from the unmapped-option case. That is a
+SHALL-ordered derivation silently changing order at runtime, and §8.2's "persist-before-act on every
+transition" is the rule it would otherwise be an exception to. So the field is written in the same
+`transact` as the `AwaitingLabelChoice --> Driving` transition, returned by §4.4's rehydration, and
+asserted by the §8.3 row that kills the worker inside the window.
 
 **Each of these types has exactly one owning module, and the three wire types have two.**
 `ValidatedAction` is owned by `src/validation/` — it is the only module that may construct one.
@@ -1049,7 +1062,7 @@ sequenceDiagram
 
     CH->>SW: wake on event
     SW->>SS: load session
-    SS-->>SW: state, tab id, tab url, step key
+    SS-->>SW: state, tab id, tab url, step key, chosen option
     SW->>T: query tab by id
     alt tab missing
         SW->>SW: move to Stalled
@@ -1064,6 +1077,12 @@ sequenceDiagram
 what turns "a tab with this ID exists" into "this is still the tab we were driving".
 
 **Nothing resumes by itself.** A rehydrated session waits for a person — FR-3.3.9.
+
+**The chosen option comes back with the rest, because one consumer of it runs after this point.**
+A session rehydrated between the label choice and the label page still owes FR-3.3.5's derivation,
+and that derivation's first source is the option the user picked — see §3.5 and §4.6. Rehydration
+returning everything *except* the value the next step needs is the shape of the defect: the flow
+completes, so nothing looks wrong, and only the ordering changed.
 
 ### 4.5 Cancellation
 
@@ -1195,8 +1214,8 @@ sequenceDiagram
         D->>RR: state DroppedOff
         Note over D,RR: AwaitingLabelChoice to DroppedOff, terminal, no label page
     else user picks a printable label
-        D->>RR: state Driving
-        Note over D,RR: AwaitingLabelChoice to Driving
+        D->>RR: state Driving and the chosen option
+        Note over D,RR: AwaitingLabelChoice to Driving, one transact
         D->>D: drive to the label page
         D->>RR: state LabelReady
         Note over D,RR: Driving to LabelReady
@@ -1239,8 +1258,12 @@ on the label page, then asking. The ordering is forced by source two: `label_car
 against *the label page*, and that page does not exist until `Driving --> LabelReady: label page
 reached` (requirements FR-3.3.9). Deriving at the moment of choice would make source two
 unreachable and push every unmapped option straight to a question the page was about to answer. So
-the driver carries the chosen option forward, reaches `LabelReady`, and derives there, with all
-three sources available in order. §3.3 states the rule the diagram draws: **a miss is not a value,
+the chosen option is **persisted** on the `DriverSession` in the same `transact` that writes
+`AwaitingLabelChoice --> Driving`, survives a worker death anywhere in the window, comes back with
+§4.4's rehydration, and is read at `LabelReady` — with all three sources available in order. It is
+persisted rather than carried in worker memory for the reason §1.1 constraint 1 gives for every
+other piece of flow state: the worker dies mid-flow routinely, and a value held only in memory
+across two transitions is a value that is sometimes not there. §3.3 states the rule the diagram draws: **a miss is not a value,
 and never USPS.**
 
 **The three branches out of the choice are the three edges FR-3.3.9 draws, and no others.** A free
@@ -1906,6 +1929,7 @@ process with fakes at the network edge.
 | Free drop-off reaches `DroppedOff` | Options including a free drop-off method, the user picks it | The return goes **`AwaitingLabelChoice` → `DroppedOff` directly**: it never reads `LabelReady`, no label page is visited, `derive_label_carrier` is never called, **no pickup record exists**, and no eligibility or schedule call is made; the session is cleared; a second return on the same item is then permitted, the terminal request kept — FR-3.3.9, FR-3.3.10 |
 | Undetermined carrier still ends at `LabelPrinted` | Printable label, an adapter with no mapping and no matching pattern, the user declines the question | `label_carrier` is unset and no pickup is offered, but the terminal reached when the printed label leaves is **`LabelPrinted`, not `DroppedOff`** — the drop-off is what was offered, not the state — FR-3.3.5, FR-3.3.9 |
 | Worker terminated mid-flow | Kill the worker at `AwaitingConfirm` | Session rehydrates; waits for the user; no unattended step |
+| Worker terminated between the choice and the label page | The user picks a printable option, then the worker is killed before the label page is reached. The adapter fixture maps that option to a carrier its `label_carrier_patterns` deliberately do **not** match | On rehydration `chosen_option` is present and `derive_label_carrier` resolves through **`carrier_by_option`** — source one survived the death rather than the flow merely completing. A fallthrough to source two is a visible failure because the patterns cannot produce the same answer — FR-3.3.5, FR-3.3.9 |
 | Tab closed mid-flow, then handed off | Close the driven tab, then the user says they will finish it themselves | First `Stalled`, with the stopping point named; on the user's answer **`Stalled` → `HandedOff`**, a terminal — the driver stops, the session is cleared, nothing is retried and no tab is reopened; the return request is not deleted and the item stays in the ranked list — FR-3.3.9 |
 | Non-USPS label | Fixture yielding a UPS label | No schedule call attempted; drop-off copy |
 | Ineligible address | Mock returns not serviceable | Presented as a normal second answer; return still valid; pointed at the retailer's page |
@@ -1993,7 +2017,7 @@ statements; `NFR-6.x` names the section, and the obligation each row asserts is 
 | FR-3.3.2 in-context permission | First-run scan; permission declined |
 | FR-3.3.3 visible tab, supervised | Return with one miss; worker terminated mid-flow |
 | FR-3.3.4 present the label choice | Full return; prices unreadable |
-| FR-3.3.5 record the label carrier | `src/driver/` carrier-derivation unit rows — the three sources in order, a miss at each, and **no path yielding USPS unless a source said USPS**; non-USPS label, end to end; "undetermined carrier still ends at `LabelPrinted`", which asserts the miss is a complete outcome and not a different terminal. The derivation is invoked **at the label page** (§4.6), which is what makes source two reachable at all |
+| FR-3.3.5 record the label carrier | `src/driver/` carrier-derivation unit rows — the three sources in order, a miss at each, and **no path yielding USPS unless a source said USPS**; non-USPS label, end to end; "undetermined carrier still ends at `LabelPrinted`", which asserts the miss is a complete outcome and not a different terminal; and "worker terminated between the choice and the label page", which asserts source one **survives** the window the label-page relocation opened. The derivation is invoked **at the label page** (§4.6), which is what makes source two reachable at all |
 | FR-3.3.6 print confirmation | `src/driver/` unit tests: `label_printed` is set **only** on the user's affirmation, and never inferred from reaching the label page or from a completed download. The server's `label-not-printed` rejection is a second line, not the primary check — the requirement is about what the extension refuses to conclude |
 | FR-3.3.7 selector-first driving | Full return (no fallback); return with one miss (exactly one) |
 | FR-3.3.8 closed vocabulary | Action validator unit tests |

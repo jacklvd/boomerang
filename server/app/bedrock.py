@@ -1,8 +1,12 @@
+"""Bedrock access: the one place a model identifier is resolved and a client is built.
+
+See ``server/AGENTS.md`` for why ``BEDROCK_MODEL`` has no default in code.
+"""
+
 import os
 from functools import lru_cache
 
 from anthropic import AsyncAnthropicBedrockMantle
-
 
 # The two places the model is called. They have different latency budgets: a parse happens
 # while the user watches a spinner, an action fallback happens mid-flow with a return
@@ -24,19 +28,21 @@ def _require_model(call_site: str = "") -> str:
     """
     if call_site:
         if call_site not in CALL_SITES:
-            raise ValueError(f"unknown call site {call_site!r}; expected one of {CALL_SITES}")
+            msg = f"unknown call site {call_site!r}; expected one of {CALL_SITES}"
+            raise ValueError(msg)
         override = os.getenv(f"BEDROCK_MODEL_{call_site.upper()}")
         if override:
             return override
     model = os.getenv("BEDROCK_MODEL")
     if not model:
-        raise RuntimeError(
+        msg = (
             "BEDROCK_MODEL is not set. Recent Anthropic models on Bedrock are invocable "
             "only through a regional inference profile (a 'us.'-prefixed identifier); a "
             "bare model ID fails at invoke, not at startup. Run "
             "`aws bedrock list-inference-profiles --region $AWS_REGION` and set the "
             "inferenceProfileId for the model you want. See server/.env.example."
         )
+        raise RuntimeError(msg)
     return model
 
 
@@ -62,8 +68,10 @@ def verify_config() -> None:
     for call_site in CALL_SITES:
         _require_model(call_site)
 
-# dev-note: a cost control, not tuning. The Function URL is unauthenticated, so bounded output
-# tokens (with the short timeout and reserved concurrency) is what caps the bill. See infra/AGENTS.md.
+
+# dev-note: a cost control, not tuning. The Function URL is unauthenticated, so bounded
+# output tokens (with the short timeout and reserved concurrency) is what caps the bill.
+# See infra/AGENTS.md.
 MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4096"))
 
 
