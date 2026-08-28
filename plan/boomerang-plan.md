@@ -5,14 +5,29 @@ into implementable tasks organized by execution batch. Tasks within a batch can 
 according to their track assignments. All tasks in a batch must complete before committing and
 moving to the next batch.
 
-**Total Tasks:** 79
-**Batches:** 10
-**Critical Path Length:** 19 tasks
-**Max Parallel Tracks:** 10 (in Batch 3)
+**Total Tasks:** 91
+**Batches:** 11 (Batch 0 through Batch 10), plus a deployment track
+**Makespan under the batch barrier:** ~35 slots (20-task theoretical floor — see [Critical Path](#critical-path))
+**Max Parallel Tracks:** 11 (in Batch 3)
+
+> **This plan was revised on 2026-08-27** following an adversarial review. Twenty-five decisions —
+> including the addition of Batch 0, the removal of FR-3.6.3 from scope, and three upstream
+> amendments — are recorded with their reasoning in
+> [`plan/boomerang-decisions.md`](boomerang-decisions.md). Read that document before questioning why
+> a task exists. **`Dn` throughout this plan means a decision in that record** — not the `D1`–`D7`
+> product decisions in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), which are a separate and
+> older series.
 
 ---
 
 ## Reading this plan
+
+**Batch 0 comes first and it is not code.** The largest named feasibility risk in this project —
+high-level design §11 Q6, whether a free printable USPS label is reachable at all — was previously
+unaddressed, and thirteen tasks were written against the assumption that it is. Batch 0 answers it
+by hand, against a real account, with go/no-go criteria, before Batch 1 starts. It also files the
+USPS API access request and measures Bedrock latency, because those are the two other numbers this
+plan assumed rather than knew. See decisions D1–D5.
 
 **Two workspaces, almost entirely independent.** `server/` (FastAPI, Python 3.13, `uv`) and
 `extension/` (WXT, MV3, TypeScript, `bun`) share no files, no build, and no test runner. They meet
@@ -21,9 +36,21 @@ only at the wire contract of the seven endpoints — which is a *duplicated* typ
 **truly parallel from Batch 1 to Batch 7**, and that is where nearly all the parallelism in this
 plan lives.
 
+**The duplication is checked, not trusted.** Two independently-written copies of a type that never
+meet in a test can both be green and mutually incompatible. Task 3.18 creates `contracts/` — canonical
+request and response JSON for every endpoint and one error body per reason code — and both suites
+assert their serialization against those files. It is a shared *artifact*, deliberately not a shared
+build step, so the parallelism above survives (decision D15).
+
 **`client/` is out of scope, deliberately.** Low-level design §1 excludes it: phase 1 is a landing
 page with no logic and phase 2 renders a list it does not compute. FR-3.6.2 therefore has no task
 here and is recorded as an explicit gap in the traceability table rather than silently missing.
+
+**FR-3.6.3 is cut from PoC scope.** The dashboard-to-extension messaging path needs a dashboard
+hostname that does not exist (high-level design §11 Q1), and that hostname would otherwise block
+Task 1.2 — the second task in the plan. The manifest declares no `externally_connectable` key, Task
+5.6 routes internal messages only, and FR-3.6.3 joins FR-3.6.2 as a declared gap allowlisted in the
+Task 10.2 sweep. See decision D6.
 
 **Unit tests live inside their implementation task; integration tests are their own tasks.** The
 §8.2 table is a per-module contract, and `implement-task-code` writes tests first — so splitting a
@@ -34,6 +61,14 @@ app factory — is always its own task, because several tasks depend on it.
 
 **`extension/` does not exist yet.** Task 1.2 creates it, alongside its own `AGENTS.md` as the
 repo-level [`AGENTS.md`](../AGENTS.md) map already anticipates.
+
+**`infra/` exists and is stale.** `infra/main.tf` still provisions a VPC, an internet gateway, an EC2
+instance and security groups — the architecture the high-level design superseded. `infra/AGENTS.md`,
+by contrast, is already correct: it documents the Lambda target state in full and quarantines the
+old rules in a "Legacy scaffold" section it tells you to delete once the Lambda resources land. The
+deployment track (Tasks I.1–I.3) is what lands them. It opens as soon as Task 6.5 exports the Mangum
+handler and runs alongside Batches 7–10 rather than trailing them, so the first real deployment is
+not also the last thing that happens. See decisions D7–D9.
 
 ---
 
@@ -134,11 +169,21 @@ graph is otherwise **complete and prohibitive**: an edge not drawn is not permit
 ## Batch Execution Overview
 
 ```
+Batch 0: Feasibility (BLOCKING, not code)
+  Track A (serial): 0.1                              [spike]
+  Track B (serial): 0.2                              [external dependency]
+  Track C (serial): 0.3 (after 0.1)                  [measurement]
+  --- 0.1 and 0.2 PARALLEL; 0.3 needs 0.1's captured subtree ---
+  >>> Gate: go/no-go on the retailer flow, recorded in writing
+  >>> Blocks 2.8, 3.13, 3.14, 7.7-7.10 and the Batch 9 driving rows ONLY
+
 Batch 1: Workspace scaffolding
   Track A (serial): 1.1                              [server]
-  Track B (serial): 1.2                              [extension]
-  --- Tracks A, B: PARALLEL (different workspaces) ---
-  >>> Commit checkpoint: both workspaces build and run a green empty suite
+  Track B (serial): 1.2 -> 1.4                       [extension]
+  Track C (serial): 1.3                              [repo CI]
+  Track D (serial): 1.5 (after 1.2)                  [extension quality gates]
+  --- Tracks A, B, C: PARALLEL (different workspaces) ---
+  >>> Commit checkpoint: both workspaces build, run a green empty suite, and CI runs both
 
 Batch 2: Foundations
   Track A (serial): 2.1                              [server errors]
@@ -162,16 +207,21 @@ Batch 3: Schemas, protocols, leaf modules
   Track H (serial): 3.17                             [extension permissions]
   Track I (deferred): 3.7                            [server window, after 3.2]
   Track J (deferred): 3.15 -> 3.16                   [extension validation, after 3.13]
-  --- Tracks A, B, C PARALLEL with D..J ---
+  Track K (serial): 3.18                             [repo wire contract fixtures]
+  --- Tracks A, B, C PARALLEL with D..K ---
   --- 3.7 CONFLICT-free but sequenced after 3.2 ---
-  >>> Commit checkpoint: every boundary type exists on both sides
+  >>> Commit checkpoint: every boundary type exists on both sides, and both sides
+  >>> assert against the same golden payloads
 
 Batch 4: Model boundary, carriers, storage, egress
   Track A (serial): 4.2 -> 4.1                       [server bedrock and prompts]
   Track B (serial): 4.3 -> 4.4 -> 4.5                [server carriers usps]
-  Track C (serial): 4.6 -> 4.7 -> 4.8 -> 4.9 -> 4.10 -> 4.11 -> 4.12   [extension storage]
+  Track C (serial): 4.6 -> 4.7                       [extension storage core]
+  Track C' (parallel after 4.7): 4.8, 4.9, 4.10, 4.11 -> 4.12   [extension repositories]
   Track D (serial): 4.13                             [extension api]
-  --- Tracks A, B PARALLEL; C, D PARALLEL; server and extension PARALLEL ---
+  Track E (serial): 4.14                             [server runtime mock carrier]
+  --- Tracks A, B, E PARALLEL; C, D PARALLEL; server and extension PARALLEL ---
+  --- 4.8-4.11 are now four separate files and run in parallel (D19) ---
   >>> Commit checkpoint: all persistence and all upstream clients exist
 
 Batch 5: Services and driver collaborators
@@ -188,6 +238,7 @@ Batch 6: Routes and app; driver core
   Track B (serial): 6.6 -> 6.7 -> 6.8                [extension driver]
   --- Tracks A, B PARALLEL ---
   >>> Commit checkpoint: the server serves all seven endpoints; the driver drives
+  >>> The deployment track opens here: I.1 -> I.2, then I.3 (needs 0.2's credentials)
 
 Batch 7: Server integration tests; driver flows
   Track A (serial): 7.1                              [server integration harness]
@@ -199,19 +250,162 @@ Batch 7: Server integration tests; driver flows
 Batch 8: Entrypoints and wiring
   Track A (serial): 8.1 -> 8.2                       [extension worker and content]
   Track B (serial): 8.3 -> 8.4 -> 8.5                [extension popup]
+  Gate (serial): 8.6 (after 8.5)                     [manual acceptance in a real browser]
   --- Tracks A, B CONFLICT-free but B depends on 8.2 for messaging ---
-  >>> Commit checkpoint: the extension loads and runs end to end by hand
+  >>> Commit checkpoint: the extension loads and runs end to end by hand,
+  >>> observed in Chrome and not only under the fake browser
 
 Batch 9: Extension integration tests
   Track A (serial): 9.1                              [harness]
   Track B (parallel after 9.1): 9.2, 9.3, 9.4, 9.5, 9.6, 9.7
-  >>> Commit checkpoint: every FR has a passing assertion
+  >>> Commit checkpoint: every FR except the two declared gaps has a passing assertion
 
 Batch 10: Build gates and repository checks
   Track A: 10.1    Track B: 10.2    Track C: 10.3
   --- All PARALLEL ---
-  >>> Commit checkpoint: CI enforces what review would otherwise have to
+  >>> Commit checkpoint: the pipeline built in 1.3 now enforces what review would otherwise have to
+
+Deployment track (opens after 6.5, runs alongside Batches 7-10)
+  I.1 -> I.2                                         [infra terraform, infra AGENTS.md]
+  I.3 (after I.1, needs 0.2)                         [USPS sandbox reconciliation]
+  >>> Not a batch: it has no barrier and blocks nothing downstream
 ```
+
+---
+
+## Batch 0: Feasibility
+
+**This batch produces no application code.** It answers the three questions the rest of the plan
+assumed the answers to: whether the retailer flow this product is built around actually exists,
+whether we can get USPS credentials, and whether the model is fast enough for the latency budget
+already written into the requirements. Decisions [D1–D5](boomerang-decisions.md#a-feasibility--the-risks-the-plan-started-without).
+
+**What it blocks.** Tasks 2.8, 3.13, 3.14, 7.7–7.10, and the Batch 9 driving rows. It does **not**
+block the server track, nor Tasks 1.2, 2.4, 2.5, 2.6 or 2.7 — a blocking spike that idles both
+workspaces trades a risk reduction for a schedule loss.
+
+---
+
+### Track A: Retailer flow spike [spike]
+
+#### Task 0.1: Walk the retailer return flow by hand and record what is there
+
+**Prerequisites:** None
+**Conflicts with:** None
+**Parallel with:** Task 0.2
+**Package:** `docs/spikes/`
+
+**Objective:** Establish, against a real logged-in account on the PoC retailer, whether the product
+this plan describes is buildable — before thirteen tasks are written against the assumption that it
+is. High-level design §11 Q6 names this as the largest open feasibility risk and says in its own
+words to prototype it before writing anything else in `extension/`.
+
+**Three go/no-go criteria.** Each is answered yes or no, in writing, with the evidence that answered
+it:
+
+1. **A printable USPS label is reachable** through the return flow without leaving the browser and
+   without a native app. If no: the pickup branch has nothing to attach to.
+2. **Each offered return method's price is readable from the DOM** at the point of choice — not
+   inferred, not behind a hover, not rendered into a canvas. If no: FR-3.3.4's "cheapest method"
+   ranking cannot be computed and the driver has no basis for its recommendation.
+3. **The printable label option is free.** If no: FR-3.3.5's assumption that the label path is the
+   default recommendation is wrong, and the choice logic changes shape.
+
+**Instructions:**
+1. Using a real account with a real recent order, walk the return flow end to end in Chrome with
+   DevTools open. Do not automate anything; this task is deliberately manual.
+2. At each decision point, record: the URL, the DOM structure of the choice, whether prices are
+   present as text, and what the "printable label" path actually produces (a PDF, a new tab, a
+   download, a QR code only).
+3. Answer each of the three criteria explicitly. **A criterion is "no" unless the evidence says
+   yes** — an unchecked assumption records as a failure, not as a pass.
+4. If any criterion fails, state what the PoC retargets to: a different retailer, a different return
+   method, or a narrowed FR. Do not proceed to Batch 1 on a failed criterion without that decision
+   written down.
+5. Write the finding to `docs/spikes/retailer-flow.md`: the three answers, the evidence, the
+   retailer and account conditions it was observed under, and the date. This document is what Task
+   3.14 is built from.
+
+**Verification:**
+- `docs/spikes/retailer-flow.md` exists and answers all three criteria with evidence.
+- If any answer is "no", the document names the retarget decision.
+
+**Requirements covered:** — (validates the assumptions behind FR-3.3.4, FR-3.3.5, FR-3.4.1)
+
+---
+
+#### Task 0.2: File the USPS API access request
+
+**Prerequisites:** None
+**Conflicts with:** None
+**Parallel with:** Task 0.1
+**Package:** `docs/spikes/`
+
+**Objective:** Start the one dependency in this plan whose latency is not ours to control. Tasks
+4.3–4.5 build a USPS OAuth token provider and adapter; nothing in the original plan obtained
+credentials, and third-party API approval has no stated turnaround.
+
+**Instructions:**
+1. Register for USPS APIs and request access to the OAuth token endpoint and the Carrier Pickup
+   (Package Pickup) APIs the high-level design names.
+2. Record in `docs/spikes/usps-access.md`: the date filed, the account used, the exact API products
+   requested, and any stated turnaround.
+3. **Do not block on the outcome.** Tasks 4.3–4.5 proceed against documentation-derived `respx`
+   mocks (decision D12); Task I.3 reconciles them against the sandbox once credentials arrive.
+4. When credentials arrive, store them in SSM under `/boomerang/<env>/usps/` — never in the
+   repository, never in `.env` files that are not gitignored.
+
+**Verification:**
+- `docs/spikes/usps-access.md` records the request as filed with a date.
+
+**Requirements covered:** — (unblocks FR-3.4.1, FR-3.4.5, FR-3.4.6 in production)
+
+---
+
+### Track C: Model latency [measurement]
+
+#### Task 0.3: Measure Bedrock parse and action latency
+
+**Prerequisites:** Task 0.1 (needs a captured DOM subtree to parse)
+**Conflicts with:** None
+**Parallel with:** —
+**Package:** `docs/spikes/`
+
+**Objective:** `BEDROCK_TIMEOUT_PARSE_MS = 9000` and `BEDROCK_TIMEOUT_ACTION_MS = 4500` are written
+into the configuration table, and NFR-6.4 promises an action round trip under five seconds. High-level
+design §11 Q9 records that none of this has been measured. Measure it before Batch 5 builds a service
+against the number.
+
+**Instructions:**
+1. Write a throwaway script under `docs/spikes/` (not under `server/app/`) that uses the existing
+   `server/app/bedrock.py` — `client()`, `model("parse")`, `model("action")` and `MAX_TOKENS` are
+   already implemented, so this costs a script, not a subsystem.
+2. Time a **cold** parse invoke and three **warm** parse invokes against a DOM subtree captured by
+   Task 0.1, sanitised to the size ceiling `MAX_INGEST_BYTES` implies.
+3. Time three **warm** action invokes against a representative action prompt.
+4. Record p50 and max for each in `docs/spikes/bedrock-latency.md`, with the region, the model IDs
+   resolved per call site, and the subtree size.
+5. **Compare against the budgets.** If the measured action latency does not fit inside NFR-6.4's
+   five-second round trip once network and server time are added, say so explicitly and raise it as
+   an upstream amendment (decision D25) — either the timeout constants change or NFR-6.4 does. Do
+   not silently proceed on a budget the measurement contradicts.
+
+**Verification:**
+- `docs/spikes/bedrock-latency.md` records p50 and max for cold parse, warm parse and warm action.
+- The document states whether NFR-6.4's budget holds.
+
+**Requirements covered:** — (validates NFR-6.4 and the §5.2 timeout constants)
+
+---
+
+### Batch 0 Gate
+
+- [ ] All three criteria in `docs/spikes/retailer-flow.md` are answered with evidence
+- [ ] Any failed criterion has a written retarget decision
+- [ ] The USPS access request is filed and dated
+- [ ] Bedrock latency is measured and reconciled against NFR-6.4
+- [ ] Captured DOM subtrees are scrubbed per low-level design §9 Q1 and committed as the input to
+      Task 2.8
 
 ---
 
@@ -219,31 +413,87 @@ Batch 10: Build gates and repository checks
 
 ### Track A: Server test harness [server]
 
-#### Task 1.1: Server test scaffolding and dev dependencies
+#### Task 1.1: Reconcile the existing server test harness with the §8 layout
 
 **Prerequisites:** None
 **Conflicts with:** None
 **Parallel with:** Task 1.2 (Track B — different workspace)
 **Package:** `server`
 
-**Objective:** Give `server/` a test runner, a layout that matches the §8 split, and a green empty suite, so every later server task can be written test-first.
+**Objective:** `server/` was already scaffolded by `/setup-code-scaffolding` after this plan was
+written, so this task **reconciles** rather than creates. Close the two genuine gaps — the missing
+transport-level HTTP mock, and the flat `tests/` layout that does not match the §8 unit/integration
+split — without recreating, overwriting, or downgrading any configuration that is already in place.
+
+**What already exists — do not recreate, relax, or replace:**
+- `server/pyproject.toml`: `[dependency-groups] dev` (`pytest>=8.4`, `pytest-asyncio>=1.2`,
+  `pytest-cov>=7.0`, `mypy>=1.18`, `ruff>=0.14`, `pip-audit>=2.9`); `[tool.pytest.ini_options]` with
+  `asyncio_mode = "auto"`, `testpaths = ["tests"]`, `pythonpath = ["."]`, `--strict-markers`,
+  `--strict-config`, `filterwarnings = ["error"]`; `[tool.ruff]` with `select = ["ALL"]` and a
+  documented ignore list; `[tool.mypy]` strict with `mypy_path = "."` and
+  `explicit_package_bases = true`; `[tool.coverage]` with `branch = true` and `fail_under = 95`.
+- `server/Makefile` (`install test cov lint fmt fmt-check typecheck audit check setup-hooks`),
+  `server/AGENTS.md`, the repo-root `.husky/pre-commit` dispatcher, `scripts/pre-commit-server.sh`,
+  and `scripts/setup-hooks.sh`.
+- `server/tests/`: a flat `conftest.py`, `test_main.py`, `test_bedrock.py` — 19 passing tests,
+  `make check` green at 100% coverage.
 
 **Instructions:**
-1. Add dev dependencies to `server/pyproject.toml` under `[dependency-groups] dev`: `pytest`,
-   `pytest-asyncio`, `anyio`, `respx` (or plain `httpx.MockTransport` — §8.1 requires transport-level
-   mocking, not client-object monkeypatching; pick one and use it everywhere).
-2. Configure in `pyproject.toml`: `[tool.pytest.ini_options]` with `asyncio_mode = "auto"`,
-   `testpaths = ["tests"]`, and strict markers.
-3. Create `server/tests/__init__.py`, `server/tests/unit/__init__.py`,
-   `server/tests/integration/__init__.py`.
-4. Create `server/tests/conftest.py` with only an `anyio_backend` fixture pinned to `asyncio` for now.
-   Later tasks add fixtures here — note in a `# dev-note:` that this file is a shared-conflict point.
-5. Add one trivial test asserting the package imports, so the suite is non-empty.
-6. Reference: Low-Level Design §8.1 (test approach), §8.5 (what is not tested).
+1. Add **`respx`** to `server/pyproject.toml` under `[dependency-groups] dev` — the only genuinely
+   missing dependency. §8.1 requires transport-level mocking rather than client-object
+   monkeypatching, and nothing in the scaffolding provides it. Add it with `uv add --dev respx` (or
+   the equivalent edit plus `uv lock`); do not touch any other entry in the group, and do not
+   re-pin what is already there. `anyio` is not needed: async already runs through `pytest-asyncio`
+   in `asyncio_mode = "auto"`.
+2. Adopt the §8 layout: `server/tests/unit/` and `server/tests/integration/`, and create
+   `server/tests/__init__.py`, `server/tests/unit/__init__.py`,
+   `server/tests/integration/__init__.py`. **These `__init__.py` files are required, not optional.**
+   The plan names four colliding test basenames across directories — `test_orders.py`,
+   `test_returns.py` and `test_pickups.py` in both `tests/unit/models/` and `tests/unit/routes/`
+   (Tasks 3.2/3.3/3.4 vs. 6.2/6.3/6.4), and `test_ingest.py` in both `tests/unit/services/` and
+   `tests/integration/` (Task 6.1 vs. Task 7.2). Without `__init__.py`, pytest's rootdir-relative
+   module naming raises `import file mismatch` on the second file of each pair. Later tasks that
+   add a new subdirectory under `tests/unit/` (`models/`, `routes/`, `services/`, `carriers/`,
+   `prompts/`) must add an `__init__.py` to it for the same reason.
+3. **`# dev-note:` and follow-up — the scaffolding's config comments become wrong.** Step 2 reverses
+   a deliberate scaffolding decision, so the executor of this task must also correct the two places
+   that record the old stance, in the same change:
+   - `server/pyproject.toml`, `[tool.ruff.lint.per-file-ignores]`: the `"tests/*"` entry ignores
+     `INP001` with the comment `# tests/ is intentionally not a package`. That comment is now false
+     and the ignore is now dead. Replace the entry's comment with the reason it changed — `tests/` is
+     a package because the §8 layout puts colliding basenames in sibling directories — or drop the
+     `INP001` line entirely, and leave the rest of the ignore list untouched.
+   - `server/pyproject.toml`, `[tool.mypy]`: the `# dev-note:` above `mypy_path` and
+     `explicit_package_bases` states that `tests/` has no `__init__.py`. Rewrite that note to say
+     what is now true. Keep `mypy_path = "."` and `explicit_package_bases = true` — they are
+     harmless with packages and removing them is a downgrade this task has no reason to make.
+4. **Move, never copy, the two existing test files:** `git mv server/tests/test_main.py
+   server/tests/unit/test_main.py` and `git mv server/tests/test_bedrock.py
+   server/tests/unit/test_bedrock.py` (Task 4.6 already verifies `tests/unit/test_bedrock.py`). A
+   split brain in which `tests/test_main.py` and `tests/unit/test_errors.py` both exist passes every
+   gate while being permanently inconsistent, so the flat files must not survive the move. Confirm
+   with `git status` that each shows as a rename and that nothing is left directly under `tests/`
+   except `conftest.py` and the two package directories.
+5. **Keep the existing `conftest.py` and add to it — do not replace it.** `server/tests/conftest.py`
+   already defines the autouse `clean_bedrock_env` fixture that clears `BEDROCK_MODEL`,
+   `BEDROCK_MODEL_PARSE`, `BEDROCK_MODEL_ACTION` and `AWS_REGION` and resets `bedrock.client`'s
+   cache; that fixture stays exactly as it is, at `tests/conftest.py`, so both `unit/` and
+   `integration/` inherit it. Do **not** add an `anyio_backend` fixture — `asyncio_mode = "auto"`
+   already selects the backend, and a redundant fixture would imply an anyio dependency the suite
+   does not have. Add a `# dev-note:` recording that this file is a shared-conflict point that many
+   later tasks append to (Task 7.1 adds the `app` fixture here).
+6. Do **not** add a placeholder "the package imports" test: the suite is already non-empty and green.
+7. Reference: Low-Level Design §8.1 (test approach), §8.5 (what is not tested); `server/AGENTS.md`.
 
 **Verification:**
-- `cd server && uv sync && uv run pytest` — passes, collects at least one test.
-- `cd server && uv run python -c "import app.main"` — still imports.
+- `cd server && uv sync` — resolves with `respx` added and nothing else changed.
+- `cd server && uv run python -c "import respx"` — the new dependency is installed.
+- `cd server && make test` — the same 19 tests still pass from their new locations.
+- `cd server && make check` — `fmt-check`, `lint`, `typecheck`, `cov` (95% line + branch floor) and
+  `audit` all pass; ruff must not report `INP001` after step 3.
+- `cd server && uv run pytest tests/unit` — collects the moved tests.
+- `cd server && git status --short` — shows two renames, not two additions, and no stray file left
+  directly under `server/tests/`.
 
 **Requirements covered:** —
 
@@ -266,25 +516,156 @@ Batch 10: Build gates and repository checks
 2. In `wxt.config.ts`, declare the manifest:
    - `permissions: ["activeTab", "scripting", "storage"]` — **nothing else at install**.
    - `optional_host_permissions` for the retailer origins (requested later, in context).
-   - `externally_connectable.matches` limited to the dashboard origin (FR-3.6.3).
    - An explicit extension CSP with no remote script.
    - No `unlimitedStorage`.
+   - **No `externally_connectable` key.** FR-3.6.3 is cut from PoC scope (decision D6): the
+     dashboard origin it would name does not exist, and requiring it here would block the second
+     task in the plan on an undecided hostname.
+   - Leave a `// dev-note:` at the `manifest` declaration recording that the `key` field is added by
+     Task 1.4, so a reader does not conclude it was forgotten.
 3. Add `extension/AGENTS.md` following the pattern of `server/AGENTS.md`: local scope, phase, and the
    subset of the repo rules that bite hardest here — rules 8 and 9 from the repo
    [`AGENTS.md`](../AGENTS.md), and "the extension must never hold a carrier or retailer credential."
 4. Add `extension/tests/manifest.test.ts` asserting, against the built manifest object:
    - the permission array is exactly the three above;
    - no `<all_urls>` appears anywhere in the manifest;
-   - `externally_connectable` names the dashboard origin and no wildcard.
+   - **`externally_connectable` is absent** — this is the assertion that keeps the D6 cut from
+     silently reverting when someone copies a manifest from a tutorial.
 5. Create empty `extension/src/` and `extension/entrypoints/` directories with a `.gitkeep`.
 6. Reference: Low-Level Design §7.2 (manifest), §8.2 (manifest assertions); requirements FR-3.7.1,
-   FR-3.6.3, NFR-6.5; repo `AGENTS.md` rule 8.
+   NFR-6.5; repo `AGENTS.md` rule 8; decision D6.
 
 **Verification:**
 - `cd extension && bun install && bun run build` — WXT produces `.output/chrome-mv3/`.
 - `cd extension && bun run test` — the manifest test passes.
 
-**Requirements covered:** FR-3.7.1, FR-3.6.3, NFR-6.5
+**Requirements covered:** FR-3.7.1 (partial — completed by Task 1.4), NFR-6.5
+
+---
+
+#### Task 1.4: Generate and pin the extension keypairs
+
+**Prerequisites:** Task 1.2
+**Conflicts with:** Task 1.2 (both edit `wxt.config.ts`)
+**Parallel with:** Tasks 1.1, 1.3
+**Package:** `extension`
+
+**Objective:** Fix the extension ID. Without a pinned public `key` in the manifest, Chrome derives
+the extension ID from the absolute path the unpacked extension was loaded from — so the ID differs
+between every machine and every CI run. NFR-6.5 allowlists **exactly one** `chrome-extension://`
+origin on the Lambda Function URL, a literal string that must be known at `terraform apply` time.
+FR-3.7.1 requires the pin; requirements line 761 states the consequence of omitting it. Decision D20.
+
+**Why this is in Batch 1.** The derived origin is an *input* to the CORS policy Task I.1 writes — it
+has to exist before the thing that allowlists it. It also makes the ID stable for every unpacked
+load from this point forward, which everything depending on a stable ID needs.
+
+**Instructions:**
+1. Generate two RSA keypairs — one `dev`, one `prod`:
+   `openssl genrsa -out dev.pem 2048` and the same for `prod.pem`.
+2. Derive each public key in the base64 DER form the manifest `key` field takes, and derive the
+   resulting extension ID from it.
+3. Put the **dev public key** in `wxt.config.ts` as `manifest.key`. Public keys are not secrets and
+   belong in the repository — that is the entire point of pinning one.
+4. **Neither private key enters the repository.** Store both at
+   `/boomerang/release/<env>/extension-key` in SSM as SecureStrings per high-level design §8.4, in
+   the same account but outside the path the Lambda execution role can read. Hold the prod private
+   key additionally offline. Add `*.pem` to `extension/.gitignore` in this task, not later.
+5. Record both derived extension IDs in `extension/AGENTS.md` — Task I.1 needs the dev ID for the
+   CORS allowlist and Task 10.1 needs to know which key is the dev one.
+6. Extend `extension/tests/manifest.test.ts`: the built manifest has a `key` field, and it is a
+   non-empty string. Assert the *presence*, not the value — the value changes between dev and prod
+   builds and a pinned literal would fail the prod build for the wrong reason.
+7. Reference: requirements FR-3.7.1 and NFR-6.5; high-level design §8.4; decision D20.
+
+**Note on the prod keypair.** It only earns its place if Boomerang self-packages a CRX — a Chrome
+Web Store listing would issue the identity instead. High-level design §8.4's per-environment SSM
+path assumes self-packaging, and Task 10.1's dev-key scan is meaningless with only one key, so both
+are generated. If the project later commits to store distribution, drop the prod key and the
+corresponding half of Task 10.1 together.
+
+**Verification:**
+- `cd extension && bun run build` — the built manifest contains a `key`.
+- The extension ID is identical when loaded unpacked from two different directories.
+- `git status` — no `.pem` file is tracked; `grep -r "PRIVATE KEY" .` finds nothing in the repo.
+- `cd extension && bun run test` — the manifest test asserts `key` is present.
+
+**Requirements covered:** FR-3.7.1, NFR-6.5
+
+---
+
+### Track C: Repository CI [repo]
+
+#### Task 1.3: Continuous integration for both workspaces
+
+**Prerequisites:** None
+**Conflicts with:** None
+**Parallel with:** Tasks 1.1, 1.2
+**Package:** `.github/`
+
+**Objective:** Batch 10's commit checkpoint claims that "CI enforces what review would otherwise
+have to." There is no `.github/` directory and, before this task, nothing created one — so three
+Batch 10 tasks wrote checks that would never have run. Create the pipeline at the *start* of the
+project rather than the end. Decision D10.
+
+**Why Batch 1 and not Batch 10.** A gate added at the end tells you the last commit was clean. A gate
+added at the start tells you which commit broke it. Batch 10's tasks then add checks to an existing
+pipeline instead of inventing one.
+
+**Instructions:**
+1. Create `.github/workflows/ci.yml` triggered on push and pull request.
+2. **Server job:** set up Python 3.13 and `uv`, run `cd server && make check` — which already covers
+   `fmt-check`, `lint`, `typecheck`, `cov` at the 95% line-and-branch floor, and `audit`.
+3. **Extension job:** set up `bun`, run `bun install`, `bun run build`, `bun run test`, `bun run lint`.
+4. **Repo job:** run `scripts/citation-sweep.sh` **if it exists** — Task 10.2 creates it. Write the
+   step so an absent script skips rather than fails, and leave a `# dev-note:` saying that Task 10.2
+   makes it real. A hard failure here would block every commit until Batch 10.
+5. Write both workspace jobs to **discover** their workspace rather than hard-code a file list, so
+   tasks that add modules do not also have to edit CI.
+6. Jobs run in parallel; the workflow fails if any fails.
+
+**Verification:**
+- Push a branch: both jobs run and pass against the Batch 1 state of the repository.
+- Deliberately break a lint rule in each workspace and confirm the corresponding job fails.
+
+**Requirements covered:** — (mechanism for NFR-6.3; the gate Tasks 10.1–10.3 attach to)
+
+---
+
+### Track D: Extension quality gates [extension]
+
+#### Task 1.5: Extension coverage floor and pre-commit hook
+
+**Prerequisites:** Task 1.2
+**Conflicts with:** None
+**Parallel with:** Tasks 1.1, 1.3, 1.4
+**Package:** `extension`, `.husky/`
+
+**Objective:** The server enforces `fail_under = 95` with `branch = true`. The extension had no
+coverage gate at all — and the most intricate logic in this plan, the driver state machine, lives
+there. The repo's `.husky/pre-commit` is likewise server-only, so every extension task in this plan
+could be committed without running a test. Decisions D13, D14.
+
+**Instructions:**
+1. In `extension/vitest.config.ts`, enable coverage with a **95% line and 95% branch** floor across
+   `extension/src/`.
+2. Exclude `extension/entrypoints/` from the floor using an **explicit named list of files**, not a
+   glob. A glob silently swallows anything later dropped into the directory; a named list makes each
+   exclusion a reviewable line. Entrypoints are covered by the Batch 9 integration rows instead.
+   Add a `// dev-note:` at the list saying exactly that, and add each entrypoint to the list in the
+   task that creates it (8.1, 8.2, 8.3).
+3. Extend `.husky/pre-commit` — today a server-only dispatcher — to run the extension workspace's
+   tests and lint when files under `extension/` are staged. Follow the existing dispatcher pattern
+   and add `scripts/pre-commit-extension.sh` beside `scripts/pre-commit-server.sh`.
+4. Reference: `server/pyproject.toml` `[tool.coverage]` for the standard being matched; decisions
+   D13, D14.
+
+**Verification:**
+- `cd extension && bun run test --coverage` — reports coverage and enforces the floor.
+- Staging a change under `extension/` runs the extension checks in the hook; staging only server
+  files does not.
+
+**Requirements covered:** — (mechanism for NFR-6.3)
 
 ---
 
@@ -294,6 +675,8 @@ After all tracks complete:
 - [ ] Server installs and tests run: `cd server && uv run pytest`
 - [ ] Extension builds: `cd extension && bun run build`
 - [ ] Extension tests run: `cd extension && bun run test`
+- [ ] The extension ID is pinned and stable across machines; no private key is tracked
+- [ ] CI runs both workspaces on push and fails on a deliberate break
 - [ ] Both workspaces have a place to put test-first code, and the manifest posture is now guarded
       by an assertion rather than by memory.
 
@@ -466,13 +849,24 @@ a dev value in a prod bundle is a build-time fact rather than a runtime surprise
 
 **Instructions:**
 1. Create `extension/src/config.ts` exporting the constants from §7.2: `API_BASE_URL`,
-   `CLIENT_VERSION`, `DASHBOARD_ORIGIN`, `MODEL_FALLBACK_TIMEOUT_MS`, `PAYLOAD_CEILING_BYTES`,
-   `STORAGE_CAP_BYTES`, `STORAGE_EVICTION_MARGIN_BYTES`, `API_TIMEOUT_MS`, `RETURN_ATTEMPT_LIMIT`.
+   `CLIENT_VERSION`, `MODEL_FALLBACK_TIMEOUT_MS`, `MAX_INGEST_BYTES`, `STORAGE_CAP_BYTES`,
+   `STORAGE_EVICTION_MARGIN_BYTES`, `API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`,
+   `RETURN_ATTEMPT_LIMIT`.
+   - **These names are normative and were previously wrong here.** `PAYLOAD_CEILING_BYTES` and
+     `API_TIMEOUT_MS` appear nowhere in the requirements or the low-level design; the real names are
+     `MAX_INGEST_BYTES` and `API_REQUEST_TIMEOUT_MS`. `API_RETRY_BUDGET_MS` is specified upstream and
+     was missing from this plan entirely, so the retry budget it governs would not have been built.
+     Decision D17.
+   - `DASHBOARD_ORIGIN` is **not** exported: FR-3.6.3 is cut from PoC scope (decision D6) and nothing
+     consumes it.
 2. Wire the environment-varying ones through WXT `define` in `wxt.config.ts` so they are substituted
    at build time, not read at runtime.
 3. Unit tests: each constant is defined and of the right type; the numeric ones are positive; the
-   eviction margin is smaller than the cap.
-4. Reference: Low-Level Design §7.2.
+   eviction margin is smaller than the cap; **`API_RETRY_BUDGET_MS` is greater than or equal to
+   `API_REQUEST_TIMEOUT_MS`** — a retry budget smaller than a single attempt's timeout can never
+   permit a retry, which is a configuration bug that otherwise shows up as an unexplained absence of
+   retries in production.
+4. Reference: Low-Level Design §7.2; requirements §5.1, §5.2; decisions D6, D17.
 
 **Verification:**
 - `cd extension && bun run test tests/config.test.ts`
@@ -557,7 +951,7 @@ clock.
 
 #### Task 2.8: Retailer DOM fixture harness
 
-**Prerequisites:** Task 1.2
+**Prerequisites:** Task 1.2, **Task 0.1** (supplies the captured subtrees)
 **Conflicts with:** None
 **Parallel with:** Tasks 2.1–2.7
 **Package:** `extension/tests/fixtures`
@@ -566,8 +960,11 @@ clock.
 loads one — the convention §9 Q1 leaves open and every adapter test depends on.
 
 **Instructions:**
-1. Create `extension/tests/fixtures/retailers/{retailer_key}/{step_key}.html` as the layout, with one
-   placeholder retailer and the steps the PoC flow walks.
+1. Create `extension/tests/fixtures/retailers/{retailer_key}/{step_key}.html` as the layout, populated
+   with the **real subtrees Task 0.1 captured and scrubbed** — one directory for the PoC retailer, one
+   file per step the spike actually walked. This is not a placeholder harness: the spike navigated
+   those pages, so the fixtures are real DOM rather than invented markup, and Task 3.14's selectors
+   are written against pages that exist (decision D2).
 2. Write `extension/tests/fixtures/load.ts` exposing `load_fixture(retailer_key, step_key)` returning
    a parsed DOM.
 3. Write `extension/tests/fixtures/README.md` fixing the **scrubbing convention**, which is the part
@@ -743,7 +1140,8 @@ storing and the one it requires.
 **Package:** `server/app/carriers`
 
 **Objective:** Define the carrier seam as a `Protocol` so the service layer depends on a shape, and
-the mock in Task 4.5 is a peer of the real adapter rather than a patch over it.
+the scripted double in Task 4.5 and the runtime stub in Task 4.14 are peers of the real adapter
+rather than patches over it.
 
 **Instructions:**
 1. Create `server/app/carriers/__init__.py` and `server/app/carriers/base.py`.
@@ -807,13 +1205,20 @@ and the version gate that rejects an unsupported client **before** any model or 
 **Instructions:**
 1. Create `server/app/deps.py` with `get_settings_dep` and `get_carrier_adapter` reading from
    `request.app.state` — the objects are constructed once in `main.py` (Task 6.5), not per request.
-2. Implement `require_supported_client` as a dependency: parse the client-version header, compare to
-   `Settings.min_client_version`, raise `UnsupportedClientVersion` if below or absent.
+2. Implement `require_supported_client` as a dependency: parse **`X-Boomerang-Client-Version`**,
+   compare to `Settings.min_client_version`, raise `UnsupportedClientVersion` if below or absent.
+   - **The header name is normative and comes from requirements §4.1.** Neither this task nor Task
+     4.13 named it before; since §4.2 specifies that an *absent* header raises `client-too-old`, two
+     independently-written tasks choosing different spellings would produce a system where every
+     request from the real client is rejected — and both unit suites would pass. Task 3.18's golden
+     payloads carry the header so the two sides are checked against one string. Decision D16.
 3. **The gate runs before the handler body.** §8.3 asserts on two endpoints that no upstream call
    happens on rejection, so it must be a dependency, not a first line inside each handler.
 4. Unit tests: a version below the floor raises; an absent header raises; a version at the floor
-   passes; a malformed version raises rather than being treated as new.
-5. Reference: Low-Level Design §3.3, §7.1; requirements §4.2 (`client-too-old`), §5.1.
+   passes; a malformed version raises rather than being treated as new; **a header spelled any other
+   way is treated as absent** — this is the assertion that catches a divergence from §4.1.
+5. Reference: Low-Level Design §3.3, §7.1; requirements §4.1 (header name), §4.2 (`client-too-old`),
+   §5.1; decision D16.
 
 **Verification:**
 - `cd server && uv run pytest tests/unit/test_deps.py`
@@ -869,7 +1274,7 @@ of its inputs and an injected instant.
    - select the subtree the adapter names, not the whole document;
    - strip `<script>`, `<style>`, inline event handlers, and `data:` URIs;
    - normalise whitespace;
-   - truncate at `PAYLOAD_CEILING_BYTES` measured in **bytes, not characters**.
+   - truncate at `MAX_INGEST_BYTES` (requirements §5.1) measured in **bytes, not characters**.
 2. Truncation must be deterministic and must not split a multi-byte character.
 3. Unit tests, using Task 2.8 fixtures: a page with inline handlers loses them; a page over the
    ceiling comes back exactly at or under it; the same page extracts identically twice; a page whose
@@ -1135,6 +1540,60 @@ permission offered afterwards — as queryable state, with the request confined 
 
 ---
 
+### Track K: Wire contract fixtures [repo]
+
+#### Task 3.18: `contracts/` — golden payloads both sides assert against
+
+**Prerequisites:** Task 3.4 (server models complete), Task 3.16 (extension response validators)
+**Conflicts with:** None
+**Parallel with:** Tasks 3.6–3.17
+**Package:** `contracts/`
+
+**Objective:** This plan's preamble states that the wire types are *"a duplicated type by design"*.
+Duplication is a legitimate choice — it is what keeps the two workspaces parallel from Batch 1 to
+Batch 7 — but nothing verified the two copies agree. The server's Pydantic model and the extension's
+TypeScript interface never meet in a test, so both suites can be green on mutually incompatible
+shapes and the first evidence would be a broken request in a real browser. Decision D15.
+
+**Why golden files rather than code generation.** Codegen would couple the two workspaces' builds and
+destroy the parallelism that is this plan's main asset. Golden JSON is a shared *artifact*, not a
+shared *build step*: each side reads the files independently at test time, and a divergence fails a
+test on whichever side drifted. Batches 1–7 stay parallel.
+
+**Instructions:**
+1. Create `contracts/` at the repository root — not inside either workspace, because it belongs to
+   neither.
+2. For each of the seven endpoints in requirements §4.1, write a canonical request body and a
+   canonical success response body as JSON, named `contracts/{endpoint}/request.json` and
+   `contracts/{endpoint}/response.json`. Use realistic values, not `"string"` placeholders — a
+   fixture that no serializer would ever produce cannot catch a type error.
+3. Write one error body per reason code in requirements §4.2 — all nine, each with the mandatory
+   `request_id` — as `contracts/errors/{reason}.json`.
+4. Requests carry the `X-Boomerang-Client-Version` header value alongside the body, so both sides are
+   checked against one spelling of the header Task 3.8 and Task 4.13 must agree on (decision D16).
+5. Write `contracts/README.md` stating the rule: **these files are the contract; a change to either
+   side that requires changing a file here is a wire-breaking change** and must be made deliberately,
+   in its own commit, touching both workspaces.
+6. **Server side:** a test that parses each request fixture into its Pydantic model without error, and
+   serializes each model to a body that equals the response fixture. Add it to
+   `server/tests/unit/test_contracts.py`.
+7. **Extension side:** a test that type-checks each response fixture against its interface and passes
+   it through the Task 3.16 validators, and that each request the client builds matches the request
+   fixture. Add it to `extension/tests/contracts.test.ts`.
+8. **The failure mode this exists to catch:** rename a field on one side only, and exactly one of the
+   two suites must go red. Verify that by doing it before declaring the task complete.
+9. Reference: requirements §4.1, §4.2; low-level design §3.5; decision D15.
+
+**Verification:**
+- `cd server && uv run pytest tests/unit/test_contracts.py`
+- `cd extension && bun run test tests/contracts.test.ts`
+- Temporarily rename a field in `app/models/orders.py` — the server contract test fails and the
+  extension one does not; revert.
+
+**Requirements covered:** §4.1, §4.2
+
+---
+
 ### Batch 3 Commit Checkpoint
 
 After all tracks complete:
@@ -1142,6 +1601,8 @@ After all tracks complete:
 - [ ] Extension type-checks and tests pass: `cd extension && bunx tsc --noEmit && bun run test`
 - [ ] Every wire type exists on both sides of the boundary, and every leaf module the driver and the
       popup will consume is implemented and unit-tested.
+- [ ] Both sides assert against the same golden payloads in `contracts/`, so the duplicated wire
+      types can no longer drift silently.
 - [ ] `ValidatedAction` is unconstructable outside the validator, and the egress scan fails closed.
 
 ---
@@ -1287,34 +1748,90 @@ servable locations — translating carrier failures into the error taxonomy.
 
 ---
 
-#### Task 4.5: `app/carriers/usps/mock.py` — `MockUspsAdapter`
+#### Task 4.5: `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter`
 
 **Prerequisites:** Task 3.5, Task 3.4
 **Conflicts with:** Tasks 4.3, 4.4 (`app/carriers/usps/__init__.py`)
-**Parallel with:** Tasks 4.1–4.2, 4.6–4.13
+**Parallel with:** Tasks 4.1–4.2, 4.6–4.14
 **Package:** `server/app/carriers/usps`
 
 **Objective:** Provide the scriptable adapter every server integration test drives, as a peer
 implementation of the protocol rather than a patch.
 
+**This class was called `MockUspsAdapter` and the rename is the point.** Requirements §5.1 makes
+`CARRIER_ADAPTER=mock` the *runtime* default until USPS access lands, so "the mock" also names the
+adapter a running deployment uses — and a strict push/pop double cannot serve one: the first real
+request pops an empty queue and raises. Two different objects were sharing one name. This task builds
+the **test double**; Task 4.14 builds the **runtime stub**. Decision D21.
+
 **Instructions:**
-1. Create `server/app/carriers/usps/mock.py` with `MockUspsAdapter` implementing `CarrierAdapter`.
+1. Create `server/app/carriers/usps/scripted.py` with `ScriptedUspsAdapter` implementing
+   `CarrierAdapter`.
 2. `push(method, outcome)` queues an outcome per method; each call pops the next queued outcome for
    that method. An outcome is either a value or an exception to raise.
 3. Calling a method with an empty queue is an **error**, not a default — a test that did not say what
-   should happen must fail rather than silently receive a happy path.
+   should happen must fail rather than silently receive a happy path. Do **not** add a permissive
+   mode for runtime use; that is Task 4.14's job, and a mode flag here would put the silent happy
+   path one constructor argument away from every test.
 4. Provide `assert_drained()` for teardown: a queued outcome that no call consumed means the test did
    not exercise what it claimed to. §8.1 makes this a rule; wire it into a fixture in Task 7.1.
 5. Record calls with arguments, so a test can assert **that eligibility was called before schedule**
    — the ordering repo rule 3 depends on.
 6. Unit tests for the mock: an unqueued call raises; a queued exception is raised; `assert_drained`
    fails with a leftover; the call log preserves order.
-7. Reference: Low-Level Design §8.1.
+7. Reference: Low-Level Design §8.1; decision D21.
+
+**Verification:**
+- `cd server && uv run pytest tests/unit/carriers/test_scripted_adapter.py`
+
+**Requirements covered:** NFR-6.3
+
+---
+
+### Track E: Server runtime mock carrier [server]
+
+#### Task 4.14: `app/carriers/mock.py` — `MockCarrierAdapter`
+
+**Prerequisites:** Task 3.5, Task 3.4
+**Conflicts with:** None
+**Parallel with:** Tasks 4.1–4.13
+**Package:** `server/app/carriers`
+
+**Objective:** Build the adapter a *running* deployment uses when `CARRIER_ADAPTER=mock` —
+requirements §5.1's default until USPS credentials arrive (Task 0.2), and what Task 8.6's manual
+acceptance run and every demo books against. Task 4.5's scripted double cannot do this job; it raises
+on the first unscripted call by design. Decision D21.
+
+**Instructions:**
+1. Create `server/app/carriers/mock.py` with `MockCarrierAdapter` implementing `CarrierAdapter`. It
+   lives at `carriers/`, not `carriers/usps/`, because it impersonates no specific carrier.
+2. **Deterministic, not random.** Confirmation numbers are derived from the request, so the same
+   booking twice yields the same number and a test can assert on it.
+3. Every confirmation number carries a **fixed recognisable prefix** — the marker Task 8.5 renders as
+   "simulated" (decision D22). Export the prefix as a module constant so the extension's expectation
+   and the server's production of it are traceable to one definition; put it in `contracts/` (Task
+   3.18) so both workspaces read the same value.
+4. `check_eligibility` returns eligible for every address **except one designated unserviceable
+   postcode**, declared as a module constant and documented in `server/AGENTS.md`.
+   - **Why a deliberately failing postcode.** FR-3.4.2's graceful second answer — what the user sees
+     when pickup is not available — is the hardest copy in the product to get right and the easiest
+     to never see. An always-eligible mock means nobody looks at that path until a real user finds it.
+5. `schedule` returns a next-available date computed from the current date, not a hard-coded one that
+   silently goes stale.
+6. `cancel` succeeds for a confirmation number this adapter issued and raises the documented
+   not-found error otherwise.
+7. Unit tests: the same request yields the same confirmation number; every issued number carries the
+   prefix; the designated postcode is ineligible and every other tested one is eligible; cancelling
+   an unknown number raises; the scheduled date is in the future relative to a frozen clock.
+8. Wire it into `main.py`'s adapter selection in Task 6.5, keyed on `CARRIER_ADAPTER`.
+9. Reference: requirements §5.1, FR-3.4.1, FR-3.4.2, FR-3.4.5, FR-3.4.6; decisions D21, D22.
 
 **Verification:**
 - `cd server && uv run pytest tests/unit/carriers/test_mock_adapter.py`
+- With `CARRIER_ADAPTER=mock`, a schedule request against a running server returns a prefixed
+  confirmation number rather than raising.
 
-**Requirements covered:** NFR-6.3
+**Requirements covered:** §5.1, FR-3.4.1, FR-3.4.2
 
 ---
 
@@ -1323,12 +1840,13 @@ implementation of the protocol rather than a patch.
 #### Task 4.6: `src/storage/` — key layout, defensive read, and rebuild
 
 **Prerequisites:** Task 2.4, Task 2.6
-**Conflicts with:** Tasks 4.7–4.12 (all export from `src/storage/index.ts`)
+**Conflicts with:** Task 4.7 (both touch `src/storage/index.ts`)
 **Parallel with:** Task 4.13, all server tasks
 **Package:** `extension/src/storage`
 
-**Objective:** Fix the key layout, make every read defensive, and implement the rebuild whose
-**pickup carve-out** is the part that must not be got wrong.
+**Objective:** Fix the key layout, make every read defensive, implement the rebuild whose
+**pickup carve-out** is the part that must not be got wrong, and **write the barrel file once** so
+the four repository tasks that follow do not serialise behind it.
 
 **Instructions:**
 1. Create `extension/src/storage/keys.ts` with the key scheme from §5.1 — one key per entity
@@ -1340,10 +1858,24 @@ implementation of the protocol rather than a patch.
    exists at USPS whether or not this store remembers it, so `rebuild` preserves unsettled pickup
    records and their booked addresses. Add a `// dev-note:` with exactly that reasoning; a future
    reader simplifying `rebuild` to "clear everything" is the failure this note exists to stop.
-4. Unit tests: a corrupt value reads as absent; a stale `schema_version` triggers rebuild; rebuild
+4. **Write `extension/src/storage/index.ts` in this task, complete.** List every export the storage
+   package will have — including the repositories Tasks 4.8–4.11 have not written yet — so those four
+   tasks add a *file* each and never edit a shared one.
+   - **Why this changed.** Tasks 4.6–4.12 were previously a seven-task fully serial chain, justified
+     as protecting "one state machine, one serialising queue". The actual serialising constraint was
+     this barrel file, not the invariant: each repository already lives in its own module. Writing
+     the barrel up front drops Batch 4's long pole from 7 slots to about 4 — the largest single
+     schedule improvement available in this plan. `StorageCoordinator.transact` stays whole in Task
+     4.7, because *that* is a real invariant. Decision D19.
+   - The barrel will reference modules that do not exist yet, so this task also adds the four empty
+     module files with their type signatures and a `throw new Error("not implemented")` body. Tasks
+     4.8–4.11 replace the bodies. Keep the placeholder throw, never a silent no-op return — an
+     unimplemented repository must fail loudly if something wires it early.
+5. Unit tests: a corrupt value reads as absent; a stale `schema_version` triggers rebuild; rebuild
    discards orders and returns but **keeps unsettled pickups and their booked addresses**; rebuild on
-   a current version is a no-op.
-5. Reference: Low-Level Design §5.1, §3.4; requirements FR-3.1.5, FR-3.4.5a, NFR-6.5.
+   a current version is a no-op; **importing `src/storage/index.ts` type-checks** with the
+   placeholders in place.
+6. Reference: Low-Level Design §5.1, §3.4; requirements FR-3.1.5, FR-3.4.5a, NFR-6.5; decision D19.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/rebuild.test.ts`
@@ -1355,7 +1887,7 @@ implementation of the protocol rather than a patch.
 #### Task 4.7: `StorageCoordinator.transact` — the serialising queue
 
 **Prerequisites:** Task 4.6
-**Conflicts with:** Tasks 4.6, 4.8–4.12 (`src/storage/index.ts`)
+**Conflicts with:** Task 4.6 (both touch `src/storage/index.ts`)
 **Parallel with:** Task 4.13, all server tasks
 **Package:** `extension/src/storage`
 
@@ -1387,8 +1919,8 @@ as **one** `chrome.storage.local.set`.
 #### Task 4.8: `OrderRepository`
 
 **Prerequisites:** Task 4.7
-**Conflicts with:** Tasks 4.6–4.7, 4.9–4.12 (`src/storage/index.ts`)
-**Parallel with:** Task 4.13, all server tasks
+**Conflicts with:** None — `src/storage/orders.ts` only (the barrel was written in 4.6)
+**Parallel with:** Tasks 4.9, 4.10, 4.11, 4.13, all server tasks
 **Package:** `extension/src/storage`
 
 **Objective:** Persist orders and their items, stamping `first_seen_at` from an injected clock.
@@ -1414,8 +1946,8 @@ as **one** `chrome.storage.local.set`.
 #### Task 4.9: `ReturnRepository`
 
 **Prerequisites:** Task 4.7
-**Conflicts with:** Tasks 4.6–4.8, 4.10–4.12 (`src/storage/index.ts`)
-**Parallel with:** Task 4.13, all server tasks
+**Conflicts with:** None — `src/storage/returns.ts` only (the barrel was written in 4.6)
+**Parallel with:** Tasks 4.8, 4.10, 4.11, 4.13, all server tasks
 **Package:** `extension/src/storage`
 
 **Objective:** Persist return requests and answer the one question the driver asks before starting:
@@ -1442,8 +1974,8 @@ is there already a live return for this item?
 #### Task 4.10: `PickupRepository`
 
 **Prerequisites:** Task 4.7
-**Conflicts with:** Tasks 4.6–4.9, 4.11–4.12 (`src/storage/index.ts`)
-**Parallel with:** Task 4.13, all server tasks
+**Conflicts with:** None — `src/storage/pickups.ts` only (the barrel was written in 4.6)
+**Parallel with:** Tasks 4.8, 4.9, 4.11, 4.13, all server tasks
 **Package:** `extension/src/storage`
 
 **Objective:** Persist pickup intent and confirmation, deriving `Abandoned` and `Collected` at read
@@ -1475,8 +2007,8 @@ time rather than storing them.
 #### Task 4.11: `AddressRepository` and `SessionStore`
 
 **Prerequisites:** Task 4.7
-**Conflicts with:** Tasks 4.6–4.10, 4.12 (`src/storage/index.ts`)
-**Parallel with:** Task 4.13, all server tasks
+**Conflicts with:** None — `src/storage/addresses.ts` and `session.ts` only (barrel written in 4.6)
+**Parallel with:** Tasks 4.8, 4.9, 4.10, 4.13, all server tasks
 **Package:** `extension/src/storage`
 
 **Objective:** Two singleton-key stores: the user's pickup address, and the `DriverSession` the worker
@@ -1502,7 +2034,7 @@ rehydrates from.
 #### Task 4.12: Coordinator cross-entity operations — eviction and clear-all
 
 **Prerequisites:** Tasks 4.8, 4.9, 4.10, 4.11
-**Conflicts with:** Tasks 4.6–4.11 (`src/storage/index.ts`)
+**Conflicts with:** Task 4.7 (`src/storage/coordinator.ts`)
 **Parallel with:** Task 4.13, all server tasks
 **Package:** `extension/src/storage`
 
@@ -1539,9 +2071,9 @@ implement the clear-all that must not orphan a real-world commitment.
 
 #### Task 4.13: `src/api/` — the typed server client
 
-**Prerequisites:** Task 3.15, Task 3.16, Task 2.5
+**Prerequisites:** Task 3.15, Task 3.16, Task 2.5, Task 3.18
 **Conflicts with:** None
-**Parallel with:** Tasks 4.6–4.12, all server tasks
+**Parallel with:** Tasks 4.6–4.12, 4.14, all server tasks
 **Package:** `extension/src/api`
 
 **Objective:** Wrap the seven endpoints with typed calls, a reason-to-error map, and a retry policy
@@ -1549,9 +2081,14 @@ that knows which requests are safe to repeat.
 
 **Instructions:**
 1. Create `extension/src/api/client.ts` with one method per endpoint from requirements §4.1.
-2. Every request carries the client version header from `src/config.ts`; a 4xx with reason
-   `client-too-old` (requirements §4.2, floor set by `MIN_CLIENT_VERSION` in §5.1) maps to a distinct
-   typed error the popup renders as "update required", never as a generic failure.
+2. Every request carries **`X-Boomerang-Client-Version`** — the name is normative, from requirements
+   §4.1 — with the value of `CLIENT_VERSION` from `src/config.ts`. A 4xx with reason `client-too-old`
+   (requirements §4.2, floor set by `MIN_CLIENT_VERSION` in §5.1) maps to a distinct typed error the
+   popup renders as "update required", never as a generic failure.
+   - **Use the exact spelling Task 3.8's gate reads.** §4.2 makes an *absent* header a
+     `client-too-old` rejection, so a mismatched spelling here rejects every request from the real
+     client while both unit suites stay green. Task 3.18's golden payloads carry the header; assert
+     against them rather than against a string typed twice. Decision D16.
 3. Map each of the nine documented kebab-case `reason` codes to a typed error, and surface
    `message` and `request_id` — the popup's failure copy quotes the id as "reference: <id>" per §4.2.
    `details.servable_locations` on `location-not-serviceable` is the one payload a caller reads.
@@ -1563,12 +2100,19 @@ that knows which requests are safe to repeat.
    cancel can race a refresh. `// dev-note:` this — it is the kind of rule a later "just add retries
    everywhere" change would erase.
 5. Responses go through Task 3.16's validators before returning.
-6. Timeouts from `API_TIMEOUT_MS`; a timeout is a typed error, not a hang.
-7. Unit tests with a fetch double: each endpoint issues the documented method and path; the version
-   header is present on all seven; each documented reason maps to its error; an unknown reason maps
-   to the generic one; a 503 on a GET retries within the bound; a 503 on `POST /pickups` does **not**
-   retry; a timeout raises the timeout error; an invalid response body rejects.
-8. Reference: Low-Level Design §3.4, §6.1; requirements §4.1, §4.2, §5.1, NFR-6.3.
+6. Timeouts from **`API_REQUEST_TIMEOUT_MS`** — the per-attempt ceiling — and the retry loop from
+   step 4 bounded by **`API_RETRY_BUDGET_MS`**, the total wall-clock budget across attempts. A
+   timeout is a typed error, not a hang.
+   - Both names are normative (requirements §5.1). This task previously said `API_TIMEOUT_MS`, which
+     exists in no document, and never mentioned the retry budget at all — so the bound on step 4's
+     "bounded retry" would have been invented locally. Decision D17.
+7. Unit tests with a fetch double: each endpoint issues the documented method and path; **the header
+   is spelled `X-Boomerang-Client-Version`** on all seven; each documented reason maps to its error;
+   an unknown reason maps to the generic one; a 503 on a GET retries within the bound; a 503 on
+   `POST /pickups` does **not** retry; **retries stop once `API_RETRY_BUDGET_MS` is exhausted even if
+   the attempt count allows more**; a timeout raises the timeout error; an invalid response body
+   rejects; every request and response shape matches its `contracts/` fixture.
+8. Reference: Low-Level Design §3.4, §6.1; requirements §4.1, §4.2, §5.1, NFR-6.3; decisions D16, D17.
 
 **Verification:**
 - `cd extension && bun run test tests/api`
@@ -1681,7 +2225,7 @@ them — the eligibility gate, the postage gate, and refresh-then-cancel.
    refresh reports the pickup already collected, cancel returns that outcome rather than attempting
    the cancel (rule 3).
 5. The ETag never leaves this function — it is not returned, not logged, not persisted.
-6. Unit tests against `MockUspsAdapter`: schedule without a prior eligibility check raises; schedule
+6. Unit tests against `ScriptedUspsAdapter` (Task 4.5): schedule without a prior eligibility check raises; schedule
    with a non-USPS postage carrier raises; schedule after a successful check succeeds and the mock's
    call log shows eligibility first; cancel calls refresh then cancel in that order; cancel on an
    already-collected pickup returns collected without calling cancel; a refresh failure surfaces as
@@ -1762,32 +2306,38 @@ abstraction that turns a user question into a persisted pause rather than a bloc
 
 ### Track E: Extension messaging [extension]
 
-#### Task 5.6: `src/messaging/` — internal and external message routing
+#### Task 5.6: `src/messaging/` — internal message routing
 
 **Prerequisites:** Task 4.12, Task 2.4
 **Conflicts with:** None
 **Parallel with:** Tasks 5.1–5.5
 **Package:** `extension/src/messaging`
 
-**Objective:** Define the enumerated message set and route it, with the dashboard's external origin
-checked rather than trusted.
+**Objective:** Define the enumerated message set and route it between the popup, the content script
+and the worker.
+
+**The external half of this task was removed.** FR-3.6.3 — the dashboard messaging the extension over
+`externally_connectable` — is cut from PoC scope, because the dashboard origin it depends on does not
+exist and high-level design §11 Q1 records the hostname as undecided. There is no `on_external`
+handler, no `DASHBOARD_ORIGIN`, and no external message subset. Decision D6.
 
 **Instructions:**
 1. Create `extension/src/messaging/messages.ts` with a discriminated union covering every message the
-   popup, content script and dashboard can send. An unknown type is rejected, not forwarded.
-2. Create `extension/src/messaging/router.ts` with `on_internal` and `on_external` handlers.
-3. `on_external` verifies `sender.origin` against `DASHBOARD_ORIGIN` **before** dispatch, and serves a
-   strict subset of the message set — the dashboard reads, it does not drive returns. `// dev-note:`
-   that `externally_connectable` is a filter, not an authorisation check.
-4. Unit tests: a valid internal message dispatches; an unknown type is rejected; an external message
-   from the dashboard origin dispatches; one from another origin is rejected without dispatch; an
-   external message of a driving type is rejected even from the right origin.
-5. Reference: Low-Level Design §3.4, §7.2; requirements FR-3.6.1, FR-3.6.3, NFR-6.5.
+   popup and content script can send. An unknown type is rejected, not forwarded.
+2. Create `extension/src/messaging/router.ts` with an `on_internal` handler.
+3. Add a `// dev-note:` recording the D6 cut and what reinstating it would require: an
+   `externally_connectable` manifest key naming a real dashboard origin, an `on_external` handler that
+   verifies `sender.origin` **before** dispatch, and a strict read-only subset of the message set —
+   the dashboard would read, never drive a return. Note also that `externally_connectable` is a
+   filter, not an authorisation check. Writing this down now is cheaper than rediscovering it.
+4. Unit tests: a valid internal message dispatches; an unknown type is rejected; a message arriving
+   from outside the extension is rejected without dispatch.
+5. Reference: Low-Level Design §3.4, §7.2; requirements FR-3.6.1, NFR-6.5; decision D6.
 
 **Verification:**
 - `cd extension && bun run test tests/messaging`
 
-**Requirements covered:** FR-3.6.1, FR-3.6.3, NFR-6.5
+**Requirements covered:** FR-3.6.1, NFR-6.5
 
 ---
 
@@ -1913,7 +2463,7 @@ response shape.
 
 #### Task 6.5: `app/main.py` — lifespan, handlers, CORS, Mangum
 
-**Prerequisites:** Tasks 6.1, 6.2, 6.3, 6.4, 3.6, 4.4, 4.5, 4.2, 2.2
+**Prerequisites:** Tasks 6.1, 6.2, 6.3, 6.4, 3.6, 4.4, 4.14, 4.2, 2.2
 **Conflicts with:** None
 **Parallel with:** Tasks 6.6–6.8
 **Package:** `server/app`
@@ -1935,13 +2485,23 @@ into the one documented body shape.
 4. Configure CORS from `Settings.allowed_origins` — an explicit list, never `*`.
 5. Register `RequestIdMiddleware`.
 6. Export `handler = Mangum(app)` for Lambda.
-7. The adapter on `app.state` is `UspsAdapter` in normal operation; integration tests substitute
-   `MockUspsAdapter` at this seam (Task 7.1), which is why it is constructed here and injected rather
-   than imported by services.
-8. Unit tests: startup fails when a required setting is missing; a `BoomerangError` renders the
-   documented body and status; a validation error renders the same shape; the CORS header reflects a
-   configured origin and is absent for an unconfigured one; `/health` responds.
-9. Reference: Low-Level Design §7.1, §6.1, §6.2; requirements NFR-6.4, NFR-6.6.
+7. **Select the adapter on `CARRIER_ADAPTER` (requirements §5.1):** `usps` constructs `UspsAdapter`
+   (Task 4.4); `mock` constructs `MockCarrierAdapter` (Task 4.14). Any other value **fails startup** —
+   an unrecognised adapter name must not silently fall back to either one. Integration tests
+   substitute `ScriptedUspsAdapter` (Task 4.5) at this same seam (Task 7.1), which is why the adapter
+   is constructed here and injected rather than imported by services.
+   - `ScriptedUspsAdapter` is a test double and **must not be reachable from `CARRIER_ADAPTER`**. Add
+     a unit test asserting that no configuration value selects it (decision D21).
+8. **Log the selected adapter at startup, at warning level when it is `mock`.** Requirements §5.1
+   names the failure this guards: a deployment that silently runs on the mock returns fabricated
+   confirmation numbers. The operator-facing half of that guard is this line; the user-facing half is
+   the simulated-booking label in Task 8.5 (decision D22).
+9. Unit tests: startup fails when a required setting is missing; startup fails on an unknown
+   `CARRIER_ADAPTER`; `mock` selects `MockCarrierAdapter` and logs a warning; a `BoomerangError`
+   renders the documented body and status; a validation error renders the same shape; the CORS header
+   reflects a configured origin and is absent for an unconfigured one; `/health` responds.
+10. Reference: Low-Level Design §7.1, §6.1, §6.2; requirements §5.1, NFR-6.4, NFR-6.6; decisions D21,
+    D22.
 
 **Verification:**
 - `cd server && uv run pytest tests/unit` and `cd server && uv run fastapi dev app/main.py` starts.
@@ -2068,6 +2628,148 @@ After all tracks complete:
 
 ---
 
+## Deployment Track
+
+**Not a batch.** This track has no barrier and blocks nothing downstream. It opens the moment Task
+6.5 exports the Mangum handler — the last thing infra actually needs — and runs in parallel with
+Batches 7 through 10. Running it as a trailing batch would idle it through four batches for no
+dependency reason and push the first real deployment to the end of the project, which is exactly
+where deployment surprises are most expensive. Decisions D7–D9, D12.
+
+**Its specification already exists.** [`infra/AGENTS.md`](../infra/AGENTS.md) was rewritten for this
+architecture and carries the resource table, the sizing, the two-environment split, and the
+reasoning behind every choice most likely to be "helpfully" reversed. These tasks implement it; they
+do not re-decide it. Read it before opening an editor.
+
+---
+
+### Task I.1: Replace the Terraform with the Lambda topology
+
+**Prerequisites:** Task 6.5 (a deployable handler), Task 1.4 (the pinned extension IDs)
+**Conflicts with:** None
+**Parallel with:** All of Batches 7–10
+**Package:** `infra/`
+
+**Objective:** Zero of this plan's original 79 tasks touched `infra/`, while NFR-6.6 and NFR-6.7 had
+traceability rows pointing at application tasks that cannot satisfy them — no application task can
+create a CloudWatch alarm. Close that.
+
+**Instructions:**
+1. **Delete** the VPC, internet gateway, subnets, EC2 instance and security group from
+   `infra/main.tf`, along with the `vpc_cidr`, `instance_type` and `allowed_cidr` variables and any
+   output that referenced them. `infra/AGENTS.md` explicitly instructs this deletion; do not leave
+   the old resources beside the new ones "in case".
+2. Provision, per the resource table in `infra/AGENTS.md`:
+   - the **Lambda function** — 1024 MB, 60 s timeout, ARM, and
+     `reserved_concurrent_executions = 5`;
+   - the **Function URL** with auth type `NONE` and CORS restricted to **exactly one**
+     `chrome-extension://` origin — the extension ID Task 1.4 derived for this environment;
+   - the **IAM execution role**: Bedrock invoke, Parameter Store read, KMS decrypt, log write, least
+     privilege and path-scoped, and **without** read access to
+     `/boomerang/release/<env>/extension-key`;
+   - **SSM `SecureString`** parameters for the USPS client ID and secret — Terraform grants access
+     and never holds the value, because state is plaintext and retained;
+   - the **CloudWatch log group** with **30-day retention set explicitly** — an unset log group
+     retains forever;
+   - **Bedrock model invocation logging explicitly disabled**, asserted off rather than left
+     unconfigured. With it on, Bedrock writes full request bodies to S3 or CloudWatch, and the
+     request body on the ingest path is the user's order-page DOM — that one setting falsifies
+     NFR-6.1 without any application code changing;
+   - **alarms** on Lambda error rate, Lambda `Throttles`, USPS failure rate and Bedrock
+     `InputTokenCount`, plus an **AWS Budget** at $20/day.
+3. Two environments, `dev` and `prod`, sharing nothing: separate Function URLs, log groups, CORS
+   origins and SSM paths, with the execution role scoped so `dev` cannot read `prod`.
+4. **Delete the "Legacy scaffold" section of `infra/AGENTS.md`** in this same change — the section
+   ends with the instruction to do so once these resources land. Leaving it turns an accurate
+   document into a misleading one the moment this task completes.
+5. Keep `terraform.tfvars.example` in sync with every variable added or removed.
+6. Reference: high-level design §6.1, §6.2, §8.2, §8.3, §8.4; `infra/AGENTS.md`; requirements
+   NFR-6.5, NFR-6.6, NFR-6.7; decisions D7, D8.
+
+**Verification:**
+- `cd infra && terraform init && terraform validate && terraform plan` — plans cleanly with no VPC,
+  EC2 or security-group resource in the plan output.
+- `grep -ri "aws_vpc\|aws_instance\|aws_security_group" infra/` returns nothing.
+- The planned Function URL CORS block names exactly one origin, and it matches the extension ID in
+  `extension/AGENTS.md`.
+- `terraform plan` shows Bedrock invocation logging disabled and log-group retention set to 30 days.
+
+**Requirements covered:** NFR-6.5, NFR-6.6, NFR-6.7
+
+---
+
+### Task I.2: First deploy and a live smoke test
+
+**Prerequisites:** Task I.1
+**Conflicts with:** None
+**Parallel with:** All of Batches 7–10
+**Package:** `infra/`
+
+**Objective:** Prove the deployed thing serves the same seven endpoints the test suite serves, from
+a real browser origin, before Batch 10 starts asserting things about a bundle nobody has run against
+a real server.
+
+**Instructions:**
+1. Apply to `dev`. State is local today — `infra/AGENTS.md` warns that a second person applying will
+   corrupt it, so either move to the S3 backend it sketches or make it explicit that exactly one
+   person applies during the PoC.
+2. Write the USPS credentials into SSM by hand. If Task 0.2's access has not arrived, deploy with
+   `CARRIER_ADAPTER=mock` and confirm the startup log emits the Task 6.5 warning.
+3. Smoke test from a real loaded extension, not `curl`: `/health` responds; one ingest round trip
+   succeeds; and a request from **any other origin is rejected by CORS**. The last one is the
+   assertion that matters — it is the only browser-side control on an unauthenticated endpoint.
+4. Record the deployed Function URL and the measured cold-start time in `docs/spikes/deploy.md`.
+   Compare the cold start against NFR-6.4's budget and against Task 0.3's measurement; a cold start
+   that breaks the budget is an upstream amendment (decision D25), not a footnote.
+
+**Verification:**
+- `/health` returns 200 over the Function URL.
+- A request with a spoofed `Origin` header is refused.
+- `docs/spikes/deploy.md` records the URL and the cold-start figure.
+
+**Requirements covered:** NFR-6.4, NFR-6.5
+
+---
+
+### Task I.3: Reconcile `UspsAdapter` against the USPS sandbox
+
+**Prerequisites:** Task I.1, Task 0.2 (credentials granted), Task 4.4
+**Conflicts with:** None
+**Parallel with:** All of Batches 7–10
+**Package:** `server/app/carriers/usps`
+
+**Objective:** Tasks 4.3–4.5 build the USPS client against `respx` mocks written from documentation.
+Nobody has seen a real USPS response. This task is where "built against the documented contract"
+becomes "verified the contract is real". High-level design §11 Q11 — what USPS does on a duplicate
+booking — has no answer, and this is the task that answers it. Decision D12.
+
+**If credentials have not arrived, this task does not run.** It is on no critical path, blocks
+nothing, and its absence is a known risk rather than a schedule failure. Say so in the status
+tracker rather than quietly marking it done.
+
+**Instructions:**
+1. Against the USPS sandbox, exercise each method `UspsAdapter` implements: token acquisition,
+   eligibility, schedule, refresh, cancel.
+2. **Diff every real response against the `respx` fixture** that stands in for it. Field names,
+   nesting, date formats, and error bodies are the four places documentation and reality routinely
+   diverge.
+3. Update the fixtures to the observed shapes and re-run the Batch 4 and Batch 7 suites. A fixture
+   change that breaks a test is this task finding a real defect; fix the adapter, not the assertion.
+4. **Answer HLD §11 Q11 empirically:** book a pickup, then book an identical one. Record what USPS
+   does — a second confirmation, an error, a silent no-op — in `docs/spikes/usps-sandbox.md`, and
+   raise it as an upstream amendment if FR-3.4.5's behaviour depends on an answer the design
+   assumed differently.
+5. Record token TTL and any rate limit observed; both are inputs the token provider guessed at.
+
+**Verification:**
+- `docs/spikes/usps-sandbox.md` records one observed response per method plus the duplicate-booking
+  answer.
+- `cd server && make check` passes with the reconciled fixtures.
+
+**Requirements covered:** FR-3.4.1, FR-3.4.5, FR-3.4.6, FR-3.4.8
+
+---
+
 ## Batch 7: Server Integration Tests; Driver Flows
 
 ### Track A: Server integration harness [server]
@@ -2084,11 +2786,11 @@ mocked Bedrock transport, so every §8.3 server row exercises the wired graph ra
 
 **Instructions:**
 1. Add to `server/tests/conftest.py`: an `app` fixture running the real lifespan against a test
-   `Settings`, substituting `MockUspsAdapter` on `app.state`, and an `httpx.AsyncClient` bound to it
+   `Settings`, substituting `ScriptedUspsAdapter` on `app.state`, and an `httpx.AsyncClient` bound to it
    with `ASGITransport`.
 2. Add a Bedrock transport fixture supplying recorded tool-use responses per call site, so a test
    states what the model returned without ever reaching AWS.
-3. Add an autouse teardown calling `MockUspsAdapter.assert_drained()` — a queued outcome no call
+3. Add an autouse teardown calling `ScriptedUspsAdapter.assert_drained()` — a queued outcome no call
    consumed fails the test (§8.1).
 4. Add a `caplog`-based helper asserting that no log record contains a given substring, for the
    redaction rows.
@@ -2555,29 +3257,101 @@ calendar offer, and the clear-all that warns about a live booking.
 1. **Confirmation screen:** shows the address, the carrier whose postage is on the box, and an
    explicit consent control. Consent is captured here and recorded before the booking call
    (FR-3.4.5a). The screen appears only when a pickup is actually being offered.
-2. **Copy rule, enforced by a test:** the collection copy names a **day**, never a time window
+2. **Simulated bookings are labelled as simulated.** A confirmation number carrying the
+   `MockCarrierAdapter` prefix (Task 4.14, published in `contracts/`) renders with a
+   **"simulated — no carrier was contacted"** marker on the confirmation screen and anywhere else the
+   booking is shown.
+   - **Why this exists.** Under `CARRIER_ADAPTER=mock` — requirements §5.1's default until USPS
+     access lands, and what every demo and Task 8.6's acceptance run books against — the extension
+     stores a fabricated confirmation number and writes an NFR-6.2 `ConsentStamp` for a pickup that
+     was never booked. §5.1 names this failure but guards only production. This screen is the one
+     place in the product that would otherwise state something false, and it is the screen most
+     likely to be shown to other people. The product's governing rule is that a derived thing is
+     never presented as authoritative; this is that rule applied to itself. Decision D22.
+   - Detect the prefix, not the environment. A build-time flag would be wrong whenever a dev build
+     talks to a real carrier or a prod build degrades to the mock — the confirmation number is the
+     thing that actually knows.
+3. **Copy rule, enforced by a test:** the collection copy names a **day**, never a time window
    (rule 5). Add an assertion that the rendered string contains no window-shaped phrasing.
-3. **Ineligible / refused:** show the carrier's reason and offer drop-off or a priced alternative with
+4. **Ineligible / refused:** show the carrier's reason and offer drop-off or a priced alternative with
    its price stated. Never present a paid option as if it were the free one (rule 6).
-4. **Cancel:** invokes the driver's cancellation; renders "already collected" as its own outcome, not
+5. **Cancel:** invokes the driver's cancellation; renders "already collected" as its own outcome, not
    as a failed cancel.
-5. **Calendar offer:** open the template URL in a new tab, and offer the `.ics` as a fallback. If the
+6. **Calendar offer:** open the template URL in a new tab, and offer the `.ics` as a fallback. If the
    tab fails to open, the `.ics` path still works — the reminder must not depend on one delivery
    mechanism. No Google scope is involved on either path (rules 1, 2).
-6. **Clear all data:** if `clear_all` reports an unsettled pickup, warn that a booked USPS pickup will
+7. **Clear all data:** if `clear_all` reports an unsettled pickup, warn that a booked USPS pickup will
    still happen regardless of what is deleted here, and require a second confirmation.
-7. Unit tests: the confirmation shows the address and carrier and requires consent; consent is
-   recorded before the booking call is issued; the collection copy names a day and matches no window
+8. Unit tests: the confirmation shows the address and carrier and requires consent; consent is
+   recorded before the booking call is issued; **a prefixed confirmation number renders the simulated
+   marker and an unprefixed one does not**; the collection copy names a day and matches no window
    phrasing; an ineligible result offers alternatives with prices; cancel renders collected as its own
    outcome; a failed calendar tab still offers the `.ics`; clear-all with an unsettled pickup warns
    and double-confirms.
-8. Reference: Low-Level Design §4.3, §4.5, §3.4; requirements FR-3.4.3, FR-3.4.5, FR-3.4.5a,
-   FR-3.4.6, FR-3.4.7, FR-3.4.8, FR-3.5.1, FR-3.5.3, FR-3.5.5.
+9. Reference: Low-Level Design §4.3, §4.5, §3.4; requirements §5.1, FR-3.4.3, FR-3.4.5, FR-3.4.5a,
+   FR-3.4.6, FR-3.4.7, FR-3.4.8, FR-3.5.1, FR-3.5.3, FR-3.5.5, NFR-6.2; decision D22.
 
 **Verification:**
 - `cd extension && bun run test tests/popup`
 
 **Requirements covered:** FR-3.4.3, FR-3.4.5, FR-3.4.5a, FR-3.4.6, FR-3.4.7, FR-3.4.8, FR-3.5.1, FR-3.5.3, FR-3.5.5, NFR-6.1
+
+---
+
+### Gate: Manual acceptance [extension]
+
+#### Task 8.6: Walk the whole product by hand in a real browser
+
+**Prerequisites:** Task 8.5
+**Conflicts with:** None
+**Parallel with:** —
+**Package:** `docs/`
+
+**Objective:** Nothing else in this plan runs the built extension in a real browser. Batch 9 drives an
+assembled extension under `vitest` against a fake `chrome`; Task 10.1 inspects a bundle statically.
+The fake browser is a model of Chrome written by the same people writing the code it validates, so it
+cannot catch the class of defect where the model is wrong. Decision D23.
+
+**Why the steps are written down.** An unwritten manual test is not repeatable and its failure is not
+reportable. This step list is also the demo script.
+
+**Instructions:**
+1. Write `docs/acceptance.md` with the step list below, each step paired with the **observation that
+   means it passed** — not "it works", but what specifically should be on screen.
+2. Run it: `cd extension && bun run build`, then load `.output/chrome-mv3` unpacked in Chrome with
+   `docker compose up --build` serving the API and `CARRIER_ADAPTER=mock`.
+3. The steps:
+   1. **Load unpacked.** The extension ID matches the one Task 1.4 pinned. Only `activeTab`,
+      `scripting` and `storage` are requested at install; Chrome shows no host-permission warning.
+   2. **Open an order page and scan.** Nothing injected before the gesture. After it, the popup lists
+      the orders with return windows, ordered by urgency.
+   3. **Accept the standing permission offer.** It appears *after* the first successful scan, never
+      before.
+   4. **Start a return and drive to the label choice.** The methods are listed with prices; the free
+      printable-label option is identifiable.
+   5. **Confirm the choice, then affirm the print.** The return does not advance to `LabelPrinted`
+      without the affirmation.
+   6. **Book the pickup.** Consent is captured before the call. The confirmation screen names a
+      **day**, not a window — and carries the **"simulated"** marker, because this is the mock
+      carrier (Task 4.14, decision D22). *A confirmation number rendered without that marker here is
+      a failure of this step, not a cosmetic issue.*
+   7. **Open the calendar template.** A new tab opens a prefilled Google Calendar event. No Google
+      sign-in, no OAuth consent screen appears at any point — if one does, stop and treat it as a
+      defect against rules 1 and 2.
+   8. **Cancel the pickup.** The pickup returns to a cancelled state and the return's own state is
+      unaffected.
+   9. **Reload the extension mid-return** and confirm the driver rehydrates rather than restarting.
+   10. **Clear all data** with a live booking and confirm the double-confirmation warns that the
+       booked pickup still happens.
+4. Record the result — pass, or the step that failed and what was observed instead — with the date
+   and the Chrome version. A failed step blocks the Batch 8 checkpoint.
+5. Reference: requirements FR-3.1.x, FR-3.3.x, FR-3.4.x, FR-3.5.x, FR-3.7.x; repo `AGENTS.md` rules
+   1, 2, 5, 6, 8; decisions D22, D23.
+
+**Verification:**
+- `docs/acceptance.md` exists, and its most recent run is recorded as passing with a date.
+
+**Requirements covered:** — (manual confirmation of the FRs the automated suites assert)
 
 ---
 
@@ -2587,6 +3361,9 @@ After all tracks complete:
 - [ ] Extension builds and tests pass: `cd extension && bun run build && bun run test`
 - [ ] The unpacked extension loads in Chrome and a full return can be walked by hand against the PoC
       retailer, with `docker compose up --build` serving the API.
+- [ ] **Task 8.6's step list has been run in a real browser and recorded as passing.** A green Batch 9
+      against the fake browser does not substitute for this.
+- [ ] A mock-backed booking renders as simulated, in the browser, observed by a person.
 - [ ] Nothing injects on page load; the first scan is a gesture and the standing permission is offered
       after it.
 
@@ -2766,23 +3543,28 @@ second of which exists because of finding CLASS-3.
 **Parallel with:** Tasks 9.2–9.6
 **Package:** `extension/tests/integration`
 
-**Objective:** Cover §8.3's remaining platform rows — dashboard messaging, calendar fallback, store
-rebuild, version rejection, and clear-all.
+**Objective:** Cover §8.3's remaining platform rows — calendar fallback, store rebuild, version
+rejection, and clear-all.
+
+**The dashboard-messaging row is removed.** FR-3.6.3 is cut from PoC scope (decision D6), so there is
+no external message path to assert against. Do not write a row for it; do not leave a skipped test
+standing in for it — a skipped test is a claim that the feature exists and is untested, which is the
+opposite of what is true.
 
 **Instructions:**
-1. Create `tests/integration/platform.test.ts` with rows: the dashboard origin can read the order list
-   and a foreign origin cannot; a calendar tab that fails to open still yields a working `.ics`; a
-   store at a stale `schema_version` rebuilds and **keeps unsettled pickups and their booked
-   addresses**; a server rejecting the client version surfaces an update prompt and stops the flow
-   rather than retrying; clear-all with a live pickup warns and, on confirmation, clears while telling
+1. Create `tests/integration/platform.test.ts` with rows: a calendar tab that fails to open still
+   yields a working `.ics`; a store at a stale `schema_version` rebuilds and **keeps unsettled pickups
+   and their booked addresses**; a server rejecting the client version surfaces an update prompt and
+   stops the flow rather than retrying; **a message arriving from outside the extension is rejected
+   without dispatch**; clear-all with a live pickup warns and, on confirmation, clears while telling
    the user the pickup still stands.
 2. Reference: Low-Level Design §8.3, §5.1, §7.2; requirements FR-3.5.1, FR-3.5.2, FR-3.5.4, FR-3.5.5,
-   FR-3.6.1.
+   FR-3.6.1; decision D6.
 
 **Verification:**
 - `cd extension && bun run test tests/integration`
 
-**Requirements covered:** FR-3.1.5, FR-3.5.1, FR-3.5.2, FR-3.5.3, FR-3.5.4, FR-3.5.5, FR-3.6.1, FR-3.6.3, NFR-6.3, NFR-6.4
+**Requirements covered:** FR-3.1.5, FR-3.5.1, FR-3.5.2, FR-3.5.3, FR-3.5.4, FR-3.5.5, FR-3.6.1, NFR-6.3, NFR-6.4
 
 ---
 
@@ -2802,7 +3584,7 @@ After all tracks complete:
 
 #### Task 10.1: Prod-bundle assertion in CI
 
-**Prerequisites:** Task 8.5
+**Prerequisites:** Task 8.5, Task 1.4 (the two pinned keys exist and their IDs are recorded)
 **Conflicts with:** None
 **Parallel with:** Tasks 10.2, 10.3
 **Package:** `extension`
@@ -2811,13 +3593,18 @@ After all tracks complete:
 
 **Instructions:**
 1. Add `extension/scripts/assert-prod-bundle.ts` run after `wxt build --mode production`, scanning
-   `.output/chrome-mv3/` for: `localhost`, `127.0.0.1`, any `http:` (not `https:`) URL, a dev
-   extension `key`, and any origin not in the allowed set.
-2. Also assert the built manifest's permission array is exactly `activeTab`, `scripting`, `storage`
-   and that `<all_urls>` appears nowhere — the same assertion as Task 1.2, but against the **built**
-   artefact, which is the one that ships.
-3. Wire it into the `build` script so it cannot be skipped by forgetting a separate command.
-4. Reference: Low-Level Design §7.2; requirements FR-3.7.1, NFR-6.6.
+   `.output/chrome-mv3/` for: `localhost`, `127.0.0.1`, any `http:` (not `https:`) URL, and any origin
+   not in the allowed set.
+2. **Assert the manifest `key` is the prod key, not the dev one.** Task 1.4 generates both and records
+   both derived extension IDs in `extension/AGENTS.md`; a production bundle carrying the dev key
+   produces the dev extension ID, which the prod Function URL's single-origin CORS allowlist will
+   refuse — so every request from the shipped extension fails, and it fails at the network layer
+   where the cause is least obvious. Compare against the recorded prod ID.
+3. Also assert the built manifest's permission array is exactly `activeTab`, `scripting`, `storage`,
+   that `<all_urls>` appears nowhere, and that **`externally_connectable` is absent** (decision D6) —
+   the same assertions as Task 1.2, but against the **built** artefact, which is the one that ships.
+4. Wire it into the `build` script so it cannot be skipped by forgetting a separate command.
+5. Reference: Low-Level Design §7.2; requirements FR-3.7.1, NFR-6.6; decisions D6, D20.
 
 **Verification:**
 - `cd extension && bun run build` — fails if a forbidden string is present (verify by temporarily
@@ -2837,25 +3624,45 @@ After all tracks complete:
 **Package:** repository root
 
 **Objective:** Close §9 Q4 with a script rather than a habit: every requirement is cited by some test,
-and every citation names a requirement that exists.
+every citation names a requirement that exists, and every configuration constant the code uses is one
+the requirements actually define.
 
 **Instructions:**
 1. Add `scripts/citation-sweep.sh` that greps **both directions**:
    - every `FR-` and `NFR-` id in `design/boomerang-requirements.md` appears in at least one test file
      across `server/tests/` and `extension/tests/`;
    - every `FR-`/`NFR-` id cited in a test file exists in the requirements.
-2. Report the two lists separately — an uncited requirement and an invented citation are different
-   problems with different fixes.
-3. **FR-3.6.2 is a known, deliberate exemption**: the phase-2 dashboard is out of this plan's scope
-   per low-level design §1. Put it in an explicit allowlist in the script with that reason inline, so
-   the exemption is visible rather than absent.
-4. Reference: Low-Level Design §8.4, §9 Q4.
+2. **Sweep configuration-parameter names too.** Every `SCREAMING_SNAKE_CASE` constant read from
+   configuration in `server/app/` or `extension/src/` must appear in requirements §5.1 or §5.2, and
+   every parameter those sections define must be referenced somewhere in the code.
+   - **Why this half exists.** This plan shipped three wrong constant names for months of drafting:
+     `PAYLOAD_CEILING_BYTES` and `API_TIMEOUT_MS` appear in no design document, and
+     `API_RETRY_BUDGET_MS` was specified upstream and absent from the plan entirely — so a retry
+     budget would simply never have been built. An identifier sweep catches a missing requirement
+     citation but not an invented constant, and **the invented constant is the one that compiles**.
+     Decision D18.
+   - Maintain a small allowlist for genuinely local constants that are not configuration, with the
+     reason inline for each.
+3. Report the lists separately — an uncited requirement, an invented citation, an invented constant
+   and an unused parameter are four different problems with four different fixes.
+4. **Two known, deliberate exemptions**, both in an explicit allowlist with the reason inline:
+   - **FR-3.6.2** — the phase-2 dashboard is out of this plan's scope per low-level design §1.
+   - **FR-3.6.3** — dashboard-to-extension messaging is cut from PoC scope (decision D6): the
+     dashboard origin it requires does not exist and high-level design §11 Q1 leaves the hostname
+     undecided.
+   Both are unplanned rather than satisfied, and the allowlist is what keeps them visible instead of
+   quietly absent.
+5. Wire the script into the `.github/workflows/ci.yml` repo job that Task 1.3 created with a
+   conditional skip; that skip can now be removed.
+6. Reference: Low-Level Design §8.4, §9 Q4; requirements §5.1, §5.2; decisions D6, D17, D18.
 
 **Verification:**
-- `bash scripts/citation-sweep.sh` — exits zero with FR-3.6.2 listed as an exemption and nothing else
-  uncited.
+- `bash scripts/citation-sweep.sh` — exits zero with FR-3.6.2 and FR-3.6.3 listed as exemptions and
+  nothing else uncited.
+- Introduce a constant named after nothing in §5.1 — the sweep fails; revert.
+- CI runs the sweep unconditionally.
 
-**Requirements covered:** — (this task verifies every other task's citations; FR-3.6.2 is the one allowlisted exemption)
+**Requirements covered:** — (this task verifies every other task's citations; FR-3.6.2 and FR-3.6.3 are the two allowlisted exemptions)
 
 ---
 
@@ -2916,8 +3723,14 @@ named file.
 
 | Task | Description | Prerequisites | Conflicts | Status |
 |------|-------------|---------------|-----------|--------|
-| 1.1 | Server test scaffolding and dev dependencies | None | None | [ ] |
-| 1.2 | WXT project scaffold and MV3 manifest | None | None | [ ] |
+| 0.1 | Walk the retailer return flow by hand; three go/no-go criteria | None | None | [ ] |
+| 0.2 | File the USPS API access request | None | None | [ ] |
+| 0.3 | Measure Bedrock parse and action latency | 0.1 | None | [ ] |
+| 1.1 | Reconcile the existing server test harness with the §8 layout | None | None | [ ] |
+| 1.2 | WXT project scaffold and MV3 manifest | None | 1.4 (`wxt.config.ts`) | [ ] |
+| 1.3 | CI workflow for both workspaces | None | None | [ ] |
+| 1.4 | Generate and pin the extension keypairs | 1.2 | 1.2 (`wxt.config.ts`) | [ ] |
+| 1.5 | Extension coverage floor and pre-commit hook | 1.2 | None | [ ] |
 | 2.1 | `app/errors.py` — the exception hierarchy | 1.1 | None | [ ] |
 | 2.2 | `app/config.py` — `Settings` and fail-fast validation | 1.1 | None | [ ] |
 | 2.3 | `app/logging.py` — redacting formatter and request-id binding | 1.1 | None | [ ] |
@@ -2925,7 +3738,7 @@ named file.
 | 2.5 | `src/config.ts` — build-time constants | 1.2 | None | [ ] |
 | 2.6 | Fake `chrome.storage.local` | 1.2 | 2.7 (both add to `extension/tests/fakes/chrome.ts`) | [ ] |
 | 2.7 | Fake `tabs`, `scripting`, `permissions`, worker lifecycle, and clock | 2.6 | 2.6 (both add to `extension/tests/fakes/chrome.ts`) | [ ] |
-| 2.8 | Retailer DOM fixture harness | 1.2 | None | [ ] |
+| 2.8 | Retailer DOM fixture harness | 1.2, **0.1** | None | [ ] |
 | 3.1 | `app/models/common.py` — strict base model and the error body | 2.1 | 3.2, 3.3, 3.4 (all re-export through `app/models/__init__.py`) | [ ] |
 | 3.2 | `app/models/orders.py` — ingestion payloads | 3.1 | 3.1, 3.3, 3.4 (`app/models/__init__.py`) | [ ] |
 | 3.3 | `app/models/returns.py` — `ActionKind` and `ProposedAction` | 3.1 | 3.1, 3.2, 3.4 (`app/models/__init__.py`) | [ ] |
@@ -2933,43 +3746,48 @@ named file.
 | 3.5 | `app/carriers/base.py` — the `CarrierAdapter` protocol | 3.4 | None | [ ] |
 | 3.6 | `app/middleware.py` — request id | 2.3 | None | [ ] |
 | 3.7 | `app/services/window.py` — return-window derivation and urgency | 3.2 | None | [ ] |
-| 3.8 | `app/deps.py` — app-state accessors and the client version gate | 2.1, 2.2 | None | [ ] |
+| 3.8 | `app/deps.py` — app-state accessors and the `X-Boomerang-Client-Version` gate | 2.1, 2.2 | None | [ ] |
 | 3.9 | `src/extract/` — subtree selection and sanitisation | 2.4, 2.5, 2.8 | 3.10 (both export from `src/extract/index.ts`) | [ ] |
 | 3.10 | `src/extract/` — the fail-closed egress scan | 3.9 | 3.9 (`src/extract/index.ts`) | [ ] |
 | 3.11 | `src/ranking/` — urgency ordering | 2.4 | None | [ ] |
 | 3.12 | `src/calendar/` — template URL and `.ics` | 2.4, 2.5 | None | [ ] |
-| 3.13 | `src/adapters/` — adapter type and registry | 2.4 | 3.14 (both export from `src/adapters/index.ts`) | [ ] |
-| 3.14 | The PoC retailer adapter | 3.13, 2.8 | 3.13 (`src/adapters/index.ts`) | [ ] |
+| 3.13 | `src/adapters/` — adapter type and registry | 2.4, **0.1** | 3.14 (both export from `src/adapters/index.ts`) | [ ] |
+| 3.14 | The PoC retailer adapter | 3.13, 2.8, **0.1** | 3.13 (`src/adapters/index.ts`) | [ ] |
 | 3.15 | `src/validation/` — the action validator | 2.4, 3.13 | 3.16 (both export from `src/validation/index.ts`) | [ ] |
 | 3.16 | `src/validation/` — the order response validator | 2.4 | 3.15 (`src/validation/index.ts`) | [ ] |
 | 3.17 | `src/permissions/` — two-tier permission state | 2.4, 2.7 | None | [ ] |
+| 3.18 | `contracts/` — golden wire payloads both sides assert against | 3.4, 3.16 | None | [ ] |
 | 4.1 | `app/prompts/` — tool schemas generated from the enums | 4.2, 3.2, 3.3 | 4.2 | [ ] |
 | 4.2 | `app/bedrock.py` — settings-driven client and per-call-site models | 2.2 | 4.1 (both are the model boundary; 4.1 imports from this module) | [ ] |
 | 4.3 | `app/carriers/usps/token.py` — OAuth token provider | 2.1, 2.2 | 4.4, 4.5 (`app/carriers/usps/__init__.py`) | [ ] |
 | 4.4 | `app/carriers/usps/adapter.py` — `UspsAdapter` | 4.3, 3.5, 3.4 | 4.3, 4.5 (`app/carriers/usps/__init__.py`) | [ ] |
-| 4.5 | `app/carriers/usps/mock.py` — `MockUspsAdapter` | 3.5, 3.4 | 4.3, 4.4 (`app/carriers/usps/__init__.py`) | [ ] |
-| 4.6 | `src/storage/` — key layout, defensive read, and rebuild | 2.4, 2.6 | 4.7–4.12 (all export from `src/storage/index.ts`) | [ ] |
-| 4.7 | `StorageCoordinator.transact` — the serialising queue | 4.6 | 4.6, 4.8–4.12 (`src/storage/index.ts`) | [ ] |
-| 4.8 | `OrderRepository` | 4.7 | 4.6–4.7, 4.9–4.12 (`src/storage/index.ts`) | [ ] |
-| 4.9 | `ReturnRepository` | 4.7 | 4.6–4.8, 4.10–4.12 (`src/storage/index.ts`) | [ ] |
-| 4.10 | `PickupRepository` | 4.7 | 4.6–4.9, 4.11–4.12 (`src/storage/index.ts`) | [ ] |
-| 4.11 | `AddressRepository` and `SessionStore` | 4.7 | 4.6–4.10, 4.12 (`src/storage/index.ts`) | [ ] |
-| 4.12 | Coordinator cross-entity operations — eviction and clear-all | 4.8, 4.9, 4.10, 4.11 | 4.6–4.11 (`src/storage/index.ts`) | [ ] |
-| 4.13 | `src/api/` — the typed server client | 3.15, 3.16, 2.5 | None | [ ] |
+| 4.5 | `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter` (test double) | 3.5, 3.4 | 4.3, 4.4 (`app/carriers/usps/__init__.py`) | [ ] |
+| 4.6 | `src/storage/` — key layout, defensive read, rebuild, **and the barrel** | 2.4, 2.6 | 4.7 (`src/storage/index.ts`) | [ ] |
+| 4.7 | `StorageCoordinator.transact` — the serialising queue | 4.6 | 4.6, 4.12 (`coordinator.ts`) | [ ] |
+| 4.8 | `OrderRepository` | 4.7 | None — own file | [ ] |
+| 4.9 | `ReturnRepository` | 4.7 | None — own file | [ ] |
+| 4.10 | `PickupRepository` | 4.7 | None — own file | [ ] |
+| 4.11 | `AddressRepository` and `SessionStore` | 4.7 | None — own files | [ ] |
+| 4.12 | Coordinator cross-entity operations — eviction and clear-all | 4.8, 4.9, 4.10, 4.11 | 4.7 (`coordinator.ts`) | [ ] |
+| 4.13 | `src/api/` — the typed server client | 3.15, 3.16, 2.5, 3.18 | None | [ ] |
+| 4.14 | `app/carriers/mock.py` — `MockCarrierAdapter` (runtime stub) | 3.5, 3.4, 3.18 | None | [ ] |
 | 5.1 | `app/services/ingest.py` — `IngestService` | 4.1, 4.2, 3.2, 3.7, 2.1 | None | [ ] |
 | 5.2 | `app/services/action.py` — `ActionService` | 4.1, 4.2, 3.3, 2.1 | None | [ ] |
 | 5.3 | `app/services/pickup.py` — `PickupService` | 3.5, 3.4, 2.1 | None | [ ] |
 | 5.4 | `TabHandle`, `TabHandleFactory`, and `UserPrompt` | 2.4, 2.7 | 5.5 (both export from `src/driver/index.ts`) | [ ] |
 | 5.5 | `StepExecutor` | 5.4, 3.15 | 5.4 (`src/driver/index.ts`) | [ ] |
-| 5.6 | `src/messaging/` — internal and external message routing | 4.12, 2.4 | None | [ ] |
+| 5.6 | `src/messaging/` — internal message routing | 4.12, 2.4 | None | [ ] |
 | 6.1 | `app/routes/health.py` | 1.1 | 6.2–6.4 (`app/routes/__init__.py`) | [ ] |
 | 6.2 | `app/routes/orders.py` — `POST /orders/ingest` | 5.1, 3.8, 6.1 | 6.1, 6.3, 6.4 (`app/routes/__init__.py`) | [ ] |
 | 6.3 | `app/routes/returns.py` — `POST /returns/next-step` | 5.2, 3.8, 6.2 | 6.1, 6.2, 6.4 (`app/routes/__init__.py`) | [ ] |
 | 6.4 | `app/routes/pickups.py` — the four pickup endpoints | 5.3, 3.8, 6.3 | 6.1–6.3 (`app/routes/__init__.py`) | [ ] |
-| 6.5 | `app/main.py` — lifespan, handlers, CORS, Mangum | 6.1, 6.2, 6.3, 6.4, 3.6, 4.4, 4.5, 4.2, 2.2 | None | [ ] |
+| 6.5 | `app/main.py` — lifespan, handlers, CORS, adapter selection, Mangum | 6.1, 6.2, 6.3, 6.4, 3.6, 4.4, 4.14, 4.2, 2.2 | None | [ ] |
 | 6.6 | `ReturnDriver` — construction, `transition`, and `start` | 4.9, 4.11, 5.4, 5.5 | 6.7, 6.8 (all in `src/driver/driver.ts`) | [ ] |
 | 6.7 | State machine edges and rehydration | 6.6 | 6.6, 6.8 (`src/driver/driver.ts`) | [ ] |
 | 6.8 | Selector-first step loop and the model fallback | 6.7, 3.10, 4.13, 5.5 | 6.6, 6.7 (`src/driver/driver.ts`) | [ ] |
+| I.1 | Replace the Terraform with the Lambda topology | 6.5, 1.4 | None | [ ] |
+| I.2 | First deploy and a live smoke test | I.1 | None | [ ] |
+| I.3 | Reconcile `UspsAdapter` against the USPS sandbox | I.1, 0.2, 4.4 | None | [ ] |
 | 7.1 | Integration test harness | 6.5, 4.5 | None | [ ] |
 | 7.2 | Ingestion integration rows | 7.1 | None | [ ] |
 | 7.3 | Next-step integration rows | 7.1 | None | [ ] |
@@ -2984,34 +3802,46 @@ named file.
 | 8.2 | `entrypoints/background.ts` — the worker wiring graph | 8.1, 7.10, 5.6, 4.12, 3.17 | None | [ ] |
 | 8.3 | Popup shell, ranked list, scan gesture, permission offer | 8.2, 3.11, 3.17 | 8.4, 8.5 (same popup shell and route table) | [ ] |
 | 8.4 | Popup return surfaces — choice, affirmation, stuck | 8.3 | 8.3, 8.5 (popup shell and route table) | [ ] |
-| 8.5 | Popup pickup, calendar, and clear-all surfaces | 8.4, 3.12, 4.12 | 8.3, 8.4 (popup shell and route table) | [ ] |
-| 9.1 | End-to-end extension test harness | 8.5 | None | [ ] |
+| 8.5 | Popup pickup, calendar, clear-all, and the simulated-booking marker | 8.4, 3.12, 4.12 | 8.3, 8.4 (popup shell and route table) | [ ] |
+| 8.6 | Manual acceptance run in a real browser | 8.5 | None | [ ] |
+| 9.1 | End-to-end extension test harness | 8.6 | None | [ ] |
 | 9.2 | Ingestion and permission rows | 9.1 | None | [ ] |
-| 9.3 | Driving rows | 9.1 | None | [ ] |
+| 9.3 | Driving rows | 9.1, **0.1** | None | [ ] |
 | 9.4 | State machine and terminal rows | 9.1 | None | [ ] |
 | 9.5 | Pickup rows | 9.1 | None | [ ] |
 | 9.6 | Cancellation rows | 9.1 | None | [ ] |
 | 9.7 | Platform rows | 9.1 | None | [ ] |
-| 10.1 | Prod-bundle assertion in CI | 8.5 | None | [ ] |
-| 10.2 | Requirement citation sweep | 9.7, 7.6 | None | [ ] |
+| 10.1 | Prod-bundle assertion in CI | 8.5, 1.4 | None | [ ] |
+| 10.2 | Requirement and configuration citation sweep | 9.7, 7.6 | None | [ ] |
 | 10.3 | Enforce the module dependency graphs | 8.5, 6.5 | None | [ ] |
-**Eligible tasks** (nothing started yet, so only the two roots):
-- Task 1.1: Server test scaffolding and dev dependencies
-- Task 1.2: WXT project scaffold and MV3 manifest
+**Eligible tasks** (nothing started yet — Batch 0 has no prerequisites):
+- Task 0.1: Walk the retailer return flow by hand
+- Task 0.2: File the USPS API access request
 
-**Progress:** 0 / 79 tasks complete
+**Batch 0 gates only retailer-shaped work.** Tasks 1.1, 1.2, 1.3 have no prerequisites either and may
+start immediately in parallel with Batch 0; what waits on Task 0.1 is 2.8, 3.13, 3.14, 7.7–7.10 and
+the Batch 9 driving rows, marked in bold in the Prerequisites column above.
+
+**Progress:** 0 / 91 tasks complete
 
 ---
 
 ## Critical Path
 
-The longest sequential chain through the dependency graph. Even with unlimited agents, the project
-cannot finish faster than this chain runs:
+Two numbers matter here and they are not the same number. The **critical path** is the longest
+sequential chain through the dependency graph — the floor if every task could start the instant its
+prerequisites landed. The **makespan** is what this plan actually costs, because the plan imposes a
+hard commit barrier at the end of every batch: no task in batch *n+1* starts until every task in
+batch *n* has landed. Under a barrier the cost is not the longest chain, it is the sum of each
+batch's own longest chain. The barrier is deliberate — it is what makes the checkpoints meaningful —
+but it is not free, and the plan should say what it costs.
+
+### The dependency floor
 
 ```
 1.2  src/types and the WXT scaffold          [extension]
  →  2.4  entities, session, state enums       [extension/src/types]
- →  4.6  storage key layout and rebuild       [extension/src/storage]
+ →  4.6  storage keys, rebuild, and barrel    [extension/src/storage]
  →  4.7  StorageCoordinator.transact          [extension/src/storage]
  →  4.9  ReturnRepository                     [extension/src/storage]
  →  6.6  ReturnDriver, transition, start      [extension/src/driver]
@@ -3025,25 +3855,63 @@ cannot finish faster than this chain runs:
  →  8.3  popup shell and ranked list          [extension/entrypoints/popup]
  →  8.4  popup return surfaces                [extension/entrypoints/popup]
  →  8.5  popup pickup, calendar, clear-all    [extension/entrypoints/popup]
+ →  8.6  manual acceptance run                [browser]
  →  9.1  end-to-end extension harness         [extension/tests]
  →  9.7  platform rows                        [extension/tests]
- → 10.2  requirement citation sweep           [repo]
+ → 10.2  requirement and config sweep         [repo]
 ```
 
-**Critical path length:** 19 tasks
+**Critical path length:** 20 tasks.
 
-Two things about this chain are worth naming, because they are decisions rather than accidents.
+### The makespan the barrier actually buys
+
+| Batch | Longest chain inside the batch | Slots |
+|---|---|---|
+| 0 | 0.1 → 0.3 | 2 |
+| 1 | 1.2 → 1.4 | 2 |
+| 2 | 2.6 → 2.7 | 2 |
+| 3 | 3.1 → 3.2 → 3.3 → 3.4 → 3.5 (the `app/models/__init__.py` conflict serialises 3.1–3.4) | 5 |
+| 4 | 4.6 → 4.7 → {4.8 ∥ 4.9 ∥ 4.10 ∥ 4.11} → 4.12 | 4 |
+| 5 | 5.4 → 5.5 | 2 |
+| 6 | 6.1 → 6.2 → 6.3 → 6.4 → 6.5 | 5 |
+| 7 | 7.7 → 7.8 → 7.9 → 7.10 | 4 |
+| 8 | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.6 | 6 |
+| 9 | 9.1 → any row | 2 |
+| 10 | 10.1 ∥ 10.2 ∥ 10.3 | 1 |
+| **Total** | | **~35** |
+
+The deployment track (I.1 → I.2, with I.3 alongside) does not appear in that total: it opens once
+Batch 6 lands and runs concurrently with Batches 7 through 9, and nothing in Batches 7–10 waits on
+it. It is off the critical path by construction, which is the point of splitting it out of the batch
+sequence rather than inserting it as Batch 6.5.
+
+So the barrier costs roughly **15 slots** — 35 against a floor of 20. That is the price of being able
+to say, at each checkpoint, that the tree is green and the working tree is clean. It is worth paying,
+and it should not be discovered halfway through.
+
+### Three things about the shape of this chain
 
 **It runs entirely through the extension.** The server's own longest chain — 1.1 → 2.2 → 4.2 → 4.1 →
 5.1 → 6.2 → 6.3 → 6.4 → 6.5 → 7.1 → 7.6 → 10.2 — is twelve tasks. The server finishes early and
 waits. If only one agent is available, start it on the extension; if two, the server track is the
 one that can afford to be interrupted.
 
-**Storage → driver → popup is a genuinely serial spine, not a scheduling artefact.** Tasks 4.6–4.12
-all edit `src/storage/index.ts`; tasks 6.6–6.8 and 7.7–7.10 all edit `src/driver/driver.ts`; tasks
-8.3–8.5 share the popup shell and its route table. Splitting any of those files to parallelise the
-work would trade a real invariant — one state machine, one serialising queue, one route table — for
-a scheduling convenience. The plan keeps the file whole and accepts the serial run.
+**Driver and popup are a genuinely serial spine; storage is not.** Tasks 6.6–6.8 and 7.7–7.10 all
+edit `src/driver/driver.ts`, and tasks 8.3–8.5 share the popup shell and its route table. Splitting
+either would trade a real invariant — one state machine, one route table — for a scheduling
+convenience, so the plan keeps the file whole and accepts the serial run. Storage looked like the
+same thing and was not: Tasks 4.8–4.11 already wrote to four separate repository files, and the only
+thing serialising them was the shared `src/storage/index.ts` barrel in the Conflicts column. Task
+4.6 now writes that barrel complete and up front, exporting from modules that exist as stubs, so the
+four repositories are mutually parallel. That single change takes Batch 4's pole from 7 slots to 4.
+The test for whether a serial chain is real is whether the file has to stay whole; if it is only an
+export list, it does not.
+
+**Batch 0 is on the path in fact, if not in the diagram.** Task 0.1 has no dependents in Batch 1, so
+it does not lengthen the chain above — but Tasks 2.8, 3.13, 3.14, the 7.7–7.10 flows and the Batch 9
+driving rows all encode what it finds, and if it comes back negative on any of its three go/no-go
+criteria the plan below it changes shape rather than slipping. Start it first and start it in
+parallel with Batch 1; do not let it queue behind scaffolding.
 
 ---
 
@@ -3051,24 +3919,28 @@ a scheduling convenience. The plan keeps the file whole and accepts the serial r
 
 | Batch | Tracks | Parallel? | Conflicts | Commit Coordination |
 |-------|--------|-----------|-----------|---------------------|
-| 1 | A, B | A ∥ B | None — separate workspaces | Both must land before Batch 2 |
+| 0 | A, B, C | 0.1 ∥ 0.2; 0.3 after 0.1 | None — three documents | Runs alongside Batch 1; gate is a written go/no-go, not a green suite |
+| 1 | A, B | A ∥ B | 1.2 ↔ 1.4 (`wxt.config.ts`) | 1.1, 1.2, 1.3 are all roots; 1.4 and 1.5 follow 1.2 |
 | 2 | A, B, C, D + 3 extension tracks | server ∥ extension throughout | 2.6 ↔ 2.7 (`tests/fakes/chrome.ts`) | Serialise 2.6 → 2.7; everything else free |
-| 3 | 10 tracks | server ∥ extension; most tracks mutually free | 3.1–3.4 (`app/models/__init__.py`); 3.9 ↔ 3.10 (`src/extract/index.ts`); 3.13 ↔ 3.14 (`src/adapters/index.ts`); 3.15 ↔ 3.16 (`src/validation/index.ts`) | Widest batch in the plan — 10 agents can work at once |
-| 4 | A, B, C, D | server ∥ extension | 4.3–4.5 (`app/carriers/usps/__init__.py`); 4.1 ↔ 4.2 (model boundary); **4.6–4.12 fully serial** (`src/storage/index.ts`) | The storage chain is the batch's long pole |
+| 3 | 11 tracks | server ∥ extension; most tracks mutually free | 3.1–3.4 (`app/models/__init__.py`); 3.9 ↔ 3.10 (`src/extract/index.ts`); 3.13 ↔ 3.14 (`src/adapters/index.ts`); 3.15 ↔ 3.16 (`src/validation/index.ts`) | Widest batch in the plan — 11 agents can work at once; 3.18 lands last because it needs 3.4 and 3.16 |
+| 4 | A, B, C, C', D, E | server ∥ extension | 4.3–4.5 (`app/carriers/usps/__init__.py`); 4.1 ↔ 4.2 (model boundary); 4.6 → 4.7 → **{4.8 ∥ 4.9 ∥ 4.10 ∥ 4.11}** → 4.12 | The storage chain is still the batch's long pole, but four slots instead of seven |
 | 5 | A, B, C, D, E | server ∥ extension | 5.4 ↔ 5.5 (`src/driver/index.ts`) | Server services are mutually independent |
-| 6 | A, B | server ∥ extension | 6.1–6.4 (`app/routes/__init__.py`); **6.6 → 6.7 → 6.8 serial** (`src/driver/driver.ts`); 6.5 needs all four routes | Last batch where the two workspaces are still independent |
+| 6 | A, B | server ∥ extension | 6.1–6.4 (`app/routes/__init__.py`); **6.6 → 6.7 → 6.8 serial** (`src/driver/driver.ts`); 6.5 needs all four routes and 4.14 | Last batch where the two workspaces are still independent |
+| — | Deployment | I.1 → I.2, I.3 ∥ I.2 | None — `infra/` is untouched by every other task | Opens after 6.5; runs concurrently with Batches 7–9 and gates nothing in them |
 | 7 | A, B, C | server integration ∥ extension driver flows | 7.7–7.10 serial (`src/driver/driver.ts`); 7.2–7.6 mutually free | 7.2–7.6 are five agents on five files; 7.7–7.10 is one agent |
-| 8 | A, B | Mostly serial | 8.3–8.5 share the popup shell and route table | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 |
+| 8 | A, B, Gate | Mostly serial | 8.3–8.5 share the popup shell and route table | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.6; 8.6 is a human at a browser, not an agent |
 | 9 | A, B | 9.2–9.7 all ∥ after 9.1 | None — one file each | Six agents can run the integration rows at once |
 | 10 | A, B, C | 10.1 ∥ 10.2 ∥ 10.3 | None | CI enforcement; 10.2 needs 7.6 and 9.7 to have landed |
 
-**Theoretical speedup.** Batches 3, 7 and 9 are the wide ones: 10, 5 and 6 simultaneous agents
-respectively. Across the whole plan, 79 tasks compress onto a 19-task critical path, so the ceiling
-is roughly **4x** with unlimited agents. In practice the useful number is **two to four**: one agent
-on the extension spine (which is the critical path and cannot be split), one on the server, and one
-or two absorbing the wide batches as they open. Beyond four, agents queue behind
-`src/storage/index.ts` and `src/driver/driver.ts` and add coordination cost without adding
-throughput.
+**Theoretical speedup, honestly stated.** Batches 3, 7 and 9 are the wide ones: 11, 5 and 6
+simultaneous agents respectively. Ninety-one tasks over a 20-task dependency floor is a **4.5x**
+ceiling — but that ceiling is unreachable under the commit barrier this plan imposes, and the number
+that matters is 91 over a ~35-slot makespan, which is **~2.6x**. In practice the useful agent count
+is **two to four**: one on the extension spine (which is the critical path and cannot be split), one
+on the server, and one or two absorbing the wide batches as they open. Beyond four, agents queue
+behind `src/driver/driver.ts` and the popup route table and add coordination cost without adding
+throughput. Two of the 91 tasks — 0.2 and 8.6 — are not agent work at all: one is an email to USPS
+and the other is a human driving a browser.
 
 ---
 
@@ -3119,29 +3991,43 @@ about the shipped bundle and the module graph.
 | FR-3.5.5 | 8.5 | in-task (8.5) | 9.7 |
 | FR-3.6.1 | 5.6, 8.3 | in-task (5.6, 8.3) | 9.7 |
 | FR-3.6.2 | **— (deliberate gap)** | — | — |
-| FR-3.6.3 | 1.2, 5.6 | in-task (1.2, 5.6) | 9.7 |
-| FR-3.7.1 | 1.2 | in-task (1.2) | 10.1 |
+| FR-3.6.3 | **— (deliberate gap, out of PoC scope)** | — | — |
+| FR-3.7.1 | 1.2, 1.4 | in-task (1.2, 1.4) | 10.1 |
 | FR-3.7.2 | 3.17, 8.3 | in-task (3.17, 8.3) | 9.2 |
 | FR-3.7.3 | 3.17, 8.3 | in-task (3.17, 8.3) | 9.2 |
 | NFR-6.1 | 2.3, 2.8, 3.1, 3.6, 3.10, 4.12, 8.5 | in-task (2.3, 2.8, 3.1, 3.6, 3.10, 4.12, 8.5) | 7.2, 7.6 |
 | NFR-6.2 | 7.9 | in-task (7.9) | 9.5 |
-| NFR-6.3 | 2.1, 2.8, 3.5, 3.16, 4.2, 4.5, 4.13, 6.1, 6.7, 8.2 | in-task (2.1, 2.8, 3.5, 3.16, 4.2, 4.5, 4.13, 6.1, 6.7, 8.2) | 9.7, 10.3 |
+| NFR-6.3 | 2.1, 2.8, 3.5, 3.16, 3.18, 4.2, 4.5, 4.13, 4.14, 6.1, 6.7, 8.2 | in-task (as listed) | 9.7, 10.3 |
 | NFR-6.4 | 2.5, 5.1, 6.8, 8.4 | in-task (2.5, 5.1, 6.8, 8.4) | 7.6, 9.7 |
-| NFR-6.5 | 1.2, 2.2, 3.16, 4.3, 4.6, 4.12, 5.6, 6.5 | in-task (1.2, 2.2, 3.16, 4.3, 4.6, 4.12, 5.6, 6.5) | 10.1, 10.3 |
-| NFR-6.6 | 2.2, 4.2, 4.3, 6.5 | in-task (2.2, 4.2, 4.3, 6.5) | 10.1 |
-| NFR-6.7 | 2.2, 6.1, 6.5 | in-task (2.2, 6.1, 6.5) | 7.6 |
-**The one gap, stated rather than hidden.** FR-3.6.2 (landing page and install funnel) has no task.
-It belongs to `client/`, which the low-level design excludes from its scope in §1 — this plan
-decomposes that design and inherits the boundary. The requirement is not withdrawn and not
-satisfied; it is unplanned, and Task 10.2's citation sweep carries it as its single allowlisted
-exemption so that the sweep passes without the gap quietly disappearing. Anything else missing from
-this table is a bug in the plan.
+| NFR-6.5 | 1.2, 1.4, 2.2, 3.16, 4.3, 4.6, 4.12, 5.6, 6.5, I.1 | in-task (as listed) | 10.1, 10.3, I.2 |
+| NFR-6.6 | 2.2, 4.2, 4.3, 6.5, **I.1** | in-task (2.2, 4.2, 4.3, 6.5, I.1) | **I.2** |
+| NFR-6.7 | 2.2, 3.9, 6.1, 6.5, **I.1** | in-task (2.2, 3.9, 6.1, 6.5, I.1) | 7.6, **I.2** |
 
-**Requirements-document sections, not FR IDs.** Several tasks cite `§4.1` (the endpoint table),
-`§4.2` (the error shape and its closed reason table) or `§5.1` (configuration, including
-`MIN_CLIENT_VERSION`). These are normative but carry no FR ID, so they cannot appear as rows above.
-Tasks 2.1, 3.1, 3.6, 3.8, 4.13, 6.5 and 7.6 are the ones that hold them, and Task 10.2 sweeps their
-citations alongside the FR ones.
+**Two gaps, stated rather than hidden.** FR-3.6.2 (landing page and install funnel) has no task. It
+belongs to `client/`, which the low-level design excludes from its scope in §1 — this plan decomposes
+that design and inherits the boundary. FR-3.6.3 (dashboard) has no task either, and for a different
+reason: it is the only requirement that forces `externally_connectable` into the manifest, which
+widens the extension's attack surface and its Web Store permission warnings for a surface nothing in
+the PoC demo touches. It is deliberately deferred, not overlooked — see the decisions record, and see
+Task 5.6's developer note for exactly what reinstating it would require. Neither requirement is
+withdrawn and neither is satisfied; both are unplanned, and Task 10.2's citation sweep carries them
+as its **two** allowlisted exemptions so that the sweep passes without either gap quietly
+disappearing. Anything else missing from this table is a bug in the plan.
+
+**The manual gate is not in the table, and that is on purpose.** Task 8.6 walks FR-3.1.1, FR-3.3.x,
+FR-3.4.x, FR-3.5.x and FR-3.7.2/3 by hand in a real browser, but it is a gate rather than a test:
+its output is `docs/acceptance.md` and a human's judgement, not an assertion a CI run can re-check.
+Listing it as an integration test for two dozen requirements would suggest a coverage it does not
+provide. It is in the tracker and in the batch sequence; it is not evidence in this table.
+
+**Requirements-document sections, not FR IDs.** Several tasks cite `§4.1` (the endpoint table and
+the `X-Boomerang-Client-Version` header), `§4.2` (the error shape and its closed reason table) or
+`§5.1`/`§5.2` (configuration, including `MIN_CLIENT_VERSION`, `MAX_INGEST_BYTES` and
+`API_REQUEST_TIMEOUT_MS`). These are normative but carry no FR ID, so they cannot appear as rows
+above. Tasks 2.1, 2.5, 3.1, 3.6, 3.8, 3.18, 4.13, 6.5 and 7.6 are the ones that hold them; Task 3.18
+freezes the wire shapes they describe as files both workspaces assert against, and Task 10.2 sweeps
+their citations — and, since the second revision, their configuration-parameter names — alongside the
+FR ones.
 
 ---
 
@@ -3149,19 +4035,25 @@ citations alongside the FR ones.
 
 | Batch | Tasks | Tracks | Theme |
 |-------|-------|--------|-------|
-| 1 | 2 | 2 | Scaffolding — both workspaces exist and run an empty test suite |
+| 0 | 3 | 3 | De-risking — the retailer flow, USPS access, and Bedrock latency, before anything is built on them |
+| 1 | 5 | 2 | Scaffolding — both workspaces exist, CI runs, the extension IDs are pinned, coverage is enforced |
 | 2 | 8 | 7 | Foundations — errors, config, logging, shared types, and the test fakes |
-| 3 | 17 | 10 | Leaf modules — wire models, carrier protocol, extraction, ranking, validation |
-| 4 | 13 | 4 | Adapters and stores — Bedrock, USPS, and the whole storage layer |
+| 3 | 18 | 11 | Leaf modules — wire models, carrier protocol, extraction, ranking, validation, and the frozen contracts |
+| 4 | 14 | 6 | Adapters and stores — Bedrock, USPS, the mock carrier, and the whole storage layer |
 | 5 | 6 | 5 | Services — the three server services and the driver's collaborators |
 | 6 | 8 | 2 | Assembly — routes and app wiring; the return state machine |
+| — | 3 | 1 | **Deployment track** — the Lambda topology, a live smoke test, and USPS sandbox reconciliation |
 | 7 | 10 | 3 | Server integration tests, and the return flows end to end in the worker |
-| 8 | 5 | 2 | Entrypoints — content script, background worker, popup surfaces |
+| 8 | 6 | 3 | Entrypoints — content script, background worker, popup surfaces, and the manual acceptance gate |
 | 9 | 7 | 2 | Extension integration tests across all six §8.3 row groups |
 | 10 | 3 | 3 | CI enforcement — bundle posture, citation sweep, module boundaries |
-| **Total** | **79** | | |
+| **Total** | **91** | | |
 
 **What "done" means.** After Batch 10, the checks that keep this architecture honest run in CI rather
-than in review attention: the shipped manifest declares only `activeTab`, `scripting` and `storage`
-(Task 10.1); `routes` cannot import `carriers` or `bedrock`, and `services` cannot import `fastapi`
-(Task 10.3); and every requirement except the declared FR-3.6.2 gap has a task citing it (Task 10.2).
+than in review attention: the shipped manifest declares only `activeTab`, `scripting` and `storage`,
+carries the **prod** pinned key, and has no `externally_connectable` (Task 10.1); `routes` cannot
+import `carriers` or `bedrock`, and `services` cannot import `fastapi` (Task 10.3); the wire shapes
+in `contracts/` fail exactly one workspace's suite when either side drifts (Task 3.18); and every
+requirement except the two declared gaps — FR-3.6.2 and FR-3.6.3 — has a task citing it, as does every
+configuration parameter named in §5.1 and §5.2 (Task 10.2). What CI cannot check, Task 8.6 checks by
+hand once, and records in `docs/acceptance.md`.

@@ -1547,65 +1547,94 @@ the system whose loss is not recoverable by rotating it.
 
 ## 11. Open Questions
 
-1. **What is the production hostname for the dashboard?** This one blocks packaging. Section 6.7
-   puts the dashboard on a fixed origin because `externally_connectable.matches` accepts only
-   concrete host patterns — the extension cannot be built without the answer, and changing it later
-   means shipping a new extension version. It is the only open question here with a hard
-   dependency on shipping. **No recommendation: this is a naming and registration decision, not a
-   technical one, and inventing a domain in a design document would be worse than leaving it
-   blank.**
+> **Revised 2026-08-27.** The plan review recorded in
+> [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md) closed or assigned six of these.
+> A question is struck through when it is genuinely answered, and marked **assigned** when the
+> answer now has a task that produces it — the distinction matters, because an assigned question is
+> still open, it just has a date. **`plan decision Dn` below refers to that record**, not to the
+> `D1`–`D7` product decisions in [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), which this
+> section also cites and which keep their own numbering.
 
-2. **Is an unauthenticated public endpoint acceptable at launch?** Section 6.2 bounds *spend* with
-   reserved concurrency, a payload ceiling and token limits, and detects the rest with an
-   `InputTokenCount` alarm and a budget. It does not bound *availability*: five concurrent slots are
-   trivially saturated. The alternatives all cost something — WAF requires adding CloudFront, and a
-   proof-of-work challenge or install attestation adds real complexity. **Recommendation:** ship the
-   listed controls for the PoC, revisit before any public launch, and treat the availability gap as
-   known rather than discovered.
+1. ~~**What is the production hostname for the dashboard?**~~ **Resolved by removal (plan decision D6).**
+   FR-3.6.3 is out of PoC scope, so the extension declares no `externally_connectable` key and there
+   is no host pattern to fill in. This was the only question here with a hard dependency on
+   shipping, and it is discharged by not shipping the surface that created it rather than by
+   choosing a name. It returns the moment the dashboard does.
 
-3. **What should `infra/` become?** The Terraform currently provisions a VPC, EC2 and a security
-   group that this design does not use, and `infra/AGENTS.md` records rules about `allowed_cidr`
-   and a two-AZ floor that no longer apply. **Recommendation:** replace it with the Lambda, IAM
-   role, Parameter Store, CloudWatch and Budget resources in section 8.3, and rewrite those rules
-   rather than leaving contradictory guidance in the repository.
+2. **Is an unauthenticated public endpoint acceptable at launch?** *Still open, unchanged.* Section
+   6.2 bounds *spend* with reserved concurrency, a payload ceiling and token limits, and detects the
+   rest with an `InputTokenCount` alarm and a budget. It does not bound *availability*: five
+   concurrent slots are trivially saturated. The alternatives all cost something — WAF requires
+   adding CloudFront, and a proof-of-work challenge or install attestation adds real complexity.
+   **Recommendation:** ship the listed controls for the PoC, revisit before any public launch, and
+   treat the availability gap as known rather than discovered. Task I.1 builds the listed controls
+   and nothing beyond them, deliberately.
+
+3. ~~**What should `infra/` become?**~~ **Answered, and now assigned (plan decisions D7 and D8).** It becomes the
+   §8.3 topology: Lambda, Function URL, IAM execution role, Parameter Store, CloudWatch log group
+   with explicit 30-day retention, four alarms and a Budget, with Bedrock model invocation logging
+   asserted off. The implementation plan's deployment track carries it — Task I.1 replaces the VPC,
+   EC2 and security group and deletes the `vpc_cidr`, `instance_type` and `allowed_cidr` variables;
+   Task I.2 deploys it and smoke-tests CORS from a real loaded extension. One correction to the
+   original wording of this question: `infra/AGENTS.md` does **not** record contradictory guidance.
+   It was rewritten on 2026-08-26, documents the target state above in full, and quarantines the
+   `allowed_cidr` and two-AZ rules inside a labelled "Legacy scaffold" section that ends with its own
+   instruction to delete itself when the Lambda resources land. Task I.1 carries out that
+   instruction. The document is stale in the same way a correctly-written TODO is stale.
 
 4. ~~**Where does the pinned extension private key live?**~~ **Answered in §8.4.** A `SecureString`
    at `/boomerang/release/<env>/extension-key`, readable by the release role and *not* by the Lambda
    execution role, with an offline copy of the `prod` key in the team password manager. Losing it
    means a new extension ID and a new store listing, which is why it is the one secret held twice.
+   **Now assigned (plan decision D20):** plan Task 1.4 generates both keypairs, pins the dev public key in
+   `wxt.config.ts`, writes both private keys to those paths, gitignores `*.pem`, and records both
+   derived extension IDs — which is what Task I.1's single-origin CORS allowlist and Task 10.1's
+   prod-bundle assertion both read.
 
-5. **Can the return driver read the price of each return method?** FR-3.3.4 requires presenting
-   every option with its cost, which is a harder extraction than finding the label link — prices
-   appear as refund deductions in varying copy. If the price is not reliably readable, the
-   requirement cannot be met as written and the fallback is presenting the options without prices,
-   which is materially worse.
+5. **Can the return driver read the price of each return method?** *Assigned (plan decision D1).* This is
+   the second of the three go/no-go criteria in plan Task 0.1: a human walks the real flow and
+   records whether prices are readable from the DOM. If they are not, FR-3.3.4 cannot be met as
+   written and the fallback is presenting the options without prices — a decision the plan makes
+   before Batch 3 encodes the adapter, not after.
 
-6. **Does Amazon expose a reachable print-at-home label path?** D6 requires postage affixed to the
-   box and Amazon defaults to QR codes at partner locations. This is the single largest feasibility
-   risk in the product and it gates the return driver, the longest item on the critical path.
-   **Recommendation:** prototype this before writing anything else in `extension/`.
+6. **Does the PoC retailer expose a reachable print-at-home label path?** *Assigned (plan decisions D1 and D2).*
+   The first and hardest of Task 0.1's three go/no-go criteria, and still the single largest
+   feasibility risk in the product. The original recommendation — "prototype this before writing
+   anything else in `extension/`" — is now the plan's Batch 0, which runs in parallel with the Batch
+   1 scaffolding and gates Tasks 2.8, 3.13, 3.14, the 7.7–7.10 flows and the Batch 9 driving rows.
+   A negative answer changes the shape of the plan rather than slipping its dates.
 
-7. **Is automating a logged-in Amazon session compatible with its terms?** The scraping precedent
-   cited for ingestion covers reading, not driving a flow. Unassessed.
+7. **Is automating a logged-in retailer session compatible with its terms?** *Still open,
+   unassessed.* The scraping precedent cited for ingestion covers reading, not driving a flow. This
+   is a legal question and no task in the plan produces an answer to it; it is recorded here so that
+   it is a decision someone makes rather than a decision the code makes by default.
 
-8. **Will `externally_connectable` messaging survive Chrome Web Store review** as the dashboard's
-   data path? It is a standard mechanism, but it widens the declared surface of an extension whose
-   review narrative already depends on minimal permissions.
+8. ~~**Will `externally_connectable` messaging survive Chrome Web Store review?**~~ **Moot for the
+   PoC (plan decision D6).** The key is not declared, so there is no widened surface for review to
+   assess. The question returns with FR-3.6.3.
 
-9. **Which model and what latency budget?** Ingestion sends a DOM subtree and the return driver may
-   call per step. Cold start plus inference sets the perceived speed of the whole product, and no
-   measurement exists yet.
+9. **Which model and what latency budget?** *Assigned (plan decision D4).* Plan Task 0.3 measures parse
+   and action latency against the configured inference profile before Batch 4 builds anything on top
+   of it, and writes the numbers to `docs/spikes/bedrock-latency.md`. NFR-6.4's two budgets and the
+   `BEDROCK_TIMEOUT_*_MS` defaults in requirements §5.1 are currently estimates; the spike is what
+   turns them into measurements, and Task I.2 records the cold start separately.
 
-10. **Is one region acceptable given the Bedrock model's availability?** The chosen region must host
-   the configured model, which constrains the choice more than latency does.
+10. **Is one region acceptable given the Bedrock model's availability?** *Still open.* The chosen
+   region must host the configured model, which constrains the choice more than latency does. Task
+   0.3 will surface the constraint as a side effect of needing a working profile to measure, and
+   `infra/AGENTS.md` already carries the rule that `var.region` must be one where the model is
+   available — but nothing in the plan formally decides the region.
 
 11. **Does USPS reject a duplicate same-address, same-date pickup request, or does it book a second
-   one?** This is the residual risk in §5.2's lost-response handling. The client writes a booking
-   intent record before calling and never auto-retries, so Boomerang will not double-book on its
-   own — but if the user retries manually after an unconfirmed booking, the carrier's own behaviour
-   is what decides whether that is harmless or produces two pickups. **Recommendation:** answer it
-   against the sandbox before building the schedule path; it costs one API call and it determines
-   whether the recovery copy says "try again" or "call USPS."
+   one?** *Assigned (plan decision D12).* This is the residual risk in §5.2's lost-response handling. The
+   client writes a booking intent record before calling and never auto-retries, so Boomerang will
+   not double-book on its own — but if the user retries manually after an unconfirmed booking, the
+   carrier's own behaviour is what decides whether that is harmless or produces two pickups. Plan
+   Task I.3 answers it empirically against the sandbox, together with the other three assumptions
+   `UspsAdapter` was written against. The original recommendation was to answer it *before* building
+   the schedule path; the plan answers it after, because USPS credentials are requested in Batch 0
+   and may not have arrived — which is why Task I.3 is explicit that it does not run without
+   credentials and must be marked as not-run rather than quietly closed.
 
 ---
 

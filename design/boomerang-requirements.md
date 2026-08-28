@@ -15,6 +15,14 @@ Source material: [`../docs/SKETCH.md`](../docs/SKETCH.md) for the product,
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for decisions D1 through D7, and
 [`../.claude/artifacts/`](../.claude/artifacts/) for the underlying research.
 
+> **Revised 2026-08-27.** Four changes came out of the plan review recorded in
+> [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md): the client-version header is
+> now named normatively in §4.1 (plan decision D16); FR-3.6.3 is out of PoC scope (plan decision D6); `DASHBOARD_ORIGIN` is
+> withdrawn from §5.2 as a consequence; and FR-3.4.5b requires a simulated booking to say so (plan decision D22).
+> Each amendment is marked where it lands. **`Dn` in these notes means a *plan* decision** — the
+> `D1`–`D7` cited above from [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) are a separate,
+> older series and are never renumbered here.
+
 ---
 
 ## 2. Core Concepts
@@ -558,6 +566,23 @@ and the reserved concurrency limit of NFR-6.7 is the only bound on how often it 
 - On such a refusal the extension SHALL leave the return at `LabelReady`, SHALL NOT create or retain
   a `PICKUP` record, and SHALL tell the user the label remains valid for drop-off.
 
+#### FR-3.4.5b Simulated bookings SHALL disclose themselves
+
+*Added 2026-08-27 (plan decision D22).*
+
+- When the server is configured with a carrier adapter that does not contact a carrier, the
+  confirmation numbers it returns SHALL carry a fixed, recognisable prefix, published alongside the
+  wire contracts so both sides agree on it.
+- The extension SHALL detect that prefix and SHALL render, next to every affected confirmation
+  number, a marker stating that the booking is simulated and no carrier was contacted.
+- The extension SHALL make that determination **from the confirmation number**, not from its build
+  environment or its server URL. A production bundle pointed at a mock-configured server is exactly
+  the case the marker exists for, and an environment check is blind to it.
+
+A fabricated confirmation number that looks real is the one failure in this system a user cannot
+detect and cannot recover from: they stop tracking the parcel, no carrier arrives, and the return
+window closes. The prefix costs nothing and makes the failure self-evident.
+
 #### FR-3.4.6 Cancellation path
 
 - The extension SHALL store the `confirmationNumber` and an **immutable snapshot** of the
@@ -720,6 +745,19 @@ the system by design. The record therefore states the only thing that is true.
 
 #### FR-3.6.3 Dashboard
 
+> **Out of PoC scope as of 2026-08-27 (plan decision D6).** This requirement is neither withdrawn nor
+> planned. It is the only requirement that forces `externally_connectable` into the manifest, and
+> that key widens the extension's attack surface and its Web Store permission disclosure for a
+> surface the PoC demo never opens — the popup already renders the ranked list FR-3.6.1 requires.
+> The production dashboard origin it depends on also does not exist yet, and
+> `externally_connectable.matches` rejects a bare wildcard, so the key could not be filled in
+> honestly even if it were declared. The implementation plan carries FR-3.6.3 as one of its two
+> declared traceability gaps, and the manifest test in the plan's Task 1.2 asserts
+> `externally_connectable` is **absent** so the cut cannot decay into an oversight. Reinstating it
+> requires the manifest key, an `on_external` handler, the enumerated read-only message subset
+> below, `DASHBOARD_ORIGIN` restored to §5.2, and the origin decided — recorded in the plan at Task
+> 5.6. Everything below stands unchanged for whoever does that.
+
 - The dashboard SHALL render the same ranked order list on a larger canvas.
 - Because the server is stateless, the dashboard SHALL obtain orders from the extension via
   `externally_connectable` messaging from the page to the extension, not from a server endpoint.
@@ -807,6 +845,20 @@ The server is stateless. Every request carries what it needs; no endpoint reads 
 | DELETE | `/pickups/{confirmation_number}` | Cancel, using a freshly obtained ETag |
 
 No `GET /orders` exists. The order working set lives on the install.
+
+**Every request SHALL carry the header `X-Boomerang-Client-Version`**, spelled exactly that way, on
+every endpoint including `/health`. Its value is the extension's manifest version. It is the field
+`MIN_CLIENT_VERSION` (§5.1) compares against to raise `client-too-old`, and the field a released
+version's bug is traced by. A request whose version header is absent, empty, or spelled any other
+way SHALL be treated as absent and rejected by the same gate — HTTP header names are
+case-insensitive, but a differently *worded* header is a different header, and a server that
+tolerated `X-Client-Version` as a synonym would silently serve an ungated client.
+
+*Amended 2026-08-27 (plan decision D16).* The header was described in the low-level design and used by
+three tasks in the implementation plan, but no document ever spelled it, so each side was free to
+invent a name and the version gate would have failed open in exactly the case it exists for. Naming
+it here makes it citable, and Task 10.2's sweep can then check that the two workspaces spell it the
+same way.
 
 ### 4.2 Error shape
 
@@ -928,6 +980,7 @@ sequenceDiagram
 | `BEDROCK_TIMEOUT_ACTION_MS` | Deadline on a single Bedrock invoke at the **action-fallback** call site; exceeding it raises `upstream-unavailable` | `4500` |
 | `USPS_TIMEOUT_MS` | Deadline on a single USPS call; exceeding it raises `upstream-unavailable` | `8000` |
 | `MIN_CLIENT_VERSION` | Lowest extension version the server will serve; below it, `client-too-old` | `0.1.0` |
+| `MOCK_CONFIRMATION_PREFIX` | Fixed prefix on every confirmation number the mock carrier adapter returns, so a simulated booking is recognisable from the number alone, per FR-3.4.5b. Not configurable per deployment — it is a constant published with the wire contracts, listed here because it is a named value both workspaces read | `SIM-` |
 | `FUNCTION_TIMEOUT_MS` | The function's own timeout, supplied by the infrastructure from the same value it gives the function. Every upstream deadline above SHALL validate as below it | `60000` |
 
 ### 5.2 Extension configuration
@@ -945,7 +998,7 @@ sequenceDiagram
 | `MODEL_FALLBACK_TIMEOUT_MS` | Budget for the action-fallback call; exceeding it is treated as `report_stuck`, per NFR-6.4 | `5000` |
 | `API_REQUEST_TIMEOUT_MS` | Deadline on a single request to the server, per attempt. SHALL sit **above** the server's longest upstream deadline so the server answers with a typed `reason` rather than the client giving up first | `12000` |
 | `API_RETRY_BUDGET_MS` | Ceiling on a whole bounded-retry sequence including its backoff. SHALL sit **below** three times `API_REQUEST_TIMEOUT_MS`, so the budget rather than the attempt count ends the sequence | `20000` |
-| `DASHBOARD_ORIGIN` | The single origin permitted to reach the extension through `externally_connectable`, per FR-3.6.3 | The one shipped hostname; see §11 of the high-level design |
+| ~~`DASHBOARD_ORIGIN`~~ | **Withdrawn 2026-08-27 (plan decision D6).** It existed only to fill `externally_connectable.matches` for FR-3.6.3, which is out of PoC scope; the extension exports no such constant. Restore this row if FR-3.6.3 is reinstated | — |
 | `EXTENSION_KEY` | The pinned public key that fixes the extension ID, one per environment | The environment's published keypair |
 
 **Every upstream call SHALL have a deadline shorter than the function's own timeout.** The Lambda
@@ -983,6 +1036,12 @@ design**, for the reason `MAX_INGEST_BYTES` is: each is defined by its relations
 §5.1, and a client-side rule that referenced only a server-side parameter is not implementable.
 `API_REQUEST_TIMEOUT_MS` above `BEDROCK_TIMEOUT_PARSE_MS` is what lets a slow parse come back as
 `upstream-unavailable` instead of as a transport failure the client diagnosed for itself.
+
+`MOCK_CONFIRMATION_PREFIX` is listed in §5.1 rather than here even though the extension reads it,
+because it is not extension configuration: it is a constant the server owns and publishes with the
+wire contracts, and the extension imports it rather than declaring its own copy. Two independently
+declared prefixes that drifted apart would silently disable the FR-3.4.5b marker, which is the one
+failure mode the marker exists to prevent.
 
 `MAX_INGEST_BYTES` appears in both tables deliberately and the two values SHALL agree. FR-3.1.3
 requires the *extension* to enforce the ceiling before transmission; the server enforces the same

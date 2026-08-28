@@ -15,6 +15,15 @@
 
 ## 1. Overview
 
+> **Revised 2026-08-27, from the implementation-plan review** recorded in
+> [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md). That review decomposed this
+> document into 91 tasks and, in doing so, found things a reader of the design alone could not:
+> a class serving two incompatible roles, a header three modules had to agree on that no document
+> named, a serial chain that was an export list rather than an invariant, and a requirement whose
+> only cost fell on the manifest. The amendments are marked in place, and §10 carries the full list.
+> **`Dn` in those markings means a decision in that record** — not the `D1`–`D7` product decisions in
+> [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), which are a separate and older series.
+
 This document specifies module structure, type design, collaboration and testing for the two
 surfaces that carry the PoC's critical path:
 
@@ -24,8 +33,18 @@ surfaces that carry the PoC's critical path:
 | **Server** (FastAPI, Python 3.13) | Fully | Owns the model calls, the carrier integration and every credential |
 | **Client** (Next.js) | **Not covered** | It is a read-only view over data the extension hands it (`client/AGENTS.md`). Phase 1 is a landing page with no logic; Phase 2 renders a list it does not compute. It has no class design worth specifying, and inventing one would imply logic that must not live there |
 
-The extension side of the dashboard contract — the enumerated `externally_connectable` message
-surface of FR-3.6.3 — **is** specified, because it lives in the extension.
+~~The extension side of the dashboard contract — the enumerated `externally_connectable` message
+surface of FR-3.6.3 — **is** specified, because it lives in the extension.~~
+
+**Amended 2026-08-27 (plan decision D6): FR-3.6.3 is out of PoC scope, so there is no dashboard
+contract to specify.** The extension declares no `externally_connectable` key, `src/messaging/`
+routes internal messages only, and `DASHBOARD_ORIGIN` has left the configuration surface
+(requirements §5.2). The reasoning is upstream and is not repeated here beyond its consequence for
+this document: the requirement's entire cost fell on the manifest — a widened attack surface and a
+widened Web Store permission disclosure — for a surface the PoC never opens, since FR-3.6.1's popup
+already renders the ranked list. Every specification this document previously carried for that
+surface is struck rather than deleted, so that reinstating FR-3.6.3 is a matter of unstriking rules
+that were reasoned about, not of reconstructing them.
 
 ### 1.1 The four constraints that shape every decision below
 
@@ -98,7 +117,8 @@ which hostile input is rejected above the service layer.
 | `app/services/action.py` | The FR-3.3.7 fallback: DOM in, one validated action out | `ActionService` |
 | `app/services/pickup.py` | Eligibility gate, schedule, refresh, cancel orchestration | `PickupService` |
 | `app/carriers/base.py` | The carrier protocol every adapter satisfies | `CarrierAdapter` |
-| `app/carriers/usps/` | OAuth token handling, the four operations, the mock | `UspsAdapter`, `MockUspsAdapter` |
+| `app/carriers/usps/` | OAuth token handling and the five operations, plus the scripted test double | `UspsAdapter`, `ScriptedUspsAdapter` |
+| `app/carriers/mock.py` | The runtime stub the server constructs when `CARRIER_ADAPTER=mock`. **Not a test double** | `MockCarrierAdapter` |
 | `app/prompts/` | Tool schemas for the two forced-tool-choice call sites | Tool definitions |
 
 **`app/services/window.py` is deliberately a module of functions, not a class.** It holds no state
@@ -115,6 +135,24 @@ payload is parsed through a model rather than read from a dictionary.
 
 **There is no `repositories/` package, and there must not be.** High-level design §6.3 puts all
 persistent state on the client. A repository layer on the server is the shape a database arrives in.
+
+**`app/carriers/mock.py` sits outside `app/carriers/usps/`, and the placement is the whole point
+(plan decision D21).** Before this revision one class, `MockUspsAdapter`, served two jobs that pull
+in opposite directions: it was the double the §8.3 integration tests script outcomes into, *and* it
+was the adapter §7.1 constructs when `CARRIER_ADAPTER=mock` — which, per requirements §5.1, is the
+**default** until USPS access is granted. Those roles want contradictory behaviour on an unscripted
+call. A test double should **raise**, because an unscripted call is a test asserting against a
+default nobody chose. A runtime stub must **succeed**, because it is what the whole product runs on
+today. One class cannot do both, and the version that ships is the forgiving one, so every
+integration test in §8.3 would have been quietly asserting against fallback behaviour instead of
+against a scripted outcome.
+
+So they are two classes with two homes. `ScriptedUspsAdapter` stays in `app/carriers/usps/` next to
+the adapter whose behaviour it imitates, raises on any call it has no outcome for, and is
+**unreachable from configuration** — no value of `CARRIER_ADAPTER` selects it, and §8.2 carries a
+test that asserts exactly that. `MockCarrierAdapter` sits at `app/carriers/mock.py`, one level up,
+because it is not USPS-shaped: it is a deterministic stand-in for *a carrier*, and putting it under
+`usps/` would imply a fidelity it does not have and does not need.
 
 ### 2.2 Extension
 
@@ -211,7 +249,7 @@ whole of it.
 | `src/ranking/` | Urgency ordering, computed at render — FR-3.2.2. **Pure:** takes the orders and the current instant as arguments, reads no clock of its own | Popup |
 | `src/calendar/` | **Pure.** Builds the template URL and the `.ics` text. Delivers neither | Context-free |
 | `src/permissions/` | Query, decide whether to offer, record the outcome — FR-3.7.2 | Popup for the request, worker for the rest |
-| `src/messaging/` | Internal and external message routing, with origin checks | Worker |
+| `src/messaging/` | ~~Internal and external message routing, with origin checks~~ **Internal message routing only** — popup-to-worker. The external half went with FR-3.6.3 (plan decision D6) | Worker |
 | `src/types/` | The entity types and the driver session shape. No behaviour, no imports | All |
 | `src/config.ts` | Build-time constants. **Reads no network** — high-level design §8.4 | All |
 
@@ -292,6 +330,19 @@ forgot my J.Crew order" — unattributable and unreproducible. Every popup mutat
 `src/messaging/` to the worker. The popup still *reads* directly, because a stale read costs a
 re-render and a lost write costs an order.
 
+**One repository per file, and `src/storage/index.ts` is written complete before any of them
+(added 2026-08-27, plan decision D19).** The four repositories of §3.4 and `SessionStore` are five
+separate modules; the package's barrel is not a fifth peer but a declaration of the package's shape,
+so it is authored **up front**, exporting from modules that at that moment are stubs, and is not
+touched again as each repository is filled in. This is a file-layout rule rather than a design
+change, and it is recorded here because omitting it had a real cost: the implementation plan
+serialised all seven storage tasks into a chain, and when the reason was traced it was not the
+serialising queue or any invariant this section defends — it was that every task would have edited
+the same export list. Writing the barrel first makes the four repositories mutually parallel and
+takes the plan's storage batch from seven slots to four. **The test for whether a serial chain is
+real is whether the file has to stay whole.** `coordinator.ts` does, and §3.4's `transact` is why.
+An export list does not.
+
 ---
 
 ## 3. Class Design
@@ -317,7 +368,7 @@ classDiagram
         +cancel(confirmation_number, address, etag) None
         +servable_locations() list
     }
-    class MockUspsAdapter {
+    class ScriptedUspsAdapter {
         -scripts
         +check_eligibility(address) EligibilityResult
         +schedule(request) ScheduledPickup
@@ -325,6 +376,15 @@ classDiagram
         +cancel(confirmation_number, address, etag) None
         +servable_locations() list
         +push(method, outcome) None
+        +assert_drained() None
+    }
+    class MockCarrierAdapter {
+        -clock
+        +check_eligibility(address) EligibilityResult
+        +schedule(request) ScheduledPickup
+        +refresh(confirmation_number, address) RefreshedPickup
+        +cancel(confirmation_number, address, etag) None
+        +servable_locations() list
     }
     class TokenProvider {
         -cached_token
@@ -341,14 +401,18 @@ classDiagram
         +cancel(confirmation_number, address, etag) None
     }
     CarrierAdapter <|.. UspsAdapter
-    CarrierAdapter <|.. MockUspsAdapter
+    CarrierAdapter <|.. ScriptedUspsAdapter
+    CarrierAdapter <|.. MockCarrierAdapter
     UspsAdapter --> TokenProvider
     PickupService --> CarrierAdapter
 ```
 
-**`CarrierAdapter` is a `typing.Protocol`, not an ABC.** Nothing needs to subclass it, the mock is a
-separate implementation rather than a partial override, and a structural type keeps the test double
-from inheriting behaviour it should not have.
+**`CarrierAdapter` is a `typing.Protocol`, not an ABC.** Nothing needs to subclass it, each
+implementation is separate rather than a partial override, and a structural type keeps the test
+double from inheriting behaviour it should not have. With three implementations rather than two
+this matters more than it did: the protocol is the only thing they share, which is what makes the
+§8.2 assertion that no configuration value selects `ScriptedUspsAdapter` a statement about wiring
+rather than about types.
 
 **`refresh` and `cancel` both take an address.** This is not redundancy — USPS requires the address
 the pickup was booked against, which is why `BOOKED_ADDRESS` exists as an immutable snapshot
@@ -381,19 +445,38 @@ Its lifetime is therefore the container's, not the request's: two concurrent req
 warm container share one token, and the second one to see a 401 finds a token another already
 refreshed.
 
-**`MockUspsAdapter` implements all five Protocol methods**, because §7.1 makes it the default until
-USPS access is granted. A mock covering two of five would leave refresh, cancel and
-`servable_locations` with no working implementation on the only path that currently runs, and four
-of the §8.3 integration tests unwritable.
+**Both stand-ins implement all five Protocol methods.** For `MockCarrierAdapter` that is because
+§7.1 makes it the default until USPS access is granted, and an implementation covering two of five
+would leave refresh, cancel and `servable_locations` unimplemented on the only path that currently
+runs. For `ScriptedUspsAdapter` it is because four of the §8.3 integration rows are otherwise
+unwritable.
 
-**A script is a per-method queue of outcomes, consumed in order.** `push(method, outcome)` appends
-one; each call to that method takes the next, and falls back to a default success when the queue is
-empty. Queue-per-method rather than argument matching, because what the tests need to express is
+**`MockCarrierAdapter` is deterministic and it announces itself (plan decisions D21 and D22).** It
+is eligible everywhere except **one designated unserviceable postcode**, so FR-3.4.2's graceful
+second answer has a way to be reached without arming anything; its confirmation numbers are derived
+from the request rather than random, so the same booking twice is the same number and a test can
+name it; and it computes the next available date from the current date through its injected clock
+rather than returning a fixed string that goes stale. Above all, **every confirmation number it
+returns carries a fixed prefix** — `MOCK_CONFIRMATION_PREFIX`, exported as a module constant,
+published in `contracts/` and specified upstream at requirements §5.1 — because a fabricated
+confirmation number that looks real is the one failure in this system a user cannot detect and
+cannot recover from. They stop tracking the parcel, no carrier arrives, and the return window
+closes. See requirements FR-3.4.5b, and §7.2 for what the popup does with the prefix.
+
+**A script is a per-method queue of outcomes, consumed in order, and an unscripted call raises.**
+`push(method, outcome)` appends one; each call to that method takes the next. ~~It falls back to a
+default success when the queue is empty.~~ **Amended 2026-08-27 (plan decision D21): an empty queue
+raises.** The forgiving fallback was the load-bearing half of the conflation described in §2.1 — it
+existed so the same class could serve as the running server's carrier, and it meant a §8.3 row that
+forgot to script an outcome passed against a default nobody chose. Now that the runtime path belongs
+to `MockCarrierAdapter`, the double can be strict, and strict is what a double should be. Queue-per-method rather than argument matching, because what the tests need to express is
 *sequence* — eligible and then refused at schedule, a schedule whose response is lost, a cancel that
 first sees a stale ETag — and an argument matcher makes an ordering test read as though order did
 not matter. An outcome is a value to return, an exception to raise, or the sentinel that produces
 the transport failure of a dropped response rather than returning anything. A test that leaves
-outcomes unconsumed fails at teardown: a script nobody drained is usually a flow that never ran.
+outcomes unconsumed fails at teardown through `assert_drained()`: a script nobody drained is usually
+a flow that never ran. The two rules are a pair — raising on an empty queue catches the call nobody
+scripted, and draining catches the outcome nobody called.
 
 ### 3.2 Server — ingestion and the model boundary
 
@@ -1621,8 +1704,9 @@ flowchart TD
     D --> E{"verify bedrock model config"}
     E -- "absent or empty" --> X
     E -- "present" --> H{"which carrier adapter"}
-    H -- "mock" --> M["construct MockUspsAdapter, no SSM call"]
+    H -- "mock" --> M["construct MockCarrierAdapter, no SSM call, log at WARNING"]
     H -- "usps" --> F["fetch USPS credentials from SSM"]
+    H -- "any other value" --> X
     F --> K{"credentials present"}
     K -- "yes" --> U["construct UspsAdapter and TokenProvider"]
     K -- "no, ENVIRONMENT is prod" --> X["fail the cold start"]
@@ -1648,16 +1732,36 @@ The failure being guarded is real either way: a bare model ID raises a validatio
 time — on a user's first parse, inside a Lambda — and the startup check is what moves that to a
 place someone is looking.
 
-**The SSM fetch happens on the USPS path only.** The mock adapter is the default until USPS access
-is granted, and a startup that fetched credentials unconditionally would fail — or hang against a
-VPC-less timeout — on the only path that currently runs. The branch is on the selected adapter, and
-`ENVIRONMENT` separately scopes the SSM path and the USPS base URL.
+**The SSM fetch happens on the USPS path only.** `MockCarrierAdapter` is the default until USPS
+access is granted, and a startup that fetched credentials unconditionally would fail — or hang
+against a VPC-less timeout — on the only path that currently runs. The branch is on the selected
+adapter, and `ENVIRONMENT` separately scopes the SSM path and the USPS base URL.
+
+**An unrecognised `CARRIER_ADAPTER` fails the cold start (added 2026-08-27, plan decision D21).**
+The branch has exactly two arms and no default arm, because the plausible default is the wrong one
+in both directions: falling through to the mock turns a typo into a deployment that fabricates
+confirmation numbers, and falling through to USPS turns it into a deployment that cannot start for a
+reason the message does not name. A third value is a configuration error, and configuration errors
+belong at the cold start with a message naming the value and the two it accepts.
+
+**Selecting the mock logs at `WARNING`, not `INFO`.** It is the default, so it is the case nobody
+reads a log line about, which is exactly why the line has to be loud enough to appear in a filtered
+view. The line an operator needs to be able to find is "this deployment is not talking to a
+carrier."
+
+**`ScriptedUspsAdapter` appears nowhere in this flowchart, and that absence is asserted.** §8.2
+carries a test that no value of `CARRIER_ADAPTER` reaches it — a double that a deployment can select
+is a deployment that can ship a double, and the flowchart is the only place that could happen.
 
 **A missing credential under `ENVIRONMENT=prod` fails the cold start**, on exactly the reasoning
 that governs `BEDROCK_MODEL`: a production deployment that silently degrades to a mock carrier
 returns fabricated confirmation numbers to real users, and the failure surfaces as a person waiting
-by their door for a carrier nobody asked for. Under `dev` the same absence falls back to the mock
-and logs that it did, because the whole point of the mock is to work before the credential exists.
+by their door for a carrier nobody asked for. Under `dev` the same absence falls back to
+`MockCarrierAdapter` and logs that it did, because the whole point of the stub is to work before the
+credential exists. Note that the FR-3.4.5b prefix is a **second** line of defence on the same
+failure and not a substitute for this one: this branch stops the bad deployment, and the prefix
+makes it visible in the one case a deployment slips through anyway — a `prod` bundle pointed at a
+mock-configured `dev` server, where neither `ENVIRONMENT` check is looking.
 
 **Settings and the adapter are constructed once, in the lifespan, and held on application state.**
 Routes read them from the request's application state and pass them into the service they call;
@@ -1765,8 +1869,8 @@ lookup survives into the running extension. Every value below is fixed at build:
 **This table restates requirements §5.2; it does not extend it.** A low-level document that invents
 configuration is a document that has taken a product decision, and four of the rows below —
 `API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`, `DASHBOARD_ORIGIN` and `EXTENSION_KEY` — did
-exactly that before this revision: they were introduced here, with defaults, and appeared in no
-upstream table. Each is now in requirements §5.2, with the same names and the same defaults, and the
+exactly that before the previous revision: they were introduced here, with defaults, and appeared in
+no upstream table. Each is now in requirements §5.2, with the same names and the same defaults, and the
 reasoning for the pair of deadlines is recorded there for the same reason `MAX_INGEST_BYTES` is.
 The rule going forward: **a value that a deployment can change belongs upstream first.** If a later
 revision of this document needs a new one, the requirement is amended and cited, not shadowed —
@@ -1775,7 +1879,7 @@ which is also how `CARRIER_ADAPTER` and `FUNCTION_TIMEOUT_MS` reached requiremen
 | Constant | `dev` | `prod` |
 |---|---|---|
 | `API_BASE_URL` | `http://localhost:8000` | The deployed Function URL origin |
-| `DASHBOARD_ORIGIN` | Local origin | The one shipped hostname — high-level design §11 question 1 |
+| ~~`DASHBOARD_ORIGIN`~~ | ~~Local origin~~ | **Withdrawn 2026-08-27 (plan decision D6)** — it existed only to fill `externally_connectable.matches` for FR-3.6.3. Struck from requirements §5.2 in the same revision; the extension exports no such constant |
 | `EXTENSION_KEY` | The dev keypair's public key | The published keypair's public key |
 | `MAX_INGEST_BYTES` | `262144` | `262144` |
 | `INGEST_DEBOUNCE_MS` | `800` | `800` |
@@ -1826,15 +1930,41 @@ Two documents writing the same key through two coordinators would defeat it enti
 `chrome.storage.local` serialises individual `set` calls and nothing else. The popup constructs no
 `src/api/`, no `src/driver/` and no `src/adapters/` — it has no egress and drives no page.
 
-**The client version travels in a header on every request**, not only on the endpoints that can
-break. It costs a few bytes, it is what the `client-too-old` gate reads, and it is the field you
-wish you had logged when a bug turns out to affect one released version. The version itself is the
-manifest's, injected as a build-time constant like everything else above, so there is no second
-place for it to disagree with what the store shows.
+**The client version travels in a header named `X-Boomerang-Client-Version`, on every request**,
+not only on the endpoints that can break. It costs a few bytes, it is what the `client-too-old` gate
+reads, and it is the field you wish you had logged when a bug turns out to affect one released
+version. The version itself is the manifest's, injected as a build-time constant like everything
+else above, so there is no second place for it to disagree with what the store shows.
+
+**The name is normative and now lives upstream, at requirements §4.1 (added 2026-08-27, plan
+decision D16).** Until that amendment this paragraph described the header and no document in the
+repository spelled it — which meant `src/api/` and `app/deps.py` were each free to invent a spelling,
+and the failure mode is specific and bad: HTTP header names are case-insensitive, but a differently
+*worded* header is a different header. A server reading `X-Client-Version` from a client sending
+`X-Extension-Version` sees no header at all, and `MIN_CLIENT_VERSION`'s gate **fails open** in
+exactly the situation it exists for. A request whose version header is absent, empty, or spelled any
+other way is treated as absent and rejected by the same gate; §8.2 carries the row asserting that a
+differently-worded header does not satisfy it, and the `contracts/` payloads below carry the header
+so the two workspaces are checked against one string rather than against two independently correct
+implementations.
+
+**`MOCK_CONFIRMATION_PREFIX` is imported, not declared here.** The popup renders a "simulated — no
+carrier was contacted" marker beside any confirmation number carrying it, per requirements
+FR-3.4.5b. Two rules make that check meaningful. First, the constant is the server's and travels in
+`contracts/`; a second copy declared in `src/config.ts` would drift apart from the first and
+silently disable the marker. Second, **the detection is on the number, never on the build
+environment** — `ENVIRONMENT` and `API_BASE_URL` are both blind to a `prod` bundle pointed at a
+mock-configured server, which is precisely the case the marker exists for.
 
 **A production bundle is asserted, not trusted.** The build fails if the emitted `prod` bundle
-contains `localhost`, the dev extension key, or any `http:` origin — a three-line check over the
-output, run in CI. The failure it prevents is a released extension pointing at a developer's machine,
+contains `localhost` or any `http:` origin, if it declares `externally_connectable` at all, or if
+its pinned `key` is anything other than the **prod** key — asserted by deriving the extension ID
+from the emitted manifest and comparing it against the recorded prod ID, rather than by scanning for
+the dev key's bytes. The comparison is the stronger check and it is the one that matches the failure:
+a production bundle carrying the dev key produces the *dev* extension ID, which the prod Function
+URL's single-origin CORS allowlist refuses, so every request from the shipped extension fails — and
+it fails at the network layer, where the cause is least obvious. Both IDs are recorded when the
+keypairs are generated (plan Task 1.4). This is a check over the output, run in CI. The failure it prevents is a released extension pointing at a developer's machine,
 which is undetectable by reading the source, because the source is identical in both builds and only
 the substituted literals differ. `dev` and `prod` builds differ only in
 those constants — including the pinned key, which is **one per environment**, so a developer's
@@ -1848,11 +1978,27 @@ allowlist.
 Fakes over the network; no containers in the test loop. `pytest` with `httpx` transport mocking on
 the server, `vitest` with a fake browser API on the extension.
 
+**Both workspaces are held to the same coverage floor: 95% line *and* branch (added 2026-08-27, plan
+decision D13).** The server already had it — `fail_under = 95` with `branch = true`. The extension
+had none, and the asymmetry was not a considered position: it was the workspace that holds the state
+machine, the eviction rules and the egress scan running with no floor at all. The measured surface is
+`extension/src/`. `entrypoints/` is excluded, because it is framework-owned glue that §2.2 already
+requires to hold as little logic as it can — but it is excluded by an **explicit named list, not a
+glob**, so that a future entrypoint is a decision someone makes rather than a directory that silently
+inherits an exemption. Branch coverage is the half that matters here: the fail-closed scan, the
+quota retry and the rehydration paths are all branches whose *unhappy* side is the one the
+requirement is about, and line coverage alone will call them covered.
+
+**The pre-commit hook runs both workspaces (plan decision D14).** `.husky/pre-commit` covered the
+server only; a hook that checks one half of a two-workspace repository teaches everyone that green
+locally means nothing, which is worse than having no hook.
+
 ### 8.1 What gets a test double, and what does not
 
 | Dependency | Double | Rationale |
 |---|---|---|
-| USPS | `MockUspsAdapter` behind `CarrierAdapter` | Already required by §8.2 for development; the tests get it free |
+| USPS | `ScriptedUspsAdapter` behind `CarrierAdapter` | A per-method queue of outcomes, strict on both ends: it raises on an unscripted call and fails at teardown on an undrained one (§3.1). **Not** `MockCarrierAdapter`, which is the runtime stub and is deliberately forgiving |
+| The wire between the two workspaces | `contracts/` — canonical request and response JSON per endpoint, one error body per §4.2 reason code | Both suites assert against the same files, so a field renamed on one side turns exactly one suite red instead of neither |
 | Bedrock | Recorded tool-call responses at the client boundary | Deterministic, and asserts the tool schema is honoured |
 | `chrome.*` | In-memory fake `storage`, `tabs`, `scripting`, `permissions` | The storage fake must reproduce **atomic per-`set` semantics**, or it will hide the race the repository exists to prevent — plus the two behaviours below, or it will hide the whole quota path |
 | Worker lifecycle | `WorkerLifecycle` double, with `terminate()` | Chrome kills a service worker after ~30 s idle and nothing in the fake browser does. Rehydration is only testable if a test can *cause* the death |
@@ -1880,9 +2026,26 @@ assertion in §8.2 depend on being able to fire it at a chosen moment. Simulatin
 a second graph over the same fake store would test something weaker — a fresh reader, not a lost
 writer — and would silently pass for a design that kept state only in memory.
 
+**`contracts/` is a shared fixture directory, not a code artefact, and that is the point (added
+2026-08-27, plan decision D15).** The two workspaces agree on seven endpoints and a closed reason
+table, and before this revision each asserted against its own hand-written literals: the server's
+Pydantic models on one side, `src/api/`'s typed client on the other, with nothing in between. Two
+independently correct implementations of two different shapes is the failure this catches — both
+suites green, and the first evidence a broken request in a real browser, which is the most expensive
+place in this system to find a contract bug. So the canonical payloads live once, at the repository
+root, and `contracts/README.md` states plainly that **the files are the contract**: the tests read
+them and neither workspace's types are the authority. The verification is the definition — rename a
+field in one workspace and exactly one suite goes red. If neither does, the tier is decorative; if
+both do, the files are being generated from the code they are supposed to check. These payloads also
+carry `X-Boomerang-Client-Version` and `MOCK_CONFIRMATION_PREFIX`, which is what keeps §7.2's two
+cross-workspace string agreements from being two independent spellings.
+
 **The DOM fixtures double as adapter regression tests.** When a retailer changes its flow the
 fixtures go stale, and a failing fixture is a cheaper discovery channel than a user complaint —
 which matters because high-level design §8.4 puts adapter repairs on a store-review cycle of days.
+**They now have a source**: §9's first question is answered, and the fixtures are the scrubbed
+subtrees the feasibility spike captures while walking the flow by hand (plan decisions D1 and D2).
+Before that, this row named a double whose input did not exist.
 
 ### 8.2 Unit tests by module
 
@@ -1900,11 +2063,14 @@ which matters because high-level design §8.4 puts adapter repairs on a store-re
 | `src/adapters/` | Every bundled adapter declares each key its step map names; `for_url` matches its own order pages and no other host; `for_url` misses return an absent adapter rather than a default; `fillable_fields` and `irreversible_steps` are non-empty for any adapter claiming a fill or an irreversible step |
 | `src/permissions/` | Query reports a granted host as granted; the offer is made only after a successful scan — FR-3.7.2; a decline is recorded and not re-offered on the next scan; a revoked host reverts to the click path without error |
 | `src/ranking/` | Ordering by days remaining; inferred windows ranked but presented as estimates; unknown window listed, never omitted; **ordering is stable across repeated renders of unchanged data** — urgency is derived at render per FR-3.2.2, so two renders a second apart must not reorder equal-urgency orders |
-| `src/api/` | `reason` mapped to typed errors; unknown `reason` handled; no retry on the schedule call; bounded retry on read-only calls |
-| `src/messaging/` | `sender.origin` mismatch refused; only enumerated messages served; no general-purpose storage read exists |
+| `src/api/` | `reason` mapped to typed errors; unknown `reason` handled; no retry on the schedule call; bounded retry on read-only calls. **Every request the client builds carries `X-Boomerang-Client-Version`, spelled exactly that way** — requirements §4.1, asserted on the header name and on `/health` too, because a gate that only fires on some routes is not a gate. **Request and response shapes are asserted against `contracts/`, not against literals written here** (plan decision D15): the client's serialisation of each endpoint equals the canonical request file byte for byte after normalisation, and each canonical response file deserialises into the typed result without loss |
+| `src/messaging/` | Only enumerated messages served; no general-purpose storage read exists; a message from an unrecognised type is refused rather than defaulted. ~~`sender.origin` mismatch refused~~ — **amended 2026-08-27 (plan decision D6)**: with FR-3.6.3 out of scope there is no external sender, so `externally_connectable` is absent from the manifest and `onMessageExternal` is never registered. The origin check is not weakened, it is unreachable; §8.4's FR-3.7.1 row asserts the absence instead, which is the stronger property |
+| `src/popup/` simulated bookings — **FR-3.4.5b** | A confirmation number bearing `MOCK_CONFIRMATION_PREFIX` renders with the simulated marker; one without it renders without; the determination is made **from the confirmation number alone** — asserted by rendering a prefixed number in a build configured as production and confirming the marker still appears, which is the case the requirement exists for |
 | `src/calendar/` | Template URL carries only permitted fields; no order ID, price or tracking number; `.ics` generated locally; `reminder_offered_at` set on offer, never on save |
 | `app/config.py` | Each validated field rejects its bad values and accepts its good ones: an absent `BEDROCK_MODEL` fails startup while a prefix-less one warns and starts; a `min_client_version` that is not three dot-separated non-negative integers fails; a non-positive or non-integer timeout fails; **each of the three upstream deadlines fails when it is not below `function_timeout_ms`**, and the message names which one and both numbers. A `Settings` built from a fully populated environment matches the §7.1 table field for field — the test that catches a row added to the table and never to the class |
 | `app/models/` | **The strictness tests that justify having deleted `app/validation/`.** Unknown fields are rejected rather than ignored, on every request schema, because tolerating them would let an ingest body carry whatever the caller likes past the boundary; every string field has a declared maximum and a value one byte over it is rejected; every bounded numeric field rejects out-of-range values; a rejection produces the requirements §4.2 shape via the `RequestValidationError` handler rather than FastAPI's default body. Response schemas are asserted to serialise exactly the fields §3.5 names and no others — the check that a model gaining a field does not silently widen an API |
+| `app/carriers/mock.py` | **The runtime stub's own contract, which is not the test double's** (plan decision D21): every operation succeeds without a network call; eligibility is true for every address except the one designated unserviceable postcode, which returns a well-formed ineligible result rather than raising; confirmation numbers are derived from the request, so the same request twice yields the same number; dates come from the injected clock and never from `datetime.now`; **every confirmation number begins with `MOCK_CONFIRMATION_PREFIX`** — FR-3.4.5b's server half, asserted on the schedule and refresh paths alike |
+| `app/carriers/` selection | `CARRIER_ADAPTER=usps` constructs `UspsAdapter`; `mock` constructs `MockCarrierAdapter` and makes no SSM call; **any other value fails the cold start** rather than falling back; **no value of `CARRIER_ADAPTER` constructs `ScriptedUspsAdapter`** — asserted over the full set of accepted values, because the test double raising on an unscripted call would be a production outage rather than a test failure |
 | `app/services/window.py` | Stated window read; absent policy derives from `default_return_days` and marks inferred |
 | `app/services/pickup.py` | Eligibility called before **every** schedule; no cache across addresses; ineligible raises `AddressNotServiceable`; **`cancel` passes the ETag it was given straight to the adapter, unmodified, and performs no refresh of its own** — asserted against the adapter's call log, which must contain exactly one call; an adapter rejecting the token raises `EtagExpired` rather than retrying; booked address used for refresh and cancel |
 | `app/carriers/usps/` | Token cached and reused; 401 invalidates and retries **once**; ETag expiry raises `EtagExpired`; `packageType RETURNS` and `nextAvailablePickup` set |
@@ -1948,7 +2114,6 @@ process with fakes at the network edge.
 | Second return after abort | Item with an `Aborted` request | A new request is created; the terminal one is kept |
 | Clear all data with a live pickup | One uncancelled pickup | Enumerated and offered for cancellation before deletion |
 | Calendar tab fails | `tabs.create` rejects | `.ics` offered; `reminder_offered_at` unset until an offer succeeds |
-| Dashboard messaging | Message from the dashboard origin, then a foreign origin | Enumerated data served to the first; the second refused on `sender.origin` |
 | Payload over ceiling | Oversized fixture | Rejected client-side before transmission; server rejects independently |
 | Location refused, then re-asked | Mock refuses the requested package location and returns a reduced list | The user is re-asked from **that list only**; nothing is substituted on their behalf — FR-3.4.8 |
 | Server rejects the client version | Server returns `client-too-old` | Update prompt shown; the flow stops rather than degrading; no partial return is left mid-flight |
@@ -2039,8 +2204,8 @@ statements; `NFR-6.x` names the section, and the obligation each row asserts is 
 | FR-3.5.5 record the offer | Calendar unit tests; calendar tab fails |
 | FR-3.6.1 popup | First-run scan; ingest to ranked list |
 | FR-3.6.2 landing page | **Not verified by this document.** It is a `client/` surface with its own tests; this document covers the extension and the server only, per §1. Recorded here so the gap is deliberate rather than missed |
-| FR-3.6.3 dashboard | Dashboard messaging, extension side only |
-| FR-3.7.1 minimal manifest | Manifest assertion test: no `<all_urls>`, one `externally_connectable` host, CSP declared |
+| FR-3.6.3 dashboard | **Out of PoC scope as of 2026-08-27 (plan decision D6)** — nothing verifies it because nothing implements it. The integration row that stood here is removed rather than skipped, since a skipped test is a claim that the feature exists and is untested. Reinstating the requirement reinstates this row |
+| FR-3.7.1 minimal manifest | Manifest assertion test: no `<all_urls>`; **no `externally_connectable` key at all** (amended 2026-08-27, plan decision D6 — an absent key is a stronger assertion than one correct host, and it is what the withdrawal of FR-3.6.3 buys); CSP declared; `optional_host_permissions` carries every retailer origin and `host_permissions` carries none; and on a production bundle, the extension ID derived from the emitted manifest equals the recorded production ID (§7.2) |
 | FR-3.7.2 two-tier permissions | First-run scan; permission declined |
 | FR-3.7.3 disclosure | Fallback telemetry fields asserted; **listing copy is a review gate** |
 | NFR-6.1 privacy | **The obligation:** order contents, titles, addresses and confirmation numbers never reach a log, at any level, and exception detail never reaches a response body. `app/logging.py` unit tests at `DEBUG`; `app/errors.py`'s unhandled-exception row asserting no leaked detail; the allowlist formatter's unrecognised-field placeholder (§6.1) |
@@ -2048,13 +2213,18 @@ statements; `NFR-6.x` names the section, and the obligation each row asserts is 
 | NFR-6.3 resilience | **The obligation:** no failure leaves a return in an unrecoverable or invisible state. Return with one miss; tab closed; worker terminated mid-flow; schedule response lost; cancel refused after a good refresh; the store-rebuild row of §6.2 |
 | NFR-6.4 performance and presentation | **The obligations:** each upstream call is separately bounded and the client gives up on the action call before the server does; an inferred window is never presented as stated. Fallback timeout becomes `report_stuck`; upstream deadline exceeded, both upstreams; `app/config.py` rejecting a deadline not below `function_timeout_ms`; inferred window presentation |
 | NFR-6.5 security | **The obligations:** every field crossing the boundary is validated, no origin but the pinned ones is served, and CORS is configuration rather than a control. Order validator; `app/models/` strictness rows; `sender.origin` refusal; the CORS configuration row, which asserts headers only and says so |
-| NFR-6.6 infrastructure | **Not tested here** — see §8.5 |
-| NFR-6.7 abuse and spend | **Not tested here** — see §8.5 |
+| NFR-6.6 infrastructure | **Not tested here, but no longer unowned** — the check is Terraform, and it belongs to the deployment track: plan Task I.1 declares the topology and verifies it by `terraform plan`, Task I.2 applies it and smoke-tests the deployed endpoints (plan decisions D7 and D8). See §8.5 |
+| NFR-6.7 abuse and spend | **Not tested here, but no longer unowned** — same owner: the reserved concurrency, the Bedrock `InputTokenCount` alarm and the daily budget are declared and plan-asserted in Task I.1. See §8.5 |
 
 ### 8.5 What is deliberately not tested
 
 - **Live USPS and live Bedrock.** No CI credentials, and USPS access is not yet granted. A manual
-  smoke suite is worth adding once it is — recorded as an open question rather than assumed.
+  smoke suite is worth adding once it is — **now assigned rather than merely recorded**: plan Task
+  I.3 owns it — reconciling `UspsAdapter` against the USPS sandbox once credentials arrive, which is
+  also where high-level design §11 Q11 gets its answer — while Task I.2 covers the Bedrock half by
+  smoke-testing the deployed endpoints against the real model (plan decision D12). Both run by hand
+  against a deployed environment. They are out of CI on purpose; a suite that needs credentials CI does not have is a suite that is permanently red
+  or permanently skipped.
 - **Chrome's own permission UI.** Not automatable; the fake asserts our side of the contract.
 - **Whether the user saved the calendar event.** Unknowable by design — there is no callback, which
   is exactly why FR-3.5.5 records the offer instead.
@@ -2064,7 +2234,26 @@ statements; `NFR-6.x` names the section, and the obligation each row asserts is 
   which is pointing at nothing: no such assertions exist, and naming a suite that has not been
   written is worse than an admitted gap, because it reads as coverage in the traceability table.
   They are real requirements and they need a real check; that check belongs to `infra/` and is not
-  in this document's scope.
+  in this document's scope. **Amended 2026-08-27 (plan decisions D7 and D8): the gap now has an
+  owner outside this document.** The implementation plan carries a deployment track. Task I.1
+  replaces the legacy VPC-and-EC2 scaffold with the Lambda topology and **declares all of it** — the
+  Function URL with its single CORS origin, the reserved concurrency, the SSM parameters, the log
+  group with explicit retention, Bedrock invocation logging asserted *off*, the four alarms and the
+  daily budget — and its verification is `terraform plan`, which is the "Terraform plan assertions"
+  the first draft named before anything existed to assert against. Task I.2 then applies it and
+  smoke-tests the deployed endpoints from a real browser origin, which is the half `plan` cannot
+  give: a plan proves the declaration, a deploy proves the thing. The requirements stay
+  untested *here* and are satisfied *there*, which is a different claim from the one this bullet
+  made before, and the honest one.
+
+- **The end-to-end run against a real retailer.** Every row in §8.3 drives a fixture, and a fixture
+  is a page as it was on the day it was captured. Nothing in this document, and nothing in CI, ever
+  visits a live retailer — so a flow that passes every test here can still fail on the first real
+  order, and the tests would have no way to say so. That gap is closed **once, by hand**: plan Task
+  8.6 is a manual acceptance run of a complete return on a live page, and it sits on the critical
+  path deliberately (plan decision D23). It is not automated and should not be — it needs a real
+  account, a real order and a person watching the tab, which is precisely the combination CI cannot
+  supply. What it buys is the one signal fixtures cannot give: that the fixtures are still true.
 
 **Two of the entries above are structural, and structural means someone reads it.** The gate is code
 review of any change touching `src/calendar/`, `src/messaging/` or `app/errors.py`, and the trigger
@@ -2075,17 +2264,32 @@ someone's memory. A structural guarantee with no named trigger decays into a com
 
 ## 9. Open Questions
 
-1. **Where does adapter fixture capture come from?** Fixtures must be captured from real retailer
-   pages, which means someone's real order. Synthetic fixtures drift from reality; real ones carry
-   personal data into the repository. **Recommendation:** capture real, then scrub to synthetic
-   values before committing, and treat the scrubbing as part of the fixture's definition.
+**Three of the four questions below are now answered, and one is narrowed.** They are struck rather
+than deleted, so that the answer stays attached to the question it settles — the reasoning is worth
+more than the tidiness (revised 2026-08-27, from the implementation-plan review).
 
-2. **Is a manual live-credential smoke tier in scope for the PoC?** Deferred until USPS access is
-   granted; it cannot be written before then.
+1. ~~**Where does adapter fixture capture come from?**~~ **Answered (plan decisions D1 and D2).**
+   Fixtures must be captured from real retailer pages, which means someone's real order; synthetic
+   fixtures drift from reality and real ones carry personal data into the repository. The
+   recommendation stood — capture real, scrub to synthetic values before committing, treat the
+   scrubbing as part of the fixture's definition — and it now has a **when** and a **who**: the
+   feasibility spike that opens the plan walks a complete return by hand on each target retailer and
+   captures the scrubbed subtrees as it goes. The fixtures are committed, so what §8.1 calls a
+   regression tier has an input that exists before the code that reads it. The question was open
+   because nothing was scheduled to answer it, not because the answer was unknown.
 
-3. **The production dashboard hostname** remains open (§11 question 1 of the high-level design) and
-   blocks the manifest, hence the `externally_connectable` assertion test. It is a naming decision,
-   not a technical one.
+2. ~~**Is a manual live-credential smoke tier in scope for the PoC?**~~ **Yes, and it is assigned
+   (plan decision D12).** Plan Task I.3 owns it: a short by-hand suite run against a deployed
+   environment once USPS access is granted, deliberately outside CI (§8.5). What changed is not the
+   scope judgement but the ownership — "deferred until access is granted" is a sentence that stays
+   true forever unless something is written down to notice when the condition clears.
+
+3. ~~**The production dashboard hostname**~~ **Resolved by removal (plan decision D6).** FR-3.6.3 is
+   out of PoC scope, so there is no dashboard, no origin to name and no `externally_connectable` key
+   to fill — and therefore no naming decision blocking the manifest. This is the cleanest kind of
+   answer to an open question: the thing that needed naming stopped existing. §8.4's FR-3.7.1 row
+   now asserts the key's **absence**, which is what made the question disappear rather than merely
+   go quiet.
 
 4. **What keeps a citation in this document from naming a requirement that does not exist?** Two
    review rounds each caught one — an entity attributed to a high-level design section that does not
@@ -2096,6 +2300,14 @@ someone's memory. A structural guarantee with no named trigger decays into a com
    **Recommendation:** run it as a repository check rather than as a review round — a reviewer
    finding a fabricated citation is a reviewer spending attention on something `grep` does better.
    It is listed here rather than in §8 because it validates the documents, not the software.
+
+   **Now a task, and a wider one (amended 2026-08-27, plan decision D18).** Plan Task 10.2 runs the
+   sweep as a repository check, and its scope is extended past `FR-`/`NFR-` identifiers to
+   **configuration-parameter names**: every `MAX_`, `_TIMEOUT_MS`, `_AFTER_HOURS` and `_PREFIX`
+   constant this document cites is checked against the requirements' §5 tables and against the code
+   that reads it. That extension is not speculative — the review that produced it found three
+   constants cited here under names nothing declared, which is exactly the citation failure the
+   original question describes, in a namespace the original sweep did not look at.
 
    A later round supplied the other half of the case: the sweep also has to be able to *find* what
    it is checking against. Requirements section 6 was headed `### 6.1` … `### 6.7`, so every `NFR-`
@@ -2120,6 +2332,23 @@ than as a plateau: the second revision's findings are mostly *coverage* findings
 test row, an endpoint with no integration row — where the first round's were design defects. Two of
 round three's four blockers were of that kind, and two were regressions introduced by round two's
 own fixes. The lesson taken from that is recorded in §9 rather than here.
+
+**From the plan review (2026-08-27):**
+
+The implementation-plan review is a fifth round, of a different kind: it read this document as
+something to be *built* rather than as something to be checked, and the findings it produced are
+mostly things a reader of the design alone could not see. Twenty-five decisions came out of it,
+recorded in `plan/boomerang-decisions.md` as `D1`–`D25`. Most are applied above. Two are worth
+recording as declines:
+
+- **Generating `contracts/` from the Pydantic models.** It would guarantee the server half is never
+  stale, and it would destroy the tier: a file generated from one side's types cannot detect that
+  side's types drifting. The files are hand-written on purpose, and §8.1 states the property that
+  makes them worth having — a renamed field turns exactly one suite red.
+- **Splitting `ScriptedUspsAdapter` and `MockCarrierAdapter` into one configurable class.** The two
+  want opposite behaviour on an unscripted call (§2.1). A single class with a `strict` flag would
+  ship the strict path's failure mode into production the first time someone set the flag wrong,
+  and the failure would be a raised exception on a live schedule request.
 
 **From the first round:**
 
@@ -2232,7 +2461,8 @@ structural answer is §9's fourth question generalised: the sweep it proposes sh
 that every `FR-` cited here exists upstream, but that every `FR-` upstream is cited *somewhere*
 here or explicitly excused. That check would have found both, in seconds, before a reviewer did.
 
-**This revision amended upstream documents rather than working around them, in five places.** The
+**This document amends upstream rather than working around it — six places in the previous revision,
+four more in this one.** The
 header rule is that upstream wins; it is not that upstream is never wrong. Where a defect was
 genuinely upstream, the requirement or the high-level design was changed and this document cites the
 change rather than quietly diverging from it:
@@ -2242,9 +2472,20 @@ change rather than quietly diverging from it:
 | Requirements FR-3.3.9: the `LabelReady → LabelPrinted` edge now reads **"the printed label leaves"** rather than "user affirms printed", with a note fixing the four terminals | The old edge conflated FR-3.3.6's *field* write with a *state* transition, which made FR-3.4.5a and FR-3.4.6 — both of which hold the return at `LabelReady` around a pickup — literally contradict it. No low-level choice could satisfy both readings |
 | Requirements FR-3.3.6: the affirmation SHALL write the field and SHALL NOT move the request | The other half of the same defect, stated where the affirmation is defined |
 | Requirements §5.1: `CARRIER_ADAPTER` and `FUNCTION_TIMEOUT_MS` added | Deployment parameters. §7.1 branches on the first and validates against the second; both were invented here, which is a low-level document taking a deployment decision |
-| Requirements §5.2: `API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`, `DASHBOARD_ORIGIN`, `EXTENSION_KEY` added | The same, on the extension side — four constants §7.2 shipped with defaults that no upstream table carried |
+| Requirements §5.2: `API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`, ~~`DASHBOARD_ORIGIN`~~, `EXTENSION_KEY` added | The same, on the extension side — four constants §7.2 shipped with defaults that no upstream table carried. `DASHBOARD_ORIGIN` was struck again on 2026-08-27 with FR-3.6.3 (plan decision D6); the row upstream is struck rather than deleted, with a note saying what reinstating it costs |
 | High-level design §5.2 and §5.4: the cancellation narrative and its failure-path rows now say the return stays at `LabelReady`, with a new row for a cancel that finds the box collected | §5.2's prose asserted the old FR-3.3.9 reading; leaving it would have made the amendment true in one document and false in another |
 | Requirements section 6: the seven headings now read `### NFR-6.1` … `### NFR-6.7` rather than bare `### 6.1` … `### 6.7`. Text unchanged | An identifier every downstream document cites has to be declared where it is defined. Bare headings meant a mechanical sweep of `NFR-` citations — the check §9 question 4 recommends — resolved none of them, and a reviewer duly reported all seven as fabricated. Defining the prefix downstream would have been this document inventing an upstream document's naming |
+
+**From the plan review (2026-08-27), four more.** Each is the same shape as the six above: a defect
+that could have been papered over in this document and would then have been true here and false
+upstream.
+
+| Amendment | Why it was upstream, not here |
+|---|---|
+| Requirements §4.1: the client version header is named normatively — `X-Boomerang-Client-Version`, on every endpoint including `/health`, with a differently-spelled header treated as absent and rejected (plan decision D16) | Three modules have to agree on this string — the extension's api client, the server's dependency, and the `contracts/` fixtures — and no document named it. §7.2 described it; a description is not a spelling. The failure mode is silent and one-directional: a mismatch makes `MIN_CLIENT_VERSION`'s gate **fail open**, serving exactly the stale clients it exists to turn away, with nothing red anywhere |
+| Requirements FR-3.4.5b (new): a simulated booking SHALL disclose itself, by a `MOCK_CONFIRMATION_PREFIX` on the confirmation number, and the extension SHALL render a marker when it sees one (plan decision D22) | The obligation is a user-facing honesty rule, not an implementation detail, so it belongs where the other user-facing rules are. Placing it here would have made "does the user know this pickup is not real?" a question answered by a low-level document. The determination is made **from the confirmation number, not from the build environment**, which is what makes it survive a `prod` bundle pointed at a mock-configured server |
+| Requirements FR-3.6.3: prefixed with an out-of-scope block naming exactly what reinstatement requires (plan decision D6) | Scope is the requirements' to set. This document could only have stopped specifying the dashboard, which would have left an in-scope requirement with no design — the worst of the three states. Everything this document specified for that surface is struck rather than deleted, so reinstatement is unstriking rules that were reasoned about |
+| Requirements §5.1: `MOCK_CONFIRMATION_PREFIX` added, default `SIM-` | A constant two workspaces read and one requirement depends on. It sits in §5.1 with the other server parameters even though the extension also reads it, because the server is what *emits* it; the extension only recognises it |
 
 **One upstream field finally has an owner: `label_carrier`.** High-level design §4.2's ERD has
 carried it on `RETURN_REQUEST` since the first draft and this document mentioned it nowhere — an
