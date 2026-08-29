@@ -220,12 +220,14 @@ erDiagram
         bool window_inferred
     }
     ORDER_ITEM {
+        string item_id
         string title
         string variant
         decimal price
         bool returnable
     }
     RETURN_REQUEST {
+        string return_request_id
         string reason_code
         string tracking_number
         string label_carrier
@@ -242,11 +244,18 @@ erDiagram
         string consent_extension_version
     }
     DRIVER_SESSION {
+        string state
+        string item_id
+        string order_id
         string retailer_key
-        string adapter_step_key
+        string step_key
+        string chosen_option
+        int attempt_count
         int tab_id
         string tab_url
+        datetime started_at
         datetime last_progress_at
+        int schema_version
     }
     BOOKED_ADDRESS {
         string street
@@ -277,7 +286,7 @@ erDiagram
 | **ReturnRequest** | An attempt to return one item; an item may have several over time | `reason_code`, `tracking_number`, `label_carrier`, `label_printed`, `reminder_offered_at`, `state` | Belongs to an item, may have a pickup |
 | **Pickup** | A booked USPS collection, or an attempt to book one | `booking_intent_id`, `state`, `confirmation_number`, `scheduled_date` | Belongs to a return, owns one booked-address snapshot |
 | **BookedAddress** | An immutable copy of the address a pickup was actually booked against | `postal_code`, `standardized`, `package_location` | Owned by exactly one pickup, never edited |
-| **DriverSession** | The durable record of an in-progress return, rehydrated after the service worker is terminated | `retailer_key`, `adapter_step_key`, `tab_id`, `tab_url`, `last_progress_at` | Owned by at most one return request |
+| **DriverSession** | The durable record of an in-progress return, rehydrated after the service worker is terminated | `state`, `item_id`, `order_id`, `retailer_key`, `step_key`, `chosen_option`, `attempt_count`, `tab_id`, `tab_url`, `started_at`, `last_progress_at`, `schema_version` (amended 2026-08-28, seventh low-level-design review, CLASS-2: seven fields the design persists were declared in no document, and `adapter_step_key` is renamed `step_key` to match requirements §4.1's own spelling of the same concept) | Owned by at most one return request |
 | **Address** | The current collection address, standardized by USPS, plus where the carrier should look | `postal_code`, `standardized`, `package_location` | Singleton in the store, seeds new bookings |
 
 **`ADDRESS` is editable; `BOOKED_ADDRESS` is not, and they cannot be the same record.** USPS refresh
@@ -297,13 +306,45 @@ invariant: **at most one return request per item may be in a non-terminal state*
 the current request every surface shows. Terminal requests are kept rather than overwritten, because
 "you already tried this and stopped" is the context a user needs when they come back to it.
 
+**Two entities carry an explicit key, and one deliberately does not** (added 2026-08-28, from the
+sixth low-level design review). `ORDER_ITEM.item_id` and `RETURN_REQUEST.return_request_id` are
+opaque, locally generated strings, unique across the whole store rather than within their parent,
+assigned at ingestion and at request creation respectively, and **never transmitted** — they are
+store keys, not wire fields. They are declared because both entities are addressed by key directly:
+an item is looked up by `item_id` alone, without its order, which is the operation a return begins
+with, and `item_id` therefore has to survive a re-scan of the same order rather than being
+re-derived from a title a retailer may reword. `ORDER` needs no synthetic key — it has the natural
+one, `(retailer, retailer_order_id)`, which is what upsert merges on. `PICKUP` needs none either,
+for the reason the next paragraph gives. Leaving these two undeclared was the gap: the low-level
+design used both as primary keys while deferring entity fields to this ERD, so the store's keys were
+defined in no document.
+
 **`PICKUP` has a lifecycle, and the entity has to carry it.** `booking_intent_id` is generated locally and
-written *before* the schedule call; `state` runs over `Booking`, `Confirmed`, `Cancelled`,
-`Collected` and `Abandoned`. `confirmation_number` is therefore nullable — a pickup in `Booking` does not have one
-yet, and may never get one if the response is lost. Two mechanisms elsewhere in this design need
-predicates that only these attributes make expressible: §5.2's write-ahead booking intent *is* a
-`PICKUP` in state `Booking`, and §4.3's eviction carve-out has to ask whether a pickup "has not been
-cancelled or collected". Without `state` neither sentence has a schema behind it.
+written *before* the schedule call; `state` runs over **`Booking`, `Confirmed`, `Collected` and
+`Abandoned`** — four states, not five. `confirmation_number` is therefore nullable — a pickup in
+`Booking` does not have one yet, and may never get one if the response is lost. Two mechanisms
+elsewhere in this design need predicates that only these attributes make expressible: §5.2's
+write-ahead booking intent *is* a `PICKUP` in state `Booking`, and §4.3's eviction carve-out has to
+ask whether a pickup "has not been collected or abandoned". Without `state` neither sentence has a
+schema behind it.
+
+**`Cancelled` was the fifth state and it is struck (amended 2026-08-28, seventh low-level-design
+review, CONSIST-1).** No component ever writes it: a successful cancel *deletes* the pickup record,
+because a cancelled pickup and a pickup that was never booked are the same fact — no carrier is
+coming. Keeping the row would put a terminal record in front of every unsettled-pickup read, keep
+pinning its order against eviction, and count in a clear action that removes something the user
+already removed. A state nothing writes is a state every predicate has to carry and no test can
+reach. Cancellation is an **event**, not a state; what survives it is the `RETURN_REQUEST`, which
+stays at `LabelReady` with its printed label still valid for drop-off. The one thing given up is the
+history that a cancel happened, and nothing in this design reads that history.
+
+**`booking_intent_id` is also the `PICKUP`'s store key, and there is deliberately no second one**
+(clarified 2026-08-28). Because it is written before the schedule call, the record has an identity
+from the instant it exists — including on the branch where the response is lost and a confirmation
+number never arrives. A separate `pickup_id` alongside it would be two keys for one record, and the
+lost-response branch is exactly where the two would diverge: the id the client generated would exist
+and the id derived from the booking would not. Every repository operation on a pickup is therefore
+keyed by `booking_intent_id`.
 
 `Collected` is not observable. No component watches for the carrier, and there is no `GET /pickups`
 to ask. It is set when the user says so, or inferred once the scheduled date is more than
@@ -314,14 +355,17 @@ be acted on.
 
 **`Booking` needs a terminal exit, or the eviction carve-out becomes a leak.** A pickup stranded in
 `Booking` by a lost response has no `confirmation_number` and no `scheduled_date` — so the
-`Collected` inference above, which keys on that date, can never fire for it. It is also never
-`Cancelled`, because there is no number to cancel with. Under an eviction rule that exempts anything
-"not cancelled or collected", such a record pins its order forever and `MAX_STORED_ORDERS` stops
+`Collected` inference above, which keys on that date, can never fire for it. It cannot be cancelled
+away either, because there is no confirmation number to cancel with — so the deletion that resolves
+every other live pickup is unavailable to this one. Under an eviction rule that exempts anything
+"not collected", such a record pins its order forever and `MAX_STORED_ORDERS` stops
 being a ceiling. A `Booking` record therefore moves to `Abandoned` after
 `BOOKING_ABANDONED_AFTER_HOURS` — 24 at the PoC — or immediately when the user resolves it through
 the enumeration §4.3's clear action already builds. `Abandoned` means "we never learned whether this
 booked", which is the honest content of the record, and it is evictable. The eviction carve-out
-reads *not cancelled, collected or abandoned*.
+reads *not collected or abandoned* (amended 2026-08-28, seventh low-level-design review, CONSIST-1,
+in the same amendment that struck the `Cancelled` state; the carve-out previously read "not
+cancelled, collected or abandoned", which named a state a pickup can no longer be in).
 
 Five attributes carry design weight:
 
@@ -353,7 +397,21 @@ resume: rehydration needs the adapter, the step within it, and the tab. `tab_url
 alongside `tab_id` because a tab ID alone cannot be validated after a restart — the tab may have
 been closed and its ID reused, or navigated elsewhere, and comparing the URL is what turns "the tab
 exists" into "the tab is still the one we were driving". `last_progress_at` is what makes a session
-that will never resume identifiable as such. Since MV3 terminates an idle worker after roughly
+that will never resume identifiable as such, and `started_at` is what distinguishes a session that
+has been stalled for an hour from one begun a minute ago.
+
+**Seven of this entity's twelve fields were added on 2026-08-28** (seventh low-level-design review,
+CLASS-2), and they are not decoration. `state` is a *mirror* of `RETURN_REQUEST.state`, written in
+the same storage operation, so a rehydrating driver can check the two agree before trusting either —
+a session whose mirror disagrees with the authoritative state is a crash mid-write, and it is
+recoverable only because both values are on disk. `item_id` and `order_id` say what is being
+returned, which nothing else on the record does; `order_id` is `ORDER`'s natural key
+`(retailer, retailer_order_id)` rendered as one addressable string, not a second identity.
+`chosen_option` carries the user's return-method choice across the window between the choice and the
+label page — FR-3.3.5's first source, which is otherwise lost to a worker restart and silently
+downgraded to its second. `attempt_count` is what §5.2's `RETURN_ATTEMPT_LIMIT` bounds.
+`schema_version` is what lets a running extension recognise a record written by a version it does not
+understand and rebuild rather than misread it. Since MV3 terminates an idle worker after roughly
 thirty seconds, this record's durability is load-bearing rather than incidental.
 
 **Nothing stores a countdown.** Days remaining is computed from `return_by` at render time. The
@@ -368,8 +426,7 @@ storage, keyed on retailer plus retailer order ID so revisits update rather than
 **Updated** as the return progresses through its state machine, and when a pickup is booked.
 
 **Evicted** oldest-first once the configured retention ceiling is reached — **except** for any order
-carrying a return in a non-terminal state or a pickup that has not been cancelled, collected or
-abandoned.
+carrying a return in a non-terminal state or a pickup that has not been collected or abandoned.
 Those are never evicted, regardless of age. Eviction orders on ingestion time, recorded when the
 order first enters the store, because `ordered_at` and `delivered_at` are page-extracted and may be
 absent or wrong.
@@ -387,8 +444,9 @@ Their remaining option is USPS by telephone.
 
 Therefore:
 
-- Eviction skips orders with a live return, or a pickup that is neither cancelled, collected nor
-  abandoned, as above.
+- Eviction skips orders with a live return, or a pickup that is neither collected nor abandoned, as
+  above. A cancelled pickup needs no clause: its record is deleted, so there is nothing left to
+  skip.
 - The clear action does not silently proceed when live bookings exist. It enumerates them and offers
   to cancel them first; if the user clears anyway, the confirmation numbers and their scheduled
   dates are shown one last time so they can be kept.
@@ -507,7 +565,7 @@ flowchart TD
     I --> J["User affirms the label is printed"]
     J --> J2{"Label carrier is USPS"}
     J2 -- "No" --> J3["No pickup possible, explain drop off"]
-    J2 -- "Yes" --> K["Check USPS eligibility"]
+    J2 -- "Yes" --> K["Check USPS eligibility in the service worker, before the offer renders"]
     K --> L{"Address serviceable"}
     L -- "No" --> M["Explain, and point at the retailer's own drop off options"]
     L -- "Yes" --> N0["Write a provisional booking intent record first"]
@@ -517,6 +575,17 @@ flowchart TD
     O2 --> P["Open prefilled calendar tab"]
     P --> Q["Name the day USPS returned"]
 ```
+
+**The eligibility node's execution context is named, and it is the service worker** (added
+2026-08-28, from the sixth low-level design review). This flow previously showed the pre-offer
+eligibility check without saying who makes it, and that silence let the low-level design describe
+the call three incompatible ways — as the popup's, as something the popup cannot make because it has
+no network egress, and as an edge its dependency graph did not draw. The resolution is recorded in
+both documents so it cannot drift apart again: the **popup initiates** the check over internal
+messaging and renders the result, and the **service worker owns the network call**, because the
+worker is the extension's only egress point and the popup's lack of egress is a property worth
+keeping. Nothing about the user-visible ordering changes — the check still completes before the
+pickup offer renders, which is what FR-3.4.2 requires.
 
 The two pauses in this flow are not the same kind of pause. Confirming an irreversible step
 protects the user from the agent being wrong. Presenting the return methods protects the user from

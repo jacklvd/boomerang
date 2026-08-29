@@ -74,12 +74,14 @@ erDiagram
         bool window_inferred
     }
     ORDER_ITEM {
+        string item_id
         string title
         string variant
         decimal price
         bool returnable
     }
     RETURN_REQUEST {
+        string return_request_id
         string reason_code
         string tracking_number
         string label_carrier
@@ -96,11 +98,18 @@ erDiagram
         string consent_extension_version
     }
     DRIVER_SESSION {
+        string state
+        string item_id
+        string order_id
         string retailer_key
-        string adapter_step_key
+        string step_key
+        string chosen_option
+        int attempt_count
         int tab_id
         string tab_url
+        datetime started_at
         datetime last_progress_at
+        int schema_version
     }
     BOOKED_ADDRESS {
         string street
@@ -133,16 +142,65 @@ Five attributes deserve a note, because each was added to close a specific gap:
   is indistinguishable from a printed USPS one, and a USPS carrier will not collect the former.
 - **`package_location`** and **`location_note`** hold the user's answer about where the carrier
   should look, in Boomerang's own vocabulary. See FR-3.4.8.
+- **`item_id` and `return_request_id` are the two entity keys the store addresses records by**
+  (added 2026-08-28, from the sixth low-level design review). Both are **opaque strings generated
+  locally by the extension** — there is no server-side identifier to adopt, because the server is
+  stateless — and both are **unique within one browser profile's store**, not merely within their
+  parent. `item_id` is assigned when an order is first ingested and SHALL be stable across a later
+  re-scan of the same order, since `ORDER_ITEM` has no natural key and re-deriving one from a title
+  would change identity whenever a retailer reworded a product name. `return_request_id` is assigned
+  when a return request is created. **Neither is ever transmitted**: they are store keys, not wire
+  fields, which is what keeps them free of any correlation value. They are declared here because
+  they are looked up by directly — an item is addressed by `item_id` alone, without its order — and
+  a key an implementation is addressed by is part of the entity, not an implementation detail.
+  `PICKUP` needs no third key of its own: `booking_intent_id` already exists, is already generated
+  locally, and is already written before the schedule call, so it is the pickup's identity from the
+  moment the record exists.
 - **`PICKUP.state`** and **`PICKUP.booking_intent_id`** carry the booking lifecycle — `Booking`,
-  `Confirmed`, `Cancelled`, `Collected` — written before the schedule call rather than after it.
+  `Confirmed`, `Collected`, `Abandoned` — written before the schedule call rather than after it.
   `confirmation_number` is nullable: a pickup in `Booking` does not have one. FR-3.1.5's eviction
   carve-out and FR-3.4.5's lost-response recovery both need this state to be expressible.
+  - **Amended 2026-08-28 (seventh low-level-design review, CONSIST-1 and CONSIST-2).** This note
+    previously read `Booking`, `Confirmed`, `Cancelled`, `Collected` — it named a state nothing ever
+    writes and omitted one the requirements themselves use. **`Cancelled` is struck**: a successful
+    cancel *deletes* the record, because a cancelled pickup and a pickup that was never booked are
+    the same fact — no carrier is coming — and a `Cancelled` row would sit in front of every
+    unsettled-pickup read, keep pinning its order against eviction, and count in a clear action that
+    removes something the user already removed. **`Abandoned` is added**: FR-3.1.5 already requires a
+    `Booking` record to move to it after `BOOKING_ABANDONED_AFTER_HOURS`, and FR-3.3.9's own aside
+    already enumerates the lifecycle as `Booking`, `Confirmed`, `Collected`, `Abandoned`. The four
+    states above are now what every document says, and they are the enumeration that was already
+    internally consistent with the rest of this one.
+  - **Cancellation is an event, not a state.** What survives a cancel is the `RETURN_REQUEST`, which
+    stays at `LabelReady` with its printed label; what disappears is the pickup. The consequence is
+    stated rather than left to be found: **nothing reads a history of cancellations**, and at this
+    scope nothing needs to.
 - **`BOOKED_ADDRESS`** is an immutable snapshot of the address a pickup was booked against, owned by
   the pickup rather than referenced from `ADDRESS`. `ADDRESS` is the editable singleton that seeds
   the *next* booking; it is not the address any existing booking is registered under. See FR-3.4.6.
 - **`DRIVER_SESSION`** is the durable record that lets a return survive service worker termination —
-  adapter, step, tab ID, tab URL and last-progress time. See FR-3.3.9. It is separate from
-  `RETURN_REQUEST.state`, which names the state without locating the driver within it.
+  the state, the item and order being returned, the retailer, the step within its adapter, the option
+  the user chose, the attempt count, the driven tab ID and URL, and the start and last-progress
+  times. See FR-3.3.9. It is separate from `RETURN_REQUEST.state`, which names the state without
+  locating the driver within it: the session's own `state` is a mirror written in the same storage
+  operation, so a rehydrating driver can check the two agree before trusting either.
+  - **Amended 2026-08-28 (seventh low-level-design review, CLASS-2).** This entity previously
+    declared five fields — `retailer_key`, `adapter_step_key`, `tab_id`, `tab_url`,
+    `last_progress_at` — while FR-3.3.9's own bullet already required "current state" as well, and
+    the low-level design persists twelve. Seven were declared in no document: `state`, `item_id`,
+    `order_id`, `chosen_option`, `attempt_count`, `started_at` and `schema_version`. They are
+    declared here now, because a persisted field whose definition lives only downstream is a field
+    two implementations can disagree about with nothing red anywhere.
+  - **`adapter_step_key` is renamed `step_key` in the same amendment.** §4.1's `/returns/next-step`
+    row already spells the same concept `step_key`, and so does every downstream document; one
+    concept carrying two names across a single requirements document is the drift this ERD exists to
+    prevent.
+  - **`chosen_option` is null on the free-drop-off branch** — a return that never presents a paid
+    option never makes a choice. `attempt_count` is bounded by §5.2's `RETURN_ATTEMPT_LIMIT`.
+    `schema_version` is what lets a running extension recognise a record written by a version it does
+    not understand and rebuild rather than misread it.
+  - **`order_id` is the `ORDER` natural key `(retailer, retailer_order_id)` rendered as one
+    addressable string, not a second identity.** `ORDER` has no synthetic key and gains none here.
 - **`ORDER.first_seen_at`** is set on first insert and **never updated by a revisit merge**. FR-3.1.5
   orders eviction on it, so letting a revisit refresh it would silently reset an order's age and
   make the retention ceiling unenforceable.
@@ -222,7 +280,10 @@ direction: a false positive costs the user one manual step, a false negative cos
 - The extension SHALL evict the oldest orders once the configured maximum is exceeded, ordered by
   `first_seen_at`, which SHALL be set on first insert and SHALL NOT be updated by a revisit merge.
 - The extension SHALL NOT evict an order carrying a return in a non-terminal state, or a pickup that
-  has not been cancelled, collected or abandoned, regardless of its age.
+  has not been collected or abandoned, regardless of its age (amended 2026-08-28, seventh
+  low-level-design review, CONSIST-1: the carve-out previously read "not been cancelled, collected or
+  abandoned", and `Cancelled` is not a state a pickup can be in — a cancelled pickup has no record
+  at all, so the clause it was in could never be evaluated).
 - The extension SHALL move a pickup left in `Booking` to `Abandoned` after
   `BOOKING_ABANDONED_AFTER_HOURS`, and SHALL treat a `Confirmed` pickup as `Collected` once its
   scheduled date is more than `PICKUP_SETTLED_AFTER_DAYS` past. Without both, a pickup that never
@@ -461,9 +522,11 @@ and the separation is the whole of the fix:
 
 An affirmed print is therefore a return that is *ready* to complete, not one that has.
 
-- The extension SHALL persist a `DRIVER_SESSION` — current state, retailer key, adapter step key,
-  driven tab ID and tab URL, and a last-progress timestamp — into `chrome.storage.local` on
-  **every** transition, before acting on that transition.
+- The extension SHALL persist a `DRIVER_SESSION` — **every field §2.2's ERD declares for it** —
+  into `chrome.storage.local` on **every** transition, before acting on that transition. The ERD is
+  the list; this sentence is not a subset of it (amended 2026-08-28, seventh low-level-design
+  review, CLASS-2: the prose previously enumerated six of the entity's fields, which read as the
+  whole record and was the reason seven more went undeclared).
 - The extension SHALL validate a rehydrated `tab_id` against the stored `tab_url` before resuming.
   A tab ID alone is not sufficient: IDs are reused after a tab closes.
 - The extension SHALL reconstruct the session from that record and the driven tab's current URL when
@@ -1000,6 +1063,9 @@ sequenceDiagram
 | `API_RETRY_BUDGET_MS` | Ceiling on a whole bounded-retry sequence including its backoff. SHALL sit **below** three times `API_REQUEST_TIMEOUT_MS`, so the budget rather than the attempt count ends the sequence | `20000` |
 | ~~`DASHBOARD_ORIGIN`~~ | **Withdrawn 2026-08-27 (plan decision D6).** It existed only to fill `externally_connectable.matches` for FR-3.6.3, which is out of PoC scope; the extension exports no such constant. Restore this row if FR-3.6.3 is reinstated | — |
 | `EXTENSION_KEY` | The pinned public key that fixes the extension ID, one per environment | The environment's published keypair |
+| `CLIENT_VERSION` | The extension's own version, build-substituted from the manifest. It is the value of the `X-Boomerang-Client-Version` header on every request (§4.1) and the value recorded as `consent_extension_version` on a `PICKUP` (NFR-6.2). Added 2026-08-28: two obligations already depended on it and no table declared it | The manifest version |
+| `STORAGE_EVICTION_MARGIN_BYTES` | Extra bytes byte-driven eviction frees beyond the size of the write that was refused. Candidate sizes are estimated by serialisation and Chrome's accounting includes per-key overhead, so evicting to the exact figure leaves the retry able to fail again. Added 2026-08-28: the margin was specified in the low-level design and never named or given a value | `65536` |
+| `RETURN_ATTEMPT_LIMIT` | Ceiling on `DRIVER_SESSION.attempt_count` — the number of step attempts one return may make before it is reported stuck rather than driven further. Added 2026-08-28: the counter was on the entity and the bound that gives it meaning was declared nowhere | `12` |
 
 **Every upstream call SHALL have a deadline shorter than the function's own timeout.** The Lambda
 runs to 60 s and holds one of five reserved concurrency slots while it does. A client that has

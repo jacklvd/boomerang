@@ -3,25 +3,37 @@
 **Document Reviewed:** `design/boomerang-low-level-design.md`
 **Requirements Reference:** `design/boomerang-requirements.md`
 **High-Level Design Reference:** `design/boomerang-high-level-design.md`
-**Review Date:** 2026-08-27
+**Review Date:** 2026-08-28
 **Reviewer:** Claude (Automated Review)
 
 ---
 
 ## Executive Summary
 
-This is the sixth review of a document that has already absorbed five, and the standard it holds is
-high: the module graphs declare themselves exhaustive, the error taxonomy is closed, the storage
-layer reasons about its own failure modes in bytes, and §10 records what it declines and why. The
-findings below are therefore narrow and specific, and most of them are of one shape — a rule stated
-correctly in one section and contradicted, unwired, or uncited in another.
+This is the seventh round against a 2,940-line document, and the first to run against the ~505 lines
+the sixth revision added — the `deps` module and its client-version gate, `RetailerPolicy` /
+`DerivedWindow` / `DeriveWindow` and the four-row return-window precedence table, the re-keyed
+`PickupRepository` and the `ReadOnlyStore` type, the new §4.7 eligibility diagram, and the rewritten
+§8.2–§8.5 traceability rows. Those additions close real gaps and most of them close them well: the
+traceability table is now complete for all thirty-nine upstream requirement identifiers, and the
+sixth round's retraction of its own false positives was correct — every one of the four requirements
+it had called untested does in fact carry a §8.4 row.
 
-The single most important finding is that **three sections disagree about who makes FR-3.4.2's
-pre-offer eligibility call.** §4.3 puts the call site in the popup; §7.2 states the popup constructs
-no `src/api/` and "has no egress"; §2.2's dependency graph — which declares that an undrawn edge is
-forbidden — draws no popup-to-api edge and enumerates no message that would route it through the
-worker. One of those three is wrong, and the requirement they disagree about is the one that decides
-whether a user is ever offered a pickup that cannot be booked.
+The single most important finding is **CONF-1**: §3.2's new precedence table enumerates four sources
+for `return_by` and FR-3.2.1 names a fifth. The requirement derives the window "from the delivery
+date and **the retailer's stated policy where the page exposes one**, and from a configured
+per-retailer default where it does not." The table has a page-stated *deadline date* (row 1, not
+inferred) and the configured default (rows 2–3); a page-exposed *policy in days* has neither a row,
+a field on `OrderSchema`, nor a field on `RetailerPolicy` to carry it. A retailer page advertising
+sixty-day returns will be assigned thirty. The implementation plan's Task 3.7 reproduces the same
+four branches, so this is a case where plan and design agree and both are wrong against upstream.
+
+The second theme is narrower and more mechanical: three of the sixth round's fixes were applied to
+the section that raised them and not to the sections that cite them. `ReadOnlyStore` is defined twice
+in one paragraph with two different surfaces; `UserPrompt.ask` returns `PendingQuestion` in §3.3 and
+§9 and `Answer` in §3.5; the new single-`set` law is stated in §3.4 and not propagated to the §4.5
+branch it now governs. That is the same half-applied-amendment pattern §10 itself names, one round
+later.
 
 **Overall Verdict:** Needs targeted fixes before proceeding
 
@@ -31,15 +43,15 @@ whether a user is ever offered a pickup that cannot be booked.
 
 | Review Area | Verdict | Findings |
 |-------------|---------|----------|
-| Package/Module Structure | Partially Addressed | 2 |
-| Class/Type Design | Sufficient | 2 |
-| Class Interactions & Workflows | Partially Addressed | 2 |
-| Data Access Layer | Partially Addressed | 3 |
-| Error Handling | Partially Addressed | 3 |
+| Package/Module Structure | Partially Addressed | 3 |
+| Class/Type Design | Partially Addressed | 4 |
+| Class Interactions & Workflows | Partially Addressed | 3 |
+| Data Access Layer | Sufficient | 1 |
+| Error Handling | Sufficient | 1 |
 | Configuration & Wiring | Partially Addressed | 3 |
-| Testing Completeness | Partially Addressed | 7 |
-| Consistency with High-Level Design | Sufficient | 2 |
-| Specification Clarity | Partially Addressed | 4 |
+| Testing Completeness | Sufficient | 2 |
+| Consistency with High-Level Design | Partially Addressed | 2 |
+| Specification Clarity | Partially Addressed | 3 |
 
 ---
 
@@ -47,39 +59,41 @@ whether a user is ever offered a pickup that cannot be booked.
 
 ### Current State
 
-Two workspaces. The server is one layered Python package with a one-directional layering rule drawn
-in §2.1 and a fourteen-row module table; routes call services, services call carriers and bedrock,
-nothing calls upward, and `middleware` is explicitly placed around the app rather than above it. The
-extension is one WXT package whose §2.2 graph is declared **complete** — "an edge that is not drawn
-is not permitted" — with two named leaf exemptions, `src/types/` and `src/config.ts`, justified by a
-property rather than by fiat.
+Two graphs, both declared normative and both scheduled to become mechanically enforced contracts by
+plan Task 10.3. §2.1 draws the server's layering across nine nodes, gaining a `deps` node and an
+`app/deps.py` module row this revision. §2.2 draws every permitted extension edge and declares itself
+complete — "an edge that is not drawn is not permitted" — and gains, this revision, a statement that
+`chrome.tabs` and `chrome.scripting` have monopoly holders in the same way `chrome.storage` does.
 
 ### Strengths
 
-- The completeness claim on the extension graph is the strongest structural device in the document.
-  It converts every later omission into a detectable contradiction rather than a silent gap, which
-  is exactly how PKG-1 below became findable.
-- The `src/extract/` two-context split is reasoned from where the payload is at the moment it would
-  leave, not from where the module happens to live, and the purity of the scan is what makes the
-  split work rather than a coincidence it relies on.
-- `middleware` being drawn out of the layering with a stated reason prevents the most likely
-  misreading of a layered graph.
-- The server table names exports per module, so the layering rule is checkable against imports.
+- The `app/deps.py` addition is the right fix for the right reason: a module owning the version gate
+  had no row, no node and no test row while the gate itself had cost a requirements amendment.
+- The `no-egress-from-popup` property is now stated as a property rather than implied by the absence
+  of an arrow, and §4.7 draws the one flow that previously had no drawn path.
+- The `src/extract/` two-context split, and the assignment of the FR-3.1.3 scan to `src/extract/`
+  with the abort decision to `src/driver/`, remains the clearest module-boundary argument in the
+  document.
 
 ### Gaps and Recommendations
 
 | ID | Gap | Package(s) | Priority | Recommendation |
 |----|-----|------------|----------|----------------|
-| PKG-1 | §2.2's graph declares itself exhaustive and draws no edge from `entrypoints popup` to `src api`. §4.3 states the opposite in prose: "The extension also calls `POST /pickups/eligibility` on its own, once, before it offers the pickup at all. **The call site is the popup.**" §7.2 states a third thing: "The popup constructs no `src/api/`, no `src/driver/` and no `src/adapters/` — it has no egress." All three cannot hold. The requirement at stake is FR-3.4.2, whose whole content is that the unserviceable answer arrives *before* the offer rather than after the user says yes | `entrypoints/popup/`, `src/api/`, `src/messaging/` | **Must Address** | The document SHALL pick one call site and make the other two sections agree. The recommended resolution is that the **worker** owns the call, because §2.2's single-egress rule and §7.2's no-egress-in-the-popup rule are both load-bearing and the popup is the surface that dies most often: §2.2 SHALL keep the popup with no api edge, §4.3 SHALL be reworded so the popup *requests* the check through `src/messaging/` and the worker issues it, and §7.2's messaging enumeration SHALL name that message. If instead the popup is to call directly, §2.2 SHALL draw `POPUP --> API` and §7.2's "no egress" sentence SHALL be struck |
-| PKG-2 | `app/carriers/usps/` exports `UspsAdapter` **and** `ScriptedUspsAdapter` (§2.1 module table), so the strict test double is packaged into the deployed artefact. §7.1 and §8.2 then spend a flowchart assertion and a unit row proving that no value of `CARRIER_ADAPTER` constructs it. §10 declines merging the two doubles on the grounds that "a single class with a `strict` flag would ship the strict path's failure mode into production" — but the strict class is shipped regardless, and the guard against constructing it is a test rather than a boundary | `app/carriers/usps/` | **Should Address** | `ScriptedUspsAdapter` SHOULD live in the server test tree and be imported by tests only, so that "no deployment can construct it" is a packaging fact rather than an asserted one. The §8.2 row SHOULD be kept — it costs nothing and it catches a re-introduction — but it SHOULD NOT be the primary control. This does not reopen §10's decline, which is about merging the two classes, not about where the double lives |
+| PKG-1 | **The new `deps` edge points the opposite way from every other solid edge in §2.1's graph.** The graph is introduced as "the only structural invariant worth enforcing in review" and its solid arrows are import edges: `R --> S` is routes importing services, `S --> C` is services importing carriers, `D --> E` is deps importing errors. But `D["deps"] -- "client version gate, app-state accessors" --> R["routes"]` is not an import — the prose confirms it, saying `deps` "imports `config` and `errors` and nothing below routes." The real import runs the other way: a route or a router declares `Depends(require_supported_client)`. So one node emits two solid arrows with opposite meanings. Plan Task 10.3 encodes this graph as `import-linter` contracts; encoded literally it would permit `app.deps` importing `app.routes` — the cycle the layering exists to forbid — and would not permit the edge that actually exists | `app/deps`, `app/routes` | **Must** | The graph SHALL carry one edge semantics. Either reverse the arrow to `R --> D` and move the "runs before the handler body" ordering into the prose that already argues it, or mark the ordering edge visually distinct (as `ALL -.-> R` already is for the config relation) and state in the caption which arrow style is an import and which is not. Task 10.3 needs an unambiguous source |
+| PKG-2 | **§2.2 declares itself complete and then declares two monopolies it does not draw.** The new paragraph states that only `src/driver/` and `src/permissions/` may reach `chrome.tabs` and `chrome.scripting`, and the pre-existing rule states `src/storage/` is the only module permitted to import `chrome.storage`. The graph contains one platform node, `CHROME["chrome permissions and scripting APIs"]`, with exactly one inbound edge, `PERM --> CHROME`. There is no `DRIVER --> CHROME` edge and no storage-to-platform node at all. Under the graph's own completeness rule the driver's `TabHandle` and `StepExecutor` reach an API by a path the graph forbids | `src/driver`, `src/storage` | **Should** | Draw the edges the monopolies assert, or state explicitly that platform APIs sit outside the completeness rule and are governed by the prose monopolies instead. The paragraph's stated motive — that the higher-privilege APIs "deserve at least the structural treatment `chrome.storage` already had" — is only delivered once the structure exists |
+| PKG-3 | The same paragraph says "Only `src/driver/` and `src/permissions/` may reach them" and then, two sentences later, names a third holder: "`entrypoints/background.ts` makes the two calls §2.2 already names — the one-shot `executeScript` of a first-run scan and `chrome.tabs.create` for the calendar template." Three holders stated as two | `entrypoints/background.ts` | Consider | Restate as three named holders with their named purposes. The exception is real and justified; only the count is wrong, and Task 10.3 will encode the count |
 
 ```mermaid
-graph TD
-    POPUP["entrypoints popup"] -- "eligibility request" --> MSG["src messaging"]
-    MSG -- "worker issues the call" --> API["src api"]
-    POPUP -- "reads only" --> STORE["src storage"]
-    POPUP -- "forbidden today, undrawn" --> API
+flowchart TD
+    R["routes"] -- "declares the dependency" --> D["deps"]
+    D --> E["errors"]
+    D --> CFG["config"]
+    R --> S["services"]
 ```
+
+The above is PKG-1's recommended direction for the `deps` edge only: `routes` depends on `deps`, and
+the "resolves before the handler body" ordering is a runtime property stated in prose rather than an
+arrow in an import graph.
 
 ### Verdict: **Partially Addressed**
 
@@ -89,34 +103,32 @@ graph TD
 
 ### Current State
 
-Five class diagrams — server carriers and services, the model boundary, the extension driver, the
-extension storage layer — plus §3.5, which defines the eleven types the diagrams invent and
-deliberately defers every entity to high-level design §4.2 rather than restating it. Type discipline
-is used where it earns its keep: `EvictedOrders` and `ReclaimedBytes` are distinct newtypes
-specifically so a caller that swapped them fails to compile, `ValidatedAction` is a construction
-rule rather than a shape, and `derive_label_carrier` returns `str or None` so that a miss is
-explicitly not a value.
+§3.2 gains `RetailerPolicy`, `DerivedWindow` and a `DeriveWindow` pure-function node, and
+`OrderSchema` gains `delivered_at`. §3.4 gains a second class diagram for `ReadOnlyStore` and re-keys
+`PickupRepository` on `booking_intent_id` with `pickup_id` deleted. §3.5 states a new rule for what
+this document may define locally: "a key this document addresses records by is part of the entity and
+belongs upstream; a shape this document invents belongs in the table below."
 
 ### Strengths
 
-- One clock instance injected twice rather than two clocks, with the failure that motivates it
-  stated — a bug that would surface only under a test advancing one and not the other.
-- `save_intent(request, consent)` takes the consent stamp as an argument so that NFR-6.2's record is
-  structurally inseparable from the thing it consents to; the reasoning that a `clock` call inside
-  the repository would record the wrong instant is exactly right.
-- `clear_all` returning `ClearResult` rather than `void`, because the carve-out is impossible to
-  honour from a call site that got nothing back.
-- The two repositories that reason about time take a clock and `ReturnRepository` does not, because
-  it stamps nothing. Dependencies are minimal rather than uniform.
+- The `EvictedOrders` / `ReclaimedBytes` split, and the argument that two `int` returns would make a
+  swapped caller type-correct and wrong, is exactly the right use of newtype wrappers.
+- `ValidationOutcome` as a sum type with `ValidatedAction` constructible only by the validator is a
+  correct type-level encoding of a security boundary.
+- The `pickup_id` deletion is well reasoned: one record with two identities diverging on the
+  lost-response branch was a real defect, and removing the redundant key rather than declaring it
+  upstream was the right of the two available fixes.
 
 ### Gaps and Recommendations
 
 | ID | Gap | Class/Type | Priority | Recommendation |
 |----|-----|------------|----------|----------------|
-| CLASS-1 | `list_unsettled() list` declares neither an element type nor the predicate that decides membership, and it is the most consequential signature in the storage layer: §5.2's eviction carve-out, §5.2's rebuild carve-out and §4.3's clear carve-out are all keyed on what it returns. High-level design §4.3 supplies a definition — "neither cancelled, collected nor abandoned" — but this document never restates or cites it, and this document is where the derived states that complicate it are introduced | `PickupRepository` (§3.4) | **Should Address** | The signature SHALL read `list_unsettled() list~Pickup~` and §3.4 SHALL state the predicate in one sentence, citing high-level design §4.3, and SHALL say explicitly whether the predicate is evaluated against the **derived** state or the **stored** one. See DAL-2 — the two answers produce different eviction behaviour |
-| CLASS-2 | §7.2 says the popup constructs a **read-only** `StorageCoordinator` and "never calls `transact`, `evict_to_fit`, `evict_if_over_cap` or `clear_all`". That is the rule that keeps the serialising queue meaningful, and it is enforced by prose alone: the class the popup holds exposes all four methods, so the single-writer invariant survives only as long as everyone remembers it | `StorageCoordinator` (§3.4), the popup graph (§7.2) | **Should Address** | §3.4 SHOULD declare a narrow read interface — the four repository read methods and nothing else — and §7.2 SHOULD state that the popup is wired against that interface rather than against `StorageCoordinator`. The single-writer rule is the one invariant in the extension whose violation is invisible at runtime, and it is the one currently held by a sentence |
+| CLASS-1 | **`ReadOnlyStore` is given two incompatible surfaces in one paragraph, and the diagram's return types are undefined.** The class diagram declares four accessors — `orders() OrderReads`, `pickups() PickupReads`, `returns() ReturnReads`, `address() Address`. The prose immediately beneath declares a different surface: "`ReadOnlyStore` exposes the getters and nothing else — `list`, `get`, `find_item`, `active_for_item`, `list_unsettled`, `address()`." Those are not the same type. Worse, `OrderReads`, `PickupReads` and `ReturnReads` each appear **exactly once in the entire document** — inside that diagram — and zero times in the implementation plan. They are named and never defined, in a document whose §3.5 exists to guarantee that every type it names is defined somewhere. Plan Task 4.7 step 5 carries only the prose version, correctly: "the getter half of the coordinator's surface — the repository reads, `find_item`, `active_for_item`" | `ReadOnlyStore` | **Must** | Pick one surface. The prose version is the one the plan builds and the one §8.2's structural test can enumerate; the diagram SHALL be redrawn to match it, or the three `*Reads` types SHALL be given rows in §3.5 with their fields. A type with two definitions is a type the two workspaces will implement differently |
+| CLASS-2 | **`DriverSession` is an upstream entity sitting inside a table whose preamble says its members are not.** §3.5 introduces the table as "Eleven types are *not* upstream entities — they exist only because of a decision in this document, so they are defined here and nowhere else," and the `DriverSession` row then describes itself as "The concrete form of high-level design §4.2's `DriverSession`." It is both. And the fields matter: high-level design §4.2 and requirements §2.2 both declare `DRIVER_SESSION` with five attributes — adapter, step, tab ID, tab URL, last-progress time. The row here adds seven persisted fields neither ERD carries: `state`, `item_id`, `order_id`, `chosen_option`, `attempt_count`, `started_at` and `schema_version`. Under §3.5's own new rule these are "a field that is neither" — not a key belonging upstream, not a shape this document invents — which the paragraph directly above names as "the gap that had opened." The sixth round escalated exactly this shape for `item_id` and `return_request_id` and amended both ERDs; the same defect on the entity whose durability the design depends on most was not caught. The half-application is visible in the amendment record itself: `RETURN_ATTEMPT_LIMIT`, the *bound* on `attempt_count`, was added to requirements §5.2, while `attempt_count`, the *field it bounds*, was not added to `DRIVER_SESSION` | `DriverSession` | **Must** | Either amend both ERDs to carry the seven fields, as the sixth round did for `item_id`, or state in §3.5 why `DRIVER_SESSION` is exempt from the rule the same section states one paragraph earlier. Silence is the one option the document's own header rule forbids |
+| CLASS-3 | **§3.5's completeness claim was not updated for the types this revision invented.** "Eleven types are *not* upstream entities... defined here and nowhere else" is now false: `RetailerPolicy`, `DerivedWindow` and `ReadOnlyStore` are all shapes this document invents, all added 2026-08-28, and none has a row. `RetailerPolicy` in particular is a persisted-configuration shape whose fields the server must agree on with requirements §5.3's table | `RetailerPolicy`, `DerivedWindow`, `ReadOnlyStore` | **Should** | Add the three rows and update the count, or restrict the claim to the extension types it actually covers. As written, a reader applying §3.5's rule concludes the three new types are upstream entities and goes looking for them in the ERDs |
+| CLASS-4 | **`UserPrompt.ask` has two stated return types, and one of them is the reading the sixth round explicitly retired.** §3.3's diagram says `ask(question, choices) PendingQuestion`; §3.3's prose, added this revision, says "**`Answer` is the payload of `advance`, not the return of `ask`**"; §9's new clarity answer says `ask` "records a pending question and returns a `PendingQuestion`; it does not block." §3.5 was not amended and still reads: "`StepResult` and `Answer` are the return types of `StepExecutor.execute` and `UserPrompt.ask`." That is the pre-fix reading, and it is the one that implies a blocking call in a runtime that terminates its worker after thirty seconds | `UserPrompt`, `Answer`, `PendingQuestion` | **Should** | Amend §3.5's sentence to name `PendingQuestion`, and give `PendingQuestion` a row of its own — it is a shape this document invents and CLASS-3 applies to it too |
 
-### Verdict: **Sufficient**
+### Verdict: **Partially Addressed**
 
 ---
 
@@ -124,39 +136,26 @@ explicitly not a value.
 
 ### Current State
 
-Six sequence diagrams: ingestion first run, the adapter miss with its fail-closed egress scan,
-scheduling with the provisional record, rehydration after worker termination, cancellation as
-refresh-then-delete with three branches, and the label choice with carrier derivation. Failure paths
-are drawn rather than described — §4.5 in particular carries the already-collected branch and the
-cancel-refused branch, and §4.2 carries the branch where the scan itself throws.
-
-### Strengths
-
-- §4.5 exists because refresh-before-cancel is an *ordering* constraint, and §10 says so; the
-  document adds diagrams for ordering and declines them for decoration, which is the right rule.
-- §4.2's fail-closed branch covers both a flagged payload and a scan that cannot complete, and the
-  ordering rationale is stated rather than implied.
-- §4.4's rehydration returns `chosen_option`, closing the window a previous round opened when
-  derivation moved to the label page.
+Seven sequence diagrams, one added this revision. §4.7 draws the pre-offer eligibility check across
+five participants and settles the call site the sixth round found specified three incompatible ways.
+§4.5 draws cancellation with both failure branches. §4.4 draws rehydration.
 
 ### Gaps and Recommendations
 
 | ID | Gap | Workflow | Priority | Recommendation |
 |----|-----|----------|----------|----------------|
-| INTERACT-1 | No workflow shows FR-3.4.2's pre-offer eligibility call at all. §4.3's diagram shows only the server-side gate inside `schedule`; the client-side check that decides *what to show* appears in one paragraph of prose and in no diagram, no message enumeration, and no dependency edge. §8.2's `src/messaging/` row asserts that "only enumerated messages" are served, so a message that no section enumerates cannot be sent — which means the flow as written in §4.3 is unimplementable through the messaging boundary and forbidden through the graph. This is the workflow half of PKG-1 | FR-3.4.2 pre-offer eligibility | **Must Address** | §4.3 SHALL gain a short sequence — popup asks, worker issues `POST /pickups/eligibility`, worker answers, popup renders the offer or the second answer — or the call SHALL be folded into an existing diagram with its participants named. Whichever call site PKG-1 settles on, the message or the edge SHALL be enumerated where §2.2 and §7.2 can see it |
-| INTERACT-2 | §4.3 draws `SW->>SW: confirmation screen, consent captured`, collapsing the user's gesture and the recorder of that gesture into one participant. The confirmation screen is a UI surface and the service worker is not one, so the diagram hides the boundary crossing on which NFR-6.2 turns: where `consented_at` is sampled, where `consent_extension_version` is read from the manifest, and how both reach `save_intent` without passing through a `clock` call in the repository — which §3.4 explicitly forbids | §4.3 scheduling; NFR-6.2 | **Should Address** | §4.3's diagram SHOULD carry the surface that renders the confirmation screen as its own participant, with the consent stamp shown crossing to the worker as data. §3.4 already states the three properties that make the stamp correct; the diagram SHOULD show the one hop where all three could be lost |
+| INTERACT-1 | **§3.4's new law is not propagated to the §4.5 branch it now governs.** The law reads: "**Every invariant that spans more than one record SHALL be written in a single `set`.**" §4.5's already-collected branch writes two records — `SW->>PR: mark Collected` on the `PICKUP`, and `SW->>SW: return request moves to LabelPrinted` on the `RETURN_REQUEST` — and the surrounding prose calls the pair one fact: "the box is gone, the label went with it." That is an invariant spanning two records, and §4.5, which was not revised this round, says nothing about a single `set`. A worker dying between the two leaves a collected pickup whose return request still shows a live label, and §5.2's eviction carve-out then keeps protecting an order that is finished | §4.5 cancellation, collected branch | **Should** | State that the `mark_collected` and `LabelPrinted` writes happen in one `transact` and one `set`, as `transition` and `save_intent` already do. The law was added precisely so "the next one is correct by default instead of by someone remembering," and this is the next one |
+| INTERACT-2 | **§4.7's claim that every hop is a permitted §2.2 edge does not hold for one hop.** The diagram draws `M->>BG: routed to the worker`. §2.2 draws `BG --> MSG` and no reverse edge, and §2.2 declares that "an edge that is not drawn is not permitted." The paragraph names only two of the six hops when it makes the claim: "`POPUP --> MSG` carries the request, `BG --> API` carries the egress." The hop is almost certainly fine — it is runtime message delivery, not an import — but the document nowhere separates the two kinds of relation, which is the same root ambiguity as PKG-1 and the one plan Task 10.3 has to resolve to write a lint rule | §4.7 eligibility check | **Should** | Either draw the messaging return path in §2.2 or state, once, that §2.2's graph constrains imports and that runtime message delivery between an entrypoint and `src/messaging/` is outside it. Then narrow §4.7's claim to the hops it actually covers |
+| INTERACT-3 | §4.7's diagram carries `P->>P: eligible: render the pickup offer<br/>not eligible: render the second answer, no offer`. It is the only `<br/>` in the whole low-level design, and older Mermaid renderers used by GitLab and some VS Code extensions do not parse it inside a sequence message. The same markup was introduced into high-level design §5.2's flowchart node in the same revision | §4.7 eligibility check | Consider | Split into two `P->>P:` messages, or move the branch into a `Note over P:` and the detail into the prose beneath, which is where the paragraph after it already puts it |
 
 ### Missing Workflow Coverage
 
 | Requirement | Workflow Documented? | Notes |
 |-------------|---------------------|-------|
-| FR-3.4.2 graceful second answer | No | The server-side gate is drawn in §4.3; the client-side pre-offer check that the requirement is actually about is prose only. See INTERACT-1 |
-| NFR-6.2 consent capture | Partial | Drawn, but with the gesture and the recorder as one participant. See INTERACT-2 |
-| FR-3.1.1 to FR-3.1.5 ingestion | Yes | §4.1, with the validation edge drawn |
-| FR-3.3.5 carrier derivation | Yes | §4.6, three sources with the miss as a complete outcome |
-| FR-3.3.9 state machine | Yes | §4.6 for the three choice edges, §4.5 for the collection branch |
-| FR-3.4.6 cancellation | Yes | §4.5, all three branches |
-| FR-3.7.2 two-tier permissions | Yes | §4.1 first run, with the offer after the scan |
+| FR-3.2.1 window derivation | Partial | §3.2 gives the precedence table and §4.1 the ingest sequence. The branch CONF-1 identifies — a page-exposed policy in days — has no representation in either |
+| FR-3.4.2 pickup offer ordering | Yes | Newly drawn in §4.7; the ordering constraint the requirement actually imposes is now explicit |
+| FR-3.4.6 cancellation | Yes | §4.5, both failure branches, but see INTERACT-1 and CONSIST-1 |
+| FR-3.3.10 one active return per item | Yes | Covered structurally by `active_for_item` and asserted in §8.2 |
 
 ### Verdict: **Partially Addressed**
 
@@ -166,34 +165,30 @@ cancel-refused branch, and §4.2 carries the branch where the scan itself throws
 
 ### Current State
 
-The server has none, stated in one line in §5.1 and correct. The extension's store is
-`chrome.storage.local` behind four repositories and a `StorageCoordinator` that owns everything
-crossing entities. `transact(fn)` is honestly named as a serialising queue rather than a
-transaction, with the third guarantee — rollback — explicitly withheld. Two evictors exist because
-they answer different questions in different units, quota rejection is a failure the user is told
-about, and two state transitions are derived at read time because nothing exists to fire an event.
+Four repositories plus `SessionStore`, one key each, coordinated by `StorageCoordinator` whose
+`transact` is honestly described as a serialising queue rather than a transaction. The two
+cross-entity operations belong to the coordinator. Two states are derived at read rather than written
+by a timer, and this revision moves the derivation inside `PickupRepository` so it applies on every
+read path.
 
 ### Strengths
 
-- Refusing to call `transact` a transaction, and stating precisely which two guarantees it gives and
-  which one it withholds, is the most valuable paragraph in the section.
-- The eviction carve-out is derived from the ERD join path rather than asserted, and the refusal to
-  denormalise `order_id` onto `PICKUP` is argued from the consequence — two paths to one answer that
-  can disagree about the record holding a booked carrier visit.
-- `evict_to_fit` measuring a candidate by serialising it, admitting the figure is an estimate, and
-  checking the truth once with `getBytesInUse` rather than per candidate.
-- The rebuild carve-out for unsettled pickups, and the insistence that a quota-exceeded write is
-  never swallowed.
+- Naming `transact` a queue and stating what it withholds — no rollback — is the single most
+  important honesty in the document, and the corollary rule that a write needing to survive a later
+  failure must be ordered last follows from it correctly.
+- Moving the derived-state projection into the repository, on `get` as well as `list_unsettled`, is
+  the right fix for the sixth round's DAL-1: it removes the possibility of two callers reporting the
+  same pickup in two states.
+- The explicit statement that there is no startup repair pass, with the reason it is not needed, is
+  the kind of negative specification that stops an implementer inventing one.
 
 ### Gaps and Recommendations
 
 | ID | Gap | Priority | Recommendation |
 |----|-----|----------|----------------|
-| DAL-1 | The quota-repair path can undo its own repair. §5.2 says `evict_to_fit` performs "its reads and its single eviction `set` **directly**, not through `transact`", inside the still-held transaction slot, and then "the coordinator calls `evict_to_fit` once and retries the write a single time". But `transact` "commits **every touched key** in a single `set`", and the composed object was built by `fn` from a read taken **before** the eviction. The commonest quota trigger is an ingest upsert, which touches the orders key — the very key `evict_to_fit` just rewrote. Re-issuing that composed `set` writes the pre-eviction orders collection back, restoring every evicted order and presenting a write of the same size, so the retry fails identically. That is precisely the "retry loop that cannot converge" the document rejects `evict_if_over_cap` for, arrived at from the other direction | **Must Address** | §5.2 SHALL state that the retry **re-runs `fn`** against post-eviction state rather than re-issuing the composed write, and §3.4 SHALL record the consequence in `transact`'s contract: `fn` must be re-runnable and must not be assumed to run exactly once. If `fn` is instead required to be run once, then `evict_to_fit` SHALL NOT be permitted to write any key the pending composed write also touches, and the document SHALL say which keys those are |
-| DAL-2 | `Booking → Abandoned` is **derived by a clock at read time**, and an `Abandoned` pickup is outside the eviction carve-out — §4.3 says so explicitly: "`BOOKING_ABANDONED_AFTER_HOURS` is what stops the record pinning its order against eviction forever." So `BOOKING_ABANDONED_AFTER_HOURS` after a lost schedule response, the order becomes evictable with no observation of any kind, and eviction deletes the `PICKUP` that carries NFR-6.2's `consented_at` and `consent_extension_version` for a booking that may be live at USPS. §5.2 elsewhere states the opposite priority: "a dropped `save_intent` or `promote` costs a booked carrier visit the product can no longer see, which is the failure this whole layer is built to prevent." §5.2 also says the only writes that follow are "the ones that follow a real observation — `mark_abandoned` when the user is shown the abandoned record and confirms it" — but by then the record may be gone, so `mark_abandoned` can have no subject | **Should Address** | The carve-out predicate SHOULD read against the **stored** state rather than the derived one, so that an order is unpinned by `mark_abandoned` — the write that follows the user actually being shown the record — rather than by the clock alone. High-level design §4.3's wording ("a pickup that has not been cancelled, collected **or abandoned**") is satisfied either way, because it names states rather than the moment they are decided; this is a low-level choice, and the current one discards a compliance record for a possibly-real booking without anyone seeing it |
-| DAL-3 | `getBytesInUse` is called once before and once after the eviction batch and the difference is what the retry decision uses, but the eviction runs inside a transaction that holds the write slot while a **content script and a popup may be reading**. Nothing in §5.2 says whether a concurrent write from outside the coordinator is possible — §2.2's single-writer rule says it is not — but if it ever became possible the before-and-after difference would attribute another writer's change to the eviction | **Consider** | §5.2 MAY state that the before-and-after measurement is sound *because* of the single-writer rule, tying the two together explicitly. It is a one-sentence cross-reference and it makes the measurement's precondition visible to whoever next relaxes the single-writer rule |
+| DAL-1 | **The new single-`set` law has no enforcement point and no test.** §8.2's coordinator row asserts that "`transact` commits every touched key in one `set`" — that is a property of the mechanism, and it was already true. The law is a constraint on the *authors of invariants*: it says a multi-record invariant must not be split across two `transact` calls. Nothing asserts that. Compare `ReadOnlyStore`, which got a structural test in the same revision precisely because a prose rule "a future popup feature can break without a single signature changing." The single-`set` law is in exactly that position, and INTERACT-1 is an instance of it already being unpropagated within the document itself | **Should** | Add a §8.2 row that enumerates the invariant-bearing write sites — `transition`, `save_intent`, `clear_all`, and §4.5's collected branch once INTERACT-1 is resolved — and asserts one `set` call per site against the fake browser's call log. That is the same shape as the assertions already written for `save_intent` and `promote`, extended from "must not fail silently" to "must not split" |
 
-### Verdict: **Partially Addressed**
+### Verdict: **Sufficient**
 
 ---
 
@@ -201,32 +196,27 @@ about, and two state transitions are derived at read time because nothing exists
 
 ### Current State
 
-One server hierarchy of nine subclasses, each the sole owner of one reason code, converted once by a
-single FastAPI handler that no route bypasses. The status code is explicitly disclaimed as the branch
-key — five reasons share 409 — and `reason` is named as the contract. On the extension, nine handling
-classes with a mapping table that claims to be **total** over every failure the high-level design
-enumerates, plus a redaction allowlist argued from the failure mode of a denylist.
+One `BoomerangError` hierarchy behind the requirements §4.2 shape, each subclass mapped to a `reason`
+code and an HTTP status in §6.1's table, with §6.2 carrying the extension-side rows. `ClientTooOld`
+maps to `client-too-old` at 426. Rejection from the action validator is a returned value rather than
+a raise.
 
 ### Strengths
 
-- "A negative eligibility answer is not an error, and the eligibility endpoint never raises one" —
-  with the argument that modelling it as an error would leave `EligibilityResult.eligible` with no
-  reachable `false` case. That is a type-level argument for a product rule and it is the right one.
-- The retry asymmetry, and the separate reasoning for why `DELETE /pickups/...` is not retried: a
-  bare retry carries a token USPS has already seen and is *guaranteed* to be refused.
-- `WrongCarrierLabel` explicitly recorded as a backstop, with the dependency written down so the
-  reverse cannot be read into it.
-- Redaction as an allowlist, with the accepted cost stated plainly.
+- The `client-too-old` gate's malformed-input enumeration is now total and the reason is stated
+  correctly: every path that does not end in a refusal is a path on which the gate fails open.
+- `WrongCarrierLabel` as a server-side backstop behind a client-side derivation, with a §8.3 row
+  asserting an empty adapter call log, is a well-placed defence.
+- The cancellation path's `EtagExpired` handling states the correct next step rather than a generic
+  retry, which is the distinction that matters against a carrier's concurrency token.
 
 ### Gaps and Recommendations
 
 | ID | Gap | Priority | Recommendation |
 |----|-----|----------|----------------|
-| ERR-1 | §6.2's mapping table declares itself total — "Every failure path the high-level design enumerates lands in one of the nine rows above. The mapping is deliberately total" — and then does not classify a transport failure on `POST /returns/next-step`. The read-only row is scoped to "ingest, eligibility, refresh, or any read", and the two no-retry rows name `POST /pickups` and `DELETE /pickups/...`. Worse, two client deadlines both apply to that call with no stated precedence: `API_REQUEST_TIMEOUT_MS` at 12000 ms bounds "a single request to the server", and `MODEL_FALLBACK_TIMEOUT_MS` at 5000 ms bounds the action call site. §8.3's "Fallback timeout becomes report stuck" row silently assumes both that the shorter one wins and that no retry follows — neither of which any rule states | **Must Address** | §6.2 SHALL add a row for the action fallback: bounded by `MODEL_FALLBACK_TIMEOUT_MS`, **not retried**, and exhaustion becomes `report_stuck`. §7.2 SHALL state that `MODEL_FALLBACK_TIMEOUT_MS` supersedes `API_REQUEST_TIMEOUT_MS` on that one route rather than adding to it. Retrying that call three times would also multiply Bedrock spend by three on an unauthenticated endpoint with five reserved slots, which NFR-6.7 has an interest in |
-| ERR-2 | The invariant that the client outlasts the server is justified per *deadline* and then applied per *request*, and the arithmetic fails on the one endpoint where it matters most. §7.2: "`API_REQUEST_TIMEOUT_MS` is set above the server's own longest upstream deadline — the parse budget of `BEDROCK_TIMEOUT_PARSE_MS` plus request overhead", giving 12000 against 9000. But `POST /pickups` makes **two sequential USPS calls** — §4.3 and FR-3.4.1 require eligibility inside `schedule`, with no cache — each bounded at `USPS_TIMEOUT_MS` of 8000 ms, for a legitimate server-side worst case of 16000 ms before any token fetch on a cold container. The client abandons at 12000 ms, and `POST /pickups` is the one call with **no retry**: the intent record stays in `Booking`, the user is told it could not be confirmed, and USPS may nonetheless have booked the pickup. This is the exact failure the write-ahead intent record exists to make survivable, reached through a deadline mismatch rather than a lost response | **Must Address** | Either `API_REQUEST_TIMEOUT_MS` SHALL be raised above the schedule path's *composed* worst case — `2 x USPS_TIMEOUT_MS` plus overhead — or `USPS_TIMEOUT_MS` SHALL be lowered so that two sequential calls fit inside it, or the schedule route SHALL carry its own longer client deadline. Requirements §5.2's wording ("above the server's longest upstream deadline") reads per-deadline and SHOULD be amended to say per-request, in the same manner §10 records for the other four upstream amendments. Whichever is chosen, §7.2's justifying sentence SHALL be rewritten, because it currently proves a weaker claim than the one it is used for |
-| ERR-3 | Requirements §4.2 documents `upstream-unavailable` as "USPS or Bedrock failed; **safe to retry**", and §6.2 correctly does not retry it on `POST /pickups` — where a retry could double-book — or on the cancel route. The reason code's documented meaning and the client's actual behaviour therefore diverge, and the divergence is not noted anywhere | **Consider** | §6.2 MAY note that `upstream-unavailable` is safe to retry *on the read-only routes only*, and requirements §4.2's gloss MAY be narrowed to match. Nothing is currently wrong in the code this would produce; the risk is a future client reading the reason table and retrying a schedule |
+| ERR-1 | **§4.7 prescribes a retry for a failure that retrying cannot fix.** Its closing paragraph lists three failure modes for the eligibility call — "the worker is unreachable, the network is down, **the version gate refuses**" — and prescribes one response for all three: "It surfaces the failure and offers to retry." A `client-too-old` refusal is deterministic; the same client version will be refused every time, and requirements §4.2's own copy for the code is "The installed extension predates a required API change; **updating** fixes it." §8.3's row for the same condition specifies the correct behaviour elsewhere: "Update prompt shown; the flow stops rather than degrading." Two sections now prescribe different handling for one status | **Should** | Separate the version-gate case from the transport cases in §4.7. Transport failures get the retry; a 426 gets §8.3's update prompt. The paragraph's underlying point — that "we could not ask" and "USPS will not come" are different sentences — is right and survives the split |
 
-### Verdict: **Partially Addressed**
+### Verdict: **Sufficient**
 
 ---
 
@@ -234,35 +224,29 @@ enumerates, plus a redaction allowlist argued from the failure mode of a denylis
 
 ### Current State
 
-Server startup is a flowchart from Mangum through cold-start branching, model verification, adapter
-selection and conditional SSM fetch, ending with settings and adapter on application state. One
-typed `Settings` object with seventeen validated fields. The extension wires by constructor injection
-in `entrypoints/background.ts` with no DI framework, every configuration value a build-time constant,
-and the popup wired separately with its own smaller graph.
+Server configuration is one typed `Settings` object built in the lifespan and held on application
+state, with a seventeen-row table and a startup flowchart that branches on `CARRIER_ADAPTER`.
+Extension configuration is build-time substitution only, with three constants added this revision and
+declared upstream first. The client-version gate is a FastAPI dependency in `app/deps.py`, registered
+on the router rather than per handler, covering `/health`.
 
 ### Strengths
 
-- "This table restates requirements §5.2; it does not extend it", with the four constants that
-  previously violated that rule named and the going-forward rule stated: a value a deployment can
-  change belongs upstream first. That paragraph is the single best governance device in the document.
-- An unrecognised `CARRIER_ADAPTER` failing the cold start with no default arm, argued from the fact
-  that the plausible default is wrong in both directions.
-- Selecting the mock logging at `WARNING` rather than `INFO`, because it is the default and therefore
-  the case nobody reads a log line about.
-- `min_client_version` compared component-wise with `0.10.0` against `0.9.0` named explicitly, and an
-  absent version treated as below rather than as unrestricted.
-- `request_id` cleared in a `finally`, with the warm-container reasoning that makes "the next request
-  overwrites it anyway" not a guarantee.
-- The production bundle asserted by deriving the extension ID from the emitted manifest rather than
-  by scanning for the dev key's bytes — the stronger check, and the one matching the failure.
+- The rule that "a value that a deployment can change belongs upstream first," applied retroactively
+  to four constants that had violated it, is the correct governance and it is now being followed.
+- Making `carrier_adapter` an explicit validated field rather than an inference from credential
+  presence removes two asymmetric silent failure modes, and the reasoning for why the inference is
+  wrong in both directions is exactly right.
+- Registering the gate on the router rather than per route, and asserting it route-by-route over the
+  app's own route table, is a control that stays correct as routes are added.
 
 ### Gaps and Recommendations
 
 | ID | Gap | Priority | Recommendation |
 |----|-----|----------|----------------|
-| CONF-1 | `contracts/` is given two incompatible definitions. §8.1: "`contracts/` is a shared fixture directory, **not a code artefact**, and that is the point", holding "canonical request and response JSON per endpoint". §7.2: "`MOCK_CONFIRMATION_PREFIX` is **imported**, not declared here... the constant is the server's and travels in `contracts/`; a second copy declared in `src/config.ts` would drift apart from the first." An import requires an exported symbol, which a JSON fixture directory does not have, and the mechanism by which a TypeScript module and a Python module both consume one string from a directory of JSON is nowhere specified. The same problem applies to `X-Boomerang-Client-Version`, which §8.1 says the payloads "carry" | **Should Address** | §8.1 SHALL say how a shared *value* is published from a directory of shared *payloads* — a `constants.json` read by both suites, a generated single-line module per workspace, or the string appearing only inside the payloads and being asserted rather than imported. The third option is the one consistent with "the files are the contract", and it would mean §7.2's "imported" is the sentence to change |
-| CONF-2 | `MOCK_CONFIRMATION_PREFIX` is a requirements §5.1 parameter and has no field in §7.1's `Settings` table. §8.2's `app/config.py` row asserts that "a `Settings` built from a fully populated environment matches the §7.1 table field for field — the test that catches a row added to the table and never to the class", and D18's sweep checks every `_PREFIX` constant "against the requirements' §5 tables and against the code that reads it". §3.1 says the mock adapter exports it as a module constant, which is a fourth location and not one either check looks at | **Should Address** | §7.1 SHOULD either add the field to `Settings` — the simplest reconciliation, since requirements §5.1 is where it is declared — or state in one line why a §5.1 row deliberately has no `Settings` field, so that D18's sweep has a documented exemption to read rather than a discrepancy to report. Requirements §5.1 already hints at the answer with "Not configurable per deployment", which suggests §5.1 may be the wrong table for it |
-| CONF-3 | §7.1's flowchart puts `verify bedrock model config` in the lifespan **after** `build Settings from the environment`, while the `Settings` table declares `bedrock_model` "none, required; non-empty". If construction already rejects an absent model, the lifespan branch labelled "absent or empty" is unreachable; if it does not, the table's validation column overstates. The prose then attributes the `ListInferenceProfiles` message to the startup check without saying which of the two produces it | **Consider** | §7.1 MAY state that `Settings` enforces presence and non-emptiness while `verify_config` enforces only the regional-prefix warning, and the flowchart's first branch MAY be relabelled accordingly. As written, the two checks overlap and the §8.2 row asserting that "an absent `BEDROCK_MODEL` fails startup" does not say which one it is asserting against |
+| CONF-1 | **§3.2's precedence table drops a source FR-3.2.1 names, and no type carries it.** The requirement: "The server SHALL derive `return_by` from the delivery date **and the retailer's stated policy where the page exposes one**, and from a configured per-retailer default where it does not." That is a page-exposed policy *in days*, distinct from both a page-stated deadline *date* and a configured default. The table's four rows are: a page-stated deadline (`window_inferred: false`), `default_return_days` from `delivered_at`, `default_return_days` from `ordered_at`, and undetermined. The page-exposed policy has no row. It also has nowhere to live: `OrderSchema` carries no policy field, and `RetailerPolicy` carries only `retailer_key` and `default_return_days`. Requirements §5.3 corroborates the distinction by defining `default_return_days` as the "Assumed window when the page states no policy" — the fallback, not the primary. Folding a stated policy into row 1 does not work either: row 1 is `window_inferred: false`, and FR-3.2.1's second bullet requires that "the server SHALL mark **any derived window** as inferred," which a policy-plus-date computation is. Plan Task 3.7 step 2 reproduces the same four branches, so both documents are wrong together and neither will catch the other | **Must** | Add the fifth row — a page-exposed policy in days counted from `delivered_at`, or from `ordered_at` when it is absent, marked inferred and taking precedence over `default_return_days` — and give it a field to travel in on `OrderSchema` or `RetailerPolicy`. If the PoC deliberately does not extract page-stated policies, say so in §10's decline record and amend FR-3.2.1 upstream under the header rule, rather than leaving a SHALL with no design behind it |
+| CONF-2 | **The `/health` version gate is specified three ways, and two implementation tasks will write contradictory tests.** Requirements §4.1: "Every request SHALL carry the header `X-Boomerang-Client-Version`... on every endpoint **including `/health`**." This document agrees, twice: §2.1's module row says "on every endpoint including `/health`," and §8.2's new `app/deps.py` row says the gate is asserted "route by route over the full route table read from the app... and `/health` is in the table like every other route." Plan Task 3.8 step 3 agrees: "`/health` is inside the gate like everything else." But plan Task 6.1 step 2 says the opposite — "`/health` performs **no** upstream call and **requires no client version** — a version-gated health check is unusable from a load balancer" — and plan Task 7.3's integration row repeats it: "`GET /health` needs no version header and makes no upstream call." Task 3.8's route-table assertion and Task 6.1's unit test cannot both pass. Plan Task I.2's deployed smoke test ("`/health` returns 200 over the Function URL") also fails as written unless it sends the header. **Here the design is right and the plan is wrong**: the requirement is unambiguous and was amended into §4.1 deliberately under plan decision D16 | **Must** | The design needs no change on the substance. It SHOULD add one sentence naming the consequence the plan's dissenting tasks are reacting to — that a gated `/health` cannot be probed by a bare load-balancer check — so the decision is visibly taken rather than merely stated. Plan Tasks 6.1, 7.3 and I.2 must be corrected to match, and this review flags it because Task 3.8 cites this document's §7.1 as its authority |
+| CONF-3 | **The per-retailer policy table is assigned to `app/config.py` and appears in no configuration table, with no owner for the lookup.** §3.2 states that `RetailerPolicy` is resolved "by `IngestService` from the `page_url` it already receives, against the per-retailer table requirements §5.3 defines" and that "The table is **configuration and lives in `app/config.py`** with the rest of it." §7.1's `Settings` table — introduced as "Configuration is one typed `Settings` object, validated at construction" — has no row for it, no source, no default and no validation rule. Nor does any module own the URL-to-`retailer_key` resolution the sentence requires: the extension has `AdapterRegistry.for_url`, and §2.1's server module table has no equivalent. So a value the document calls configuration is absent from the table that enumerates configuration, and a lookup the document assigns to a service has no stated mechanism | **Should** | Add a `Settings` row for the retailer policy table with its source and validation, and state how `IngestService` maps a page URL to a `retailer_key` — a host-suffix map in `app/config.py` is the obvious answer and needs one sentence. Without it, an unrecognised host silently yields the system default of 30 and nothing says whether that is intended |
 
 ### Verdict: **Partially Addressed**
 
@@ -272,51 +256,39 @@ and the popup wired separately with its own smaller graph.
 
 This is the most critical section of the low-level design review.
 
-The strategy itself is strong and unusually honest. Doubles are chosen by what they must be able to
-refuse, not by what they must return: `ScriptedUspsAdapter` raises on an unscripted call and fails at
-teardown on an undrained one; the storage fake must be able to **say no** to a quota; `WorkerLifecycle`
-exists so a test can *cause* the worker's death rather than simulate a fresh reader. §8.5 names what
-is deliberately untested and refuses to point at suites that do not exist. Both workspaces now carry a
-95% line and branch floor, with `entrypoints/` excluded by an explicit named list rather than a glob.
-
-The findings below are almost entirely about the **traceability table**, which is the control §10
-leans on hardest and is the artefact most likely to be read as coverage.
-
 ### 7.1 Unit Test Assessment
 
 | ID | Gap | Class | Requirement | Priority | Recommendation |
 |----|-----|-------|-------------|----------|----------------|
-| TEST-1 | **FR-3.4.5b is absent from §8.4's traceability table.** The table opens by asserting "Every functional requirement maps to at least one test above", and every other requirement from FR-3.1.1 to FR-3.7.3 has a row, including FR-3.4.5a. Two §8.2 rows do test it — `src/popup/` simulated bookings and `app/carriers/mock.py` — so the tests exist and only the trace is missing, but the table is exactly the artefact D18's sweep and §10's "every `FR-` upstream is cited somewhere here" rule are meant to protect, and the newest requirement is the one it dropped | `src/popup/`, `app/carriers/mock.py` | **Must Address** | §8.4 SHALL gain an `FR-3.4.5b` row citing both existing unit rows, and SHALL note that the determination is made from the confirmation number rather than the build environment, which is the property the requirement turns on. §10's proposed sweep SHALL be run against this table before the next revision, since it would have caught this in seconds |
-| TEST-2 | **§8.4's NFR-6.5 row cites a test that §8.2 struck.** The row reads "Order validator; `app/models/` strictness rows; **`sender.origin` refusal**; the CORS configuration row" — but §8.2's `src/messaging/` row struck `sender.origin` mismatch refused on 2026-08-27 under D6, because `externally_connectable` is absent and `onMessageExternal` is never registered. So the traceability table cites a deleted test for a security NFR. The consequence is worse than a stale reference: NFR-6.5's obligation "no origin but the pinned ones is served" is now left with only the CORS row, which §8.3 **explicitly disclaims** — "The CORS row asserts configuration, not protection" — so the obligation has no live verifier at all | `src/messaging/` | **Must Address** | §8.4's NFR-6.5 row SHALL drop the `sender.origin` citation and SHALL replace it with the FR-3.7.1 manifest assertion that `externally_connectable` is absent, which is the stronger property §8.2 says it is. The row SHALL also restate the origin obligation honestly: with no external sender surface and CORS disclaimed as a control, what actually holds the boundary is the bounded payload, the reserved concurrency and the token ceiling — and the row SHOULD say so rather than implying an assertion exists |
-| TEST-3 | §8.2's coordinator row asserts "a quota rejection calls `evict_to_fit` once, retries once, then **raises**" and that "`evict_to_fit` frees at least the requested bytes and still honours the carve-out". Neither assertion covers what the **retried write contains**, which is where DAL-1 lives. A suite with these rows passes against an implementation that re-issues the pre-eviction composed object and therefore never converges | `StorageCoordinator` | **Should Address** | §8.2 SHALL add: after a quota rejection and a successful eviction, the retried write **does not contain the evicted orders** — asserted by reading the store after the retry succeeds, not by inspecting the call. This is the assertion that makes DAL-1's fix verifiable and its absence detectable |
-| TEST-4 | No unit row covers the composed schedule deadline of ERR-2. `app/config.py`'s row asserts that each of the three upstream deadlines is below `function_timeout_ms`, which is the weaker of the two constraints; nothing asserts that the schedule path's two sequential USPS calls fit inside the client's own per-attempt deadline | `app/config.py`, `app/services/pickup.py` | **Should Address** | Once ERR-2 is resolved, §8.2 SHOULD carry the resulting arithmetic as a validation: whichever relationship is chosen between `USPS_TIMEOUT_MS`, `API_REQUEST_TIMEOUT_MS` and the number of carrier calls on the schedule path SHOULD be a rejected-value test in `app/config.py`, so the invariant cannot be broken by a later deploy-time tuning |
+| TEST-1 | §8.2's new row asserts `ReadOnlyStore` "exposes the getters and nothing else... asserted structurally, by enumerating the view's surface and requiring it to contain no member that writes." The surface it must enumerate is the one CLASS-1 shows is defined twice, incompatibly, in the same paragraph. A structural test written against the diagram's four accessors and a popup built against the prose's six repository methods would both pass their own suites and disagree | `ReadOnlyStore` | FR-3.1.5, NFR-6.3 | **Should** | Resolve CLASS-1 first; the test row is correct in shape and cannot be implemented until the type has one definition |
 
 ### 7.2 Integration Test Assessment
 
 | ID | Gap | Requirement | Priority | Recommendation |
 |----|-----|-------------|----------|----------------|
-| TEST-5 | FR-3.4.2's client-side pre-offer eligibility check has no integration row. "Ineligible address" sets up "Mock returns not serviceable" and asserts the answer is "presented as a normal second answer" — but that exercises the server's answer, not the **ordering** the requirement is about: that the check happens before the offer is rendered, so the user is never offered a pickup that cannot be booked. With INTERACT-1 unresolved, there is also no wiring for such a test to drive | FR-3.4.2 | **Should Address** | §8.3 SHOULD gain a row asserting the ordering directly: with the address scripted unserviceable, **no "schedule a free pickup?" affordance is ever rendered**, and the second answer appears in its place — asserted against the rendered surface, so the constraint holds however the flow is later restructured. The negative assertion is the one the requirement asks for, in the same spirit as the existing "no return begins without a naming gesture" row |
-| TEST-6 | §8.3's "Clear all data with a live pickup" asserts one of high-level design §4.3's three clear-path obligations. The high-level design requires: enumerate and offer to cancel; **and if the user clears anyway, show the confirmation numbers and scheduled dates one last time so they can be kept**; and booking copy that tells the user the number is theirs to keep. Only the first is asserted, and the second is the one that decides whether a user who proceeds is left able to phone USPS | FR-3.4.6, high-level design §4.3 | **Consider** | §8.3 MAY extend the row: after the user declines cancellation and confirms the clear, the confirmation numbers and their dates are displayed before deletion. See CONSIST-1 — the obligation may be worth carrying into this document's prose first, since it currently appears only upstream |
+| TEST-2 | §8.4's FR-3.2.1 row now reads "all four rows of §3.2's precedence table, including **the `delivered_at`-absent branch**." It is accurate about the four rows and will report FR-3.2.1 as fully covered, while the clause CONF-1 identifies has no design and therefore no test. This is the failure mode §9's own new third sweep direction exists to catch — a traceability table answering "is this requirement covered?" with a yes that is true of the design and false of the requirement | FR-3.2.1 | Consider | Once CONF-1 is resolved, extend the row to the fifth branch and add the discriminating negative the row already uses elsewhere: a page that states a policy in days must not derive from `default_return_days` |
 
 ### 7.3 Requirements Traceability Gaps
 
+All thirty-nine `FR-` and `NFR-` identifiers in the requirements document resolve to a row in §8.4.
+This was verified by extracting every requirement heading and matching it against §8.4's rows; the
+set difference is empty in the direction that matters. The sixth round's retraction of its claim that
+four requirements were untested was correct.
+
 | Requirement | Unit Tests? | Integration Tests? | Gap | Recommendation |
 |-------------|-------------|-------------------|-----|----------------|
-| FR-3.4.5b simulated bookings disclose themselves | Yes | No | Tested by two unit rows and **traced by none** — absent from §8.4 entirely. No integration row asserts the marker surviving a full mock-backed booking | Add the §8.4 row (TEST-1). An integration row is not required; the unit rows cover both halves and the prod-bundle case |
-| FR-3.4.2 graceful second answer | No | Partial | The server's negative answer is covered; the client's pre-offer ordering is not, and has no wiring to be covered by | Add the ordering row (TEST-5) once PKG-1 and INTERACT-1 settle the call site |
-| NFR-6.5 security | Partial | Partial | The origin half of the obligation cites a struck test and is otherwise carried only by a row that disclaims itself | Retrace to the manifest absence assertion and restate the obligation honestly (TEST-2) |
-| FR-3.6.2 landing page | No | No | Explicitly out of this document's scope — a `client/` surface with its own tests. §8.4 records the gap as deliberate | No action. The declaration is the right treatment |
-| FR-3.6.3 dashboard | No | No | Out of PoC scope as of 2026-08-27 under D6. The row was removed rather than skipped, since a skipped test claims the feature exists | No action. Removal rather than skipping is the correct choice |
-| NFR-6.6 infrastructure | No | No | Terraform properties; no infrastructure test tier exists in this document. Now owned by plan Tasks I.1 and I.2 | No action here. The ownership transfer under D7 and D8 is the honest resolution |
-| NFR-6.7 abuse and spend | No | No | Same owner, same reasoning; §10 also declines a load test against reserved concurrency on the grounds that it would confirm AWS works | No action here |
+| FR-3.2.1 | Partial | No | Four of five sources tested; the page-exposed-policy source has no design to test — CONF-1 | Add the branch, then the assertion |
+| FR-3.4.6 | Yes | Yes | The `Cancelled` state the upstream ERDs declare is never written and never asserted — CONSIST-1 | Resolve the state-vocabulary divergence first |
+| NFR-6.6 | No | No | Terraform properties; owned by plan Tasks I.1 and I.2 and excused in §8.5 | No action — the excusal is explicit and now has an owner |
+| NFR-6.7 | No | No | As above | No action |
 
 ### 7.4 Test Infrastructure Assessment
 
 | ID | Gap | Priority | Recommendation |
 |----|-----|----------|----------------|
-| TEST-7 | §8.1 requires the storage fake to reproduce atomic per-`set` semantics and to be able to refuse on quota, both correctly justified. It does not say what the fake's `getBytesInUse` returns. §5.2's retry decision uses the before-and-after difference on the orders key as ground truth, and the "evict until the freed estimate reaches the requested bytes **plus a margin**" rule exists precisely because the fake's accounting and Chrome's will differ | **Consider** | §8.1 MAY state the fake's accounting model in one line — key length plus serialised value length, or whatever is chosen — so that the margin in §5.2 is calibrated against something stated rather than against an implementation detail of the fake. A test that passes because the fake under-reports overhead would pass for the wrong reason |
+| — | No findings. The `ScriptedUspsAdapter` / `MockCarrierAdapter` split is correctly motivated and the assertion that no `CARRIER_ADAPTER` value reaches the scripted double is the right guard. The §8.5 statement of what excluding `entrypoints/` from the coverage floor costs is a model of an honest test-infrastructure caveat | — | — |
 
-### Verdict: **Partially Addressed**
+### Verdict: **Sufficient**
 
 ---
 
@@ -326,44 +298,35 @@ leans on hardest and is the artefact most likely to be read as coverage.
 
 | High-Level Element | Low-Level Correspondence | Status | Notes |
 |-------------------|-------------------------|--------|-------|
-| §3 components — extension, stateless service | §2.1 layered server package, §2.2 extension graph | Aligned | Boundaries match; the extension graph is stricter than the high-level design requires, which is the right direction |
-| §4.2 ERD, seven entities | §3.5 defers every entity upward and defines only the eleven types this document invents | Aligned | The refusal to restate entity fields is correct and is the reason `label_carrier` was findable as an orphan in an earlier round |
-| §4.3 data lifecycle and eviction carve-out | §5.2 eviction, two evictors, the join walk | Partially aligned | The carve-out predicate matches on paper. The **moment** it is evaluated does not — see DAL-2 |
-| §4.3 clear path, three obligations | §4.3 carve-out, `ClearResult`, one §8.3 row | Misaligned | Only the enumerate-and-offer obligation is carried. See CONSIST-1 |
-| §5.1 to §5.4 data flows and the failure-path table | §4.1 to §4.6, §6.2's totality mapping | Partially aligned | Every enumerated failure lands somewhere, but the mapping omits the action-fallback transport failure. See ERR-1 |
-| §6.3 stateless server, no idempotency key | §4.3, §5.2, §10's accepted-and-left-open finding | Aligned | Correctly identified as an upstream decision this document is downstream of |
-| §7.4 model output is untrusted input | §3.2 model boundary, `ValidatedAction`, closed vocabulary | Aligned | Construction rule rather than a shape is the stronger encoding |
-| §8.1 to §8.4 deployment, Mangum lifespan, build-time constants | §7.1 startup order, §7.2 extension wiring | Aligned | The lifespan-must-stay-on warning and the silent-failure note are exactly right |
-| §8.4 UPS build-time flag | Not carried; §10 declines reconciling it | Aligned | The decline is sound — an unimplemented switch that is off documents a seam and contradicts nothing |
-| §11 open questions | §9, three answered and one narrowed | Aligned | Struck rather than deleted, with the answer attached to the question |
+| HLD §4.2 `ORDER.delivered_at` | `OrderSchema.delivered_at` | Aligned | Added this revision; the field the derivation starts from is now present in the document that computes it |
+| HLD §4.2 `ORDER_ITEM.item_id`, `RETURN_REQUEST.return_request_id` | `find_item`, `active_for_item`, `ReturnDriver.start(item_id)` | Aligned | Declared upstream this revision with type, generation and uniqueness scope |
+| HLD §4.2 `PICKUP.booking_intent_id` as sole key | `PickupRepository` keyed on it throughout | Aligned | `pickup_id` removed; the upstream paragraph stating there is deliberately no second key was added in the same revision |
+| HLD §4.2 `PICKUP.state` vocabulary | §4.5 deletes the record on cancel; §5.2 derives `Abandoned` | **Misaligned** | See CONSIST-1. `Cancelled` is declared upstream and written by nothing here |
+| HLD §4.2 `DRIVER_SESSION` attributes | §3.5's twelve-field `DriverSession` | **Misaligned** | See CLASS-2. Seven persisted fields declared in neither ERD |
+| HLD §5.2 eligibility node execution context | §4.7's sequence diagram | Aligned | The upstream annotation and the new diagram were made in the same revision and agree |
+| HLD §6.3 all persistent state on the client | §5.1 "The server has none" | Aligned | Stated as a section because its absence is a decision |
+| HLD §8.4 build-time configuration only | §7.2's constant table | Aligned | Three constants added upstream first, per the stated rule |
 
 ### Gaps and Recommendations
 
 | ID | Gap | Priority | Recommendation |
 |----|-----|----------|----------------|
-| CONSIST-1 | High-level design §4.3 states three obligations on the clear path. This document carries the first — enumerate uncancelled pickups and offer cancellation, via `ClearResult` and §4.3's carve-out — and neither of the other two: that a user who clears anyway is shown the confirmation numbers and scheduled dates **one last time**, and that booking confirmation copy tells the user the number is theirs to keep rather than implying Boomerang can retrieve it. Both are user-facing consequences of the same local-only-state hazard the carve-out exists for, and the second is a copy rule of exactly the kind FR-3.4.7 is treated as | **Should Address** | §5.2 or §4.3 SHOULD carry the show-one-last-time obligation, since `ClearResult` is the type that would have to convey it and this document owns that type. The copy obligation SHOULD be named alongside FR-3.4.7's copy gate in §8.5, where the other human review gates are recorded, so it is not mistaken for something a test covers |
-| CONSIST-2 | High-level design §4.3 says pickups are exempt from eviction until "cancelled, collected or abandoned", naming states without saying when they are decided. This document introduces read-time derivation for two of the three transitions, which is a genuine low-level addition, and it silently changes what the upstream sentence means in the abandoned case | **Consider** | Once DAL-2 is resolved, §5.2 MAY note that read-time derivation is this document's addition and state which carve-outs read the derived state and which read the stored one. The document's own standard — "upstream wins; it is not that upstream is never wrong" — suggests naming the divergence rather than absorbing it |
+| CONSIST-1 | **The `PICKUP` state vocabulary differs from both upstream ERDs in both directions, and §10 records neither divergence.** Requirements §2.2: "`PICKUP.state`... carry the booking lifecycle — `Booking`, `Confirmed`, `Cancelled`, `Collected`." High-level design §4.2: "`state` runs over `Booking`, `Confirmed`, `Cancelled`, `Collected` and `Abandoned`," and it reasons *from* `Cancelled` being written on the normal path when it explains why a stranded `Booking` record "is also never `Cancelled`, because there is no number to cancel with." §4.5 deletes the pickup record on a successful cancel, so no component in this design ever writes `Cancelled`; the string appears exactly once in the low-level design, in the paragraph arguing for the deletion. The argument is a good one — a cancelled pickup and a pickup never booked are the same fact, and a terminal row in front of `list_unsettled` would need a new eviction exception. What is missing is the record. §10's two amendment tables exist for exactly this, and this revision added five new rows to them for smaller divergences, so the omission is not a policy of silence | **Must** | Either record it as a sixteenth upstream amendment — strike `Cancelled` from both ERDs with the §4.5 reasoning — or keep the state and write it. The document's own header rule is that upstream wins and that upstream can be wrong, in which case it is corrected rather than routed around. This is currently the third option: routed around silently, on the one entity whose lifecycle the eviction carve-out reads |
+| CONSIST-2 | Requirements §2.2's `PICKUP` note lists four states and omits `Abandoned`, while high-level design §4.2 lists five and requirements FR-3.4.x and §5.3's `BOOKING_ABANDONED_AFTER_HOURS` row both depend on `Abandoned` existing. This is an upstream internal inconsistency, but this design's `mark_abandoned` and its `Booking → Abandoned` derivation rest on the state being declared, and the document does not flag it | Consider | Note it in §10 alongside CONSIST-1's fix, which touches the same requirements sentence |
 
-### Verdict: **Sufficient**
+### Verdict: **Partially Addressed**
 
 ---
 
 ## 9. Specification Clarity
 
-The document is, by a wide margin, more precise than most designs at this stage. It states contracts
-rather than intentions, argues from failure modes rather than from preference, and §10 records what
-it declined so the next reader does not re-derive it. Ambiguous modal language is essentially absent:
-there is no "TBD", no "TODO", and no "choose an appropriate strategy". The items below are the
-remaining places where an implementer would have to guess.
-
 ### Items Requiring Clarification
 
 | ID | Item | Section | Issue | Question |
 |----|------|---------|-------|----------|
-| UNCLEAR-1 | "unsettled", "uncancelled", "non-terminal" | §4.3, §5.2, §8.2, §8.3 | Ambiguous | Three words govern three carve-outs — eviction, rebuild, and the clear path — and none is defined in this document. §5.2's eviction says "an unsettled pickup"; §8.2's storage row says "clear enumerates **uncancelled** pickups"; §8.3's clear row sets up "one **uncancelled** pickup". Are these one set or three? High-level design §4.3 defines one of them; which of the three does it define, and do the other two mean the same thing? |
-| UNCLEAR-2 | `transact(fn)` | §3.4 | Undefined contract | May `fn` be invoked more than once for a single `transact` call? DAL-1 turns entirely on the answer, and §3.4 states what `transact` guarantees about `set` batching without stating anything about `fn`'s own invocation. Relatedly: what makes a key "touched" — read, written, or either? |
-| UNCLEAR-3 | "plus a margin" | §5.2 | Undefined | `evict_to_fit` evicts "until the freed estimate reaches the requested bytes **plus a margin**, rather than stopping at the first candidate whose arithmetic just barely covers the write." The margin is neither a number, a proportion, nor a named constant, so two implementers produce two different eviction volumes and the §8.2 assertion "frees at least the requested bytes" cannot distinguish them. Is the margin a fixed percentage, a fixed byte count, or one more candidate? |
-| UNCLEAR-4 | "read-only `StorageCoordinator`" | §7.2 | Ambiguous | Is this a distinct type, a differently-constructed instance of the same class, or the same class with four methods that the popup is trusted not to call? §7.2's sentence supports all three readings and the single-writer invariant depends on which one is meant. See CLASS-2 |
+| UNCLEAR-1 | `evict_to_fit` and `transact` | §3.5, §5.2 | Contradictory | §3.5 says `evict_to_fit` "is the only one that runs **outside** `transact`." §5.2 says it "runs **inside** the failing `transact` and must not re-enter it," performing "its reads and its single eviction `set` **directly**, not through `transact`." These are reconcilable — called from within a transaction, but bypassing the queue — but the two sentences use "inside" and "outside" for the same fact. Which is it: outside the queue, or inside the transaction? |
+| UNCLEAR-2 | "every invariant that spans more than one record" | §3.4 | Undefined | The law is stated as a SHALL and the document supplies three examples, but never says what qualifies as an invariant. Is a pickup and its consent stamp one because NFR-6.2 says so? Is a pickup and the order it pins one? An implementer deciding whether a given pair needs one `set` has the examples and no criterion. What is the test for whether a rule is an invariant under this law? |
+| UNCLEAR-3 | Derived state versus stored state on write paths | §3.4, §4.5 | Ambiguous | §3.4 says `PickupRepository` applies the derivation "on every read" and that "the stored value is left alone; the derivation is a read-time projection, not a write." §4.5 then loads a pickup, branches on the *carrier's* refreshed state, and calls `mark_collected`. What does `mark_collected` do to a record that already reads as `Collected` because `PICKUP_SETTLED_AFTER_DAYS` elapsed — is it a no-op, an idempotent write, or an error? And does any path ever persist a derived state, or does the stored value stay `Confirmed` forever? |
 
 ### Verdict: **Partially Addressed**
 
@@ -373,40 +336,34 @@ remaining places where an implementer would have to guess.
 
 ### Must Address (Blocking — resolve before implementation)
 
-1. **PKG-1:** Three sections disagree on the call site for FR-3.4.2's pre-offer eligibility check — §4.3 says the popup, §7.2 says the popup has no egress, §2.2's exhaustive graph draws no such edge. Pick one and reconcile all three.
-2. **INTERACT-1:** That same call has no sequence diagram, no enumerated message, and no dependency edge, so it is unimplementable through the messaging boundary as written.
-3. **DAL-1:** The quota retry can re-issue the pre-eviction composed write, restoring every evicted order and producing the non-converging retry loop the document rejects `evict_if_over_cap` for. State that the retry re-runs `fn` against post-eviction state.
-4. **ERR-1:** §6.2's mapping table declares itself total and does not classify a transport failure on `POST /returns/next-step`; two client deadlines apply to that call with no precedence rule.
-5. **ERR-2:** `API_REQUEST_TIMEOUT_MS` of 12000 ms is justified against one upstream deadline of 9000 ms, but the schedule path makes two sequential USPS calls at 8000 ms each. The client can abandon at 12000 ms a `POST /pickups` the server is still completing — on the one route with no retry.
-6. **TEST-1:** FR-3.4.5b is missing from §8.4's traceability table, which asserts that every functional requirement maps to at least one test.
-7. **TEST-2:** §8.4's NFR-6.5 row cites the `sender.origin` refusal that §8.2 struck under D6, leaving the origin obligation with no verifier that is not self-disclaimed.
+1. **CONF-1:** §3.2's precedence table omits FR-3.2.1's page-exposed retailer policy, and no type carries it. The plan reproduces the same omission, so neither document will catch it.
+2. **CONF-2:** `/health` inside the version gate is specified correctly here and contradicted by plan Tasks 6.1, 7.3 and I.2, which will produce mutually unpassable tests.
+3. **CLASS-1:** `ReadOnlyStore` has two incompatible surfaces in one paragraph and three return types defined nowhere in the document or the plan.
+4. **CLASS-2:** `DriverSession` adds seven persisted fields that neither upstream ERD declares, and sits in a table whose preamble says its members are not upstream entities — the exact gap §3.5's own new rule names.
+5. **CONSIST-1:** `PICKUP.state` diverges from both upstream ERDs in both directions and §10 records neither, on the entity the eviction carve-out reads.
+6. **PKG-1:** §2.1's new `deps --> routes` edge means the opposite of every other solid edge in a graph plan Task 10.3 will encode as import contracts.
 
 ### Should Address (High Priority)
 
-1. **PKG-2:** `ScriptedUspsAdapter` is exported from the deployed server package; relocate it to the test tree so "no deployment constructs it" is a boundary rather than an assertion.
-2. **CLASS-1:** `list_unsettled()` declares no element type and no predicate, and three carve-outs depend on it.
-3. **CLASS-2:** The popup's "read-only `StorageCoordinator`" is enforced by prose over a class exposing all four mutating methods.
-4. **INTERACT-2:** §4.3 collapses the consent gesture and its recorder into one participant, hiding the boundary NFR-6.2 turns on.
-5. **DAL-2:** Read-time derived `Abandoned` unpins an order from the eviction carve-out with no observation, deleting the consent record for a booking that may be live at USPS.
-6. **CONF-1:** `contracts/` is "not a code artefact" in §8.1 and a source of imports in §7.2.
-7. **CONF-2:** `MOCK_CONFIRMATION_PREFIX` is a requirements §5.1 parameter with no `Settings` field, against a §8.2 row asserting field-for-field agreement.
-8. **TEST-3:** No assertion covers what the retried write contains after an eviction — the gap that lets DAL-1 ship green.
-9. **TEST-4:** No validation covers the composed schedule deadline once ERR-2 is resolved.
-10. **TEST-5:** FR-3.4.2's pre-offer ordering has no integration row.
-11. **CONSIST-1:** Two of high-level design §4.3's three clear-path obligations are not carried here.
-12. **UNCLEAR-1:** "unsettled", "uncancelled" and "non-terminal" govern three carve-outs and are defined nowhere in this document.
-13. **UNCLEAR-2:** `transact(fn)` does not say whether `fn` may run more than once.
-14. **UNCLEAR-4:** The popup's "read-only `StorageCoordinator`" admits three readings — a distinct type, a differently-constructed instance, or the same class trusted not to be misused.
+1. **PKG-2:** §2.2 declares completeness and then declares two platform monopolies it does not draw.
+2. **CLASS-3:** §3.5's "eleven types, defined here and nowhere else" was not updated for `RetailerPolicy`, `DerivedWindow` and `ReadOnlyStore`.
+3. **CLASS-4:** §3.5 still gives `UserPrompt.ask` the return type §3.3 and §9 retired this revision.
+4. **INTERACT-1:** the new single-`set` law was not propagated to §4.5's collected branch, which writes two records carrying one fact.
+5. **INTERACT-2:** §4.7's "every hop is an edge §2.2 already permits" does not hold for the messaging-to-worker hop, because the document never separates import edges from runtime delivery.
+6. **DAL-1:** the single-`set` law has no test and no enforcement point, unlike the `ReadOnlyStore` rule added in the same revision.
+7. **ERR-1:** §4.7 prescribes a retry for a `client-too-old` refusal, which cannot succeed and contradicts §8.3.
+8. **CONF-3:** the per-retailer policy table is called configuration, has no row in the `Settings` table, and its URL-to-retailer lookup has no owning module.
+9. **TEST-1:** §8.2's `ReadOnlyStore` structural test has no single surface to enumerate until CLASS-1 is resolved.
 
 ### Consider (Medium Priority)
 
-1. **DAL-3:** Tie the before-and-after `getBytesInUse` measurement explicitly to the single-writer rule that makes it sound.
-2. **ERR-3:** `upstream-unavailable` is documented upstream as "safe to retry" and is correctly not retried on two routes.
-3. **CONF-3:** The `BEDROCK_MODEL` presence check appears in both `Settings` construction and the lifespan; say which owns which half.
-4. **TEST-6:** Extend the clear-path integration row to the show-one-last-time obligation.
-5. **TEST-7:** State the storage fake's byte-accounting model, since §5.2's margin is calibrated against it.
-6. **CONSIST-2:** Name read-time derivation as this document's addition to high-level design §4.3's state list.
-7. **UNCLEAR-3:** Quantify `evict_to_fit`'s margin.
+1. **PKG-3:** three `chrome.tabs` monopoly holders stated as two.
+2. **INTERACT-3:** `<br/>` in §4.7's sequence message breaks older Mermaid renderers.
+3. **TEST-2:** §8.4's FR-3.2.1 row will report full coverage of a requirement one clause of which has no design.
+4. **CONSIST-2:** requirements §2.2's `PICKUP` note omits `Abandoned` that the rest of the requirements and the HLD both use.
+5. **UNCLEAR-1:** `evict_to_fit` described as both inside and outside `transact`.
+6. **UNCLEAR-2:** "invariant" is undefined in a law stated as a SHALL.
+7. **UNCLEAR-3:** whether a derived pickup state is ever written, and what `mark_collected` does to a record already deriving as collected.
 
 ---
 
@@ -414,62 +371,60 @@ remaining places where an implementer would have to guess.
 
 ```mermaid
 pie title Findings by Category
-    "Package Structure" : 2
-    "Class Design" : 2
-    "Interactions" : 2
-    "Data Access" : 3
-    "Error Handling" : 3
+    "Package Structure" : 3
+    "Class Design" : 4
+    "Interactions" : 3
+    "Data Access" : 1
+    "Error Handling" : 1
     "Configuration" : 3
-    "Testing" : 7
+    "Testing" : 2
     "Consistency" : 2
-    "Clarity" : 4
+    "Clarity" : 3
 ```
 
 | Area | Verdict | Must | Should | Consider |
 |------|---------|------|--------|----------|
-| Package/Module Structure | Partially Addressed | 1 | 1 | 0 |
-| Class/Type Design | Sufficient | 0 | 2 | 0 |
-| Interactions & Workflows | Partially Addressed | 1 | 1 | 0 |
-| Data Access Layer | Partially Addressed | 1 | 1 | 1 |
-| Error Handling | Partially Addressed | 2 | 0 | 1 |
-| Configuration & Wiring | Partially Addressed | 0 | 2 | 1 |
-| Testing Completeness | Partially Addressed | 2 | 3 | 2 |
-| HLD Consistency | Sufficient | 0 | 1 | 1 |
-| Specification Clarity | Partially Addressed | 0 | 3 | 1 |
-| **Total** | | **7** | **14** | **7** |
+| Package/Module Structure | Partially Addressed | 1 | 1 | 1 |
+| Class/Type Design | Partially Addressed | 2 | 2 | 0 |
+| Interactions & Workflows | Partially Addressed | 0 | 2 | 1 |
+| Data Access Layer | Sufficient | 0 | 1 | 0 |
+| Error Handling | Sufficient | 0 | 1 | 0 |
+| Configuration & Wiring | Partially Addressed | 2 | 1 | 0 |
+| Testing Completeness | Sufficient | 0 | 1 | 1 |
+| HLD Consistency | Partially Addressed | 1 | 0 | 1 |
+| Specification Clarity | Partially Addressed | 0 | 0 | 3 |
+| **Total** | | **6** | **9** | **7** |
+
+**Where the findings land.** Nineteen of the twenty-two findings are against material added or
+rewritten in the sixth revision — the `deps` node and module row, the `RetailerPolicy` /
+`DerivedWindow` / `DeriveWindow` classes and the precedence table, the `ReadOnlyStore` diagram, the
+`chrome.tabs` monopoly paragraph, §3.5's new deferral rule, §4.7 in its entirety, and the new §8.2
+and §8.4 rows. Three are against pre-existing material: CONSIST-1 and CONSIST-2 on the pickup state
+vocabulary, and UNCLEAR-1 on `evict_to_fit`. The concentration is expected rather than alarming —
+those ~505 lines had never been read by a reviewer — but it means the round-six revision has not yet
+had the scrutiny the five rounds before it received.
+
+**On false positives.** Every finding above was checked against the current text of the three design
+documents and, where relevant, against the implementation plan, before being written. The claim that
+all thirty-nine requirements carry a §8.4 row was verified mechanically rather than by reading. Three
+candidate findings were dropped during that check and are recorded here so they are not raised again:
+that `/health` inside the gate was a design error (it is upstream, requirements §4.1, and the design
+is right); that the `min_client_version` default of `0.1.0` leaves the gate inert (it does not — an
+absent header is below any floor, which is the intended behaviour); and that `evict_to_fit` bypassing
+`transact` is a queue violation (it is not — the calling transaction still holds the slot, and §5.2
+argues this correctly).
 
 ---
 
 ## Untested Requirements
 
-Two requirements have no test coverage of any kind and are deliberately out of this document's scope;
-they are listed for completeness rather than as findings, because §8.4 already declares both. The
-third and fourth rows are the ones that matter: a requirement whose tests exist but whose trace does
-not, and a requirement whose trace exists but whose test does not.
+None. Every `FR-` and `NFR-` identifier in `design/boomerang-requirements.md` resolves to a row in
+§8.4, and the two requirements with no test in this document — NFR-6.6 and NFR-6.7 — are explicitly
+excused in §8.5 with a named owner outside it (plan Tasks I.1 and I.2, per plan decisions D7 and D8),
+which is an excusal rather than a gap.
+
+The one caveat is not a missing row but a row that will over-report:
 
 | Requirement | Description | Why It Matters |
 |-------------|-------------|----------------|
-| FR-3.4.5b | A simulated booking SHALL disclose itself by a `MOCK_CONFIRMATION_PREFIX` on the confirmation number | **Tested but untraced.** Two §8.2 rows cover both halves; §8.4 has no row at all. The traceability table is the control §10 relies on to prove no requirement was missed, and the requirement it dropped is the newest one — the exact pattern §10 says survives every consistency check, because a requirement that is never mentioned cannot be contradicted |
-| NFR-6.5 (origin half) | No origin but the pinned ones is served | **Traced but untested.** §8.4 cites the `sender.origin` refusal that §8.2 struck under D6; the only surviving citation is the CORS row, which §8.3 explicitly disclaims as configuration rather than protection. A security obligation whose sole remaining verifier disclaims itself reads as covered and is not |
-| FR-3.6.2 | Landing page and install funnel | No coverage, deliberately: a `client/` surface outside this document's scope, per §1. Recorded so the gap is chosen rather than missed — which is the right treatment, and worth preserving |
-| FR-3.6.3 | Dashboard | No coverage because nothing implements it — out of PoC scope as of 2026-08-27 under D6. The integration row was **removed rather than skipped**, on the correct reasoning that a skipped test claims the feature exists and is untested |
-
-**NFR-6.6 and NFR-6.7** are also untested here, and correctly so: both are Terraform properties, this
-document defines no infrastructure tier, and §8.5 refuses to name a suite that does not exist. Under
-D7 and D8 they are owned by plan Tasks I.1 and I.2 — declared and verified by `terraform plan`, then
-applied and smoke-tested. That is an ownership transfer rather than a coverage claim, and §8.5 says so
-in exactly those terms.
-
----
-
-## Closing Note
-
-Six rounds in, the defects this review found are no longer design defects. Five of the seven blockers
-are **one section contradicting another** — a call site named in three incompatible ways, a mapping
-table that declares itself total and is not, a traceability row citing a test that was struck in the
-same revision that struck it, a deadline justified per-call and applied per-request, a retry that
-undoes its own repair. Every one of them is mechanically findable, and §9's fourth question already
-proposes the machinery: a sweep that checks not only that every cited identifier exists, but that
-every upstream identifier is cited. TEST-1 and TEST-2 would both have been caught by it before a
-reviewer opened the file. Running that check as a repository gate is likely to retire this class of
-finding entirely, which is a better outcome than a seventh round.
+| FR-3.2.1 | Window derivation from the delivery date, a page-exposed retailer policy, or a configured default | §8.4 reports it covered by four unit branches, which is true of the design and false of the requirement. The page-exposed-policy clause has no design, no field and therefore no test, and the traceability table is the artefact a reader consults to find that out — see CONF-1 and TEST-2 |

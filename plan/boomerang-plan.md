@@ -742,17 +742,47 @@ After all tracks complete:
 1. Create `server/app/config.py` with a pydantic-settings `Settings` model covering the full §5.1
    table: Bedrock model ids per call site, region, max tokens, USPS credentials and base URL, the
    allowed CORS origins, the minimum supported client version, upstream timeouts and the request
-   deadline, the payload ceiling, and the log level.
+   deadline, `FUNCTION_TIMEOUT_MS`, `CARRIER_ADAPTER`, the payload ceiling, and the log level. The
+   §5.1 table is the list; this sentence is not a subset of it. **Also carry the two bundled tables
+   Low-Level Design §7.1 adds** (seventh review, CONF-3): `retailer_policies`, keyed by
+   `retailer_key` with a positive-integer `default_return_days` each, and `retailer_hosts`, a
+   host-suffix map into it. Both are **literals in this module, not environment variables** — a
+   per-retailer table is structured data, and an environment variable holding JSON is a
+   configuration surface with no schema. Export `retailer_policy_for_url(page_url) -> RetailerPolicy`
+   alongside `Settings` and `get_settings`: it matches the **longest** host suffix first, and returns
+   the requirements §5.3 system default of **30** for a host it does not know, rather than raising.
+   The one row that does **not** become
+   a `Settings` field is `MOCK_CONFIRMATION_PREFIX`: §5.1 says outright it is not configurable per
+   deployment and is listed there only because both workspaces read it — it is the module constant
+   Task 4.14 exports and Task 3.18 publishes in `contracts/`, and making it an environment variable
+   would reintroduce the drift decision D22 exists to prevent.
 2. **No defaults for anything a wrong value would silently break** — follow the existing
    `app/bedrock.py` precedent, which deliberately gives `BEDROCK_MODEL` no default and names
    `ListInferenceProfiles` in the failure message. Timeouts and ceilings may have defaults; identity,
    endpoints and version floors may not.
 3. Provide `get_settings()` with `lru_cache` — one instance per warm container (§5.1).
 4. Validators: origins parse to a non-empty list of absolute origins; the minimum client version
-   parses as a version; timeouts are positive; the payload ceiling is positive and below the
-   Function URL body limit.
+   parses as three dot-separated non-negative integers; timeouts are positive integers; the payload
+   ceiling is positive and below the Function URL body limit; `CARRIER_ADAPTER` is one of the
+   accepted values and **any other value fails the cold start** rather than falling back.
+   - **`FUNCTION_TIMEOUT_MS` bounds the other three, and the check was missing here** (added
+     2026-08-28 by the decision D18 sweep; Low-Level Design §7.1 and §8.2). Each of
+     `BEDROCK_TIMEOUT_PARSE_MS`, `BEDROCK_TIMEOUT_ACTION_MS` and `USPS_TIMEOUT_MS` SHALL be **below**
+     `FUNCTION_TIMEOUT_MS`, and the failure message SHALL name which one and both numbers. An
+     upstream deadline above the function's own timeout is a deadline that never fires: Lambda kills
+     the invocation first, so the caller gets a platform timeout instead of the typed
+     `upstream-unavailable` that NFR-6.4 requires, and nothing in the running system reports why.
 5. Unit tests: each required variable missing raises, and the message names the variable; a malformed
-   origin list raises; `get_settings()` returns the same object twice.
+   origin list raises; `get_settings()` returns the same object twice; **`retailer_policy_for_url`
+   returns the configured policy for a known host, the longest-suffix match when two could match, and
+   the system default of 30 for an unknown host — asserted positively, because day one has no host
+   configured and that behaviour must not read as an oversight; a host-suffix entry naming a
+   `retailer_key` absent from `retailer_policies` fails the cold start, as does a duplicate key or a
+   non-positive day count**; **each of the three upstream
+   deadlines raises when it is not below `FUNCTION_TIMEOUT_MS`**, asserted per deadline so a
+   validator that checks only the first one fails; a `Settings` built from a fully populated
+   environment matches the Low-Level Design §7.1 table field for field — the test that catches a row
+   added to the table and never to the class.
 6. Reference: Low-Level Design §7.1; requirements §5.1, §5.2.
 
 **Verification:**
@@ -812,21 +842,31 @@ may import and that imports nothing.
 1. Create `extension/src/types/` with the entity types from §3.5: `Order`, `OrderItem`,
    `ReturnRequest`, `Pickup`, `Address`, `BookedAddress`, `DriverSession`, `RankedItem`,
    `ProposedAction`, `ValidatedAction` (constructor-private — see Task 3.15), `ReturnMethodOption`.
-2. `DriverSession` carries exactly: `state`, `item_id`, `order_id`, `retailer_key`, `tab_id`,
-   `tab_url`, `step_key`, `chosen_option`, `attempt_count`, `started_at`, `last_written_at`,
-   `schema_version`. `chosen_option` is nullable — the free-drop-off branch never makes a choice.
+2. `DriverSession` carries exactly the twelve fields **requirements §2.2's ERD declares**: `state`,
+   `item_id`, `order_id`, `retailer_key`, `step_key`, `chosen_option`, `attempt_count`, `tab_id`,
+   `tab_url`, `started_at`, `last_progress_at`, `schema_version`. The ERD is the authority; this
+   list is a copy of it and goes stale if they diverge (amended 2026-08-28, seventh review, CLASS-2 —
+   seven of these were previously declared in no document, and this task's `last_written_at` is
+   upstream's `last_progress_at`, which is the spelling that wins). `chosen_option` is nullable — the
+   free-drop-off branch never makes a choice.
    Carry §3.5's rationale into a `// dev-note:`: it exists because the worker dies between the choice
    and the label page, and a value held only in memory across two transitions is sometimes not there.
 3. Define the FR-3.3.9 return state union: `AwaitingLabelChoice`, `Driving`, `LabelReady`,
    `AwaitingConfirm`, `Stalled`, and the four terminals `LabelPrinted`, `DroppedOff`, `HandedOff`,
-   `Aborted`. Define the pickup state union including the read-time-derived `Abandoned` and
-   `Collected`.
+   `Aborted`. Define the pickup state union as **exactly four members** — `Booking`, `Confirmed`,
+   `Collected`, `Abandoned` — of which the last two are the read-time-derived states of Low-Level
+   Design §5.2. **There is no `Cancelled` member and adding one is a defect**: a successful cancel
+   deletes the record (§4.5), and requirements §2.2 and high-level design §4.2 both struck the state
+   on 2026-08-28 (seventh review, CONSIST-1). Add a `// dev-note:` saying so, because `Cancelled` is
+   the member a reader of the cancellation flow will reach for.
 4. Define `ActionKind` as a closed union of exactly `click`, `select_option`, `fill`,
    `pause_for_user`, `report_stuck` — the extension's mirror of the server's enum.
 5. Every persisted type carries `schema_version`.
 6. Unit tests: type-level tests are cheap here — add a `expectTypeOf`/`assertType` suite pinning
-   `ActionKind` to five members and the terminal set to four, so widening either fails the build.
-7. Reference: Low-Level Design §3.5; requirements FR-3.3.9, FR-3.3.5.
+   `ActionKind` to five members and the terminal set to four, so widening either fails the build,
+   and pinning `DriverSession` to the twelve field names above so a field added here without an ERD
+   amendment fails the build too.
+7. Reference: Low-Level Design §3.5; requirements §2.2, FR-3.3.9, FR-3.3.5; decision D25.
 
 **Verification:**
 - `cd extension && bun run test tests/types` and `bunx tsc --noEmit`
@@ -848,15 +888,34 @@ may import and that imports nothing.
 a dev value in a prod bundle is a build-time fact rather than a runtime surprise.
 
 **Instructions:**
-1. Create `extension/src/config.ts` exporting the constants from §7.2: `API_BASE_URL`,
-   `CLIENT_VERSION`, `MODEL_FALLBACK_TIMEOUT_MS`, `MAX_INGEST_BYTES`, `STORAGE_CAP_BYTES`,
-   `STORAGE_EVICTION_MARGIN_BYTES`, `API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`,
-   `RETURN_ATTEMPT_LIMIT`.
-   - **These names are normative and were previously wrong here.** `PAYLOAD_CEILING_BYTES` and
-     `API_TIMEOUT_MS` appear nowhere in the requirements or the low-level design; the real names are
-     `MAX_INGEST_BYTES` and `API_REQUEST_TIMEOUT_MS`. `API_RETRY_BUDGET_MS` is specified upstream and
-     was missing from this plan entirely, so the retry budget it governs would not have been built.
-     Decision D17.
+1. Create `extension/src/config.ts` exporting **every constant requirements §5.2 declares, and no
+   others** — `API_BASE_URL`, `MAX_INGEST_BYTES`, `INGEST_DEBOUNCE_MS`, `URGENCY_CRITICAL_DAYS`,
+   `URGENCY_WARN_DAYS`, `MAX_STORED_ORDERS`, `PICKUP_SETTLED_AFTER_DAYS`,
+   `BOOKING_ABANDONED_AFTER_HOURS`, `MODEL_FALLBACK_TIMEOUT_MS`, `API_REQUEST_TIMEOUT_MS`,
+   `API_RETRY_BUDGET_MS`, `EXTENSION_KEY`, `CLIENT_VERSION`, `STORAGE_EVICTION_MARGIN_BYTES`,
+   `RETURN_ATTEMPT_LIMIT`. Low-Level Design §7.2 restates the same set with its `dev` and `prod`
+   values.
+   - **These names are normative and this list has been wrong twice.** The first correction was
+     decision D17: `PAYLOAD_CEILING_BYTES` and `API_TIMEOUT_MS` appear nowhere upstream — the real
+     names are `MAX_INGEST_BYTES` and `API_REQUEST_TIMEOUT_MS` — and `API_RETRY_BUDGET_MS` was
+     missing entirely, so the retry budget it governs would not have been built.
+   - **The second correction is decision D18's configuration sweep, run 2026-08-28 rather than at
+     Task 10.2.** D17 fixed two names and left the list still wrong in both directions. Six constants
+     requirements §5.2 declares were absent here — `INGEST_DEBOUNCE_MS`, both urgency thresholds,
+     `MAX_STORED_ORDERS`, `PICKUP_SETTLED_AFTER_DAYS`, `BOOKING_ABANDONED_AFTER_HOURS` and
+     `EXTENSION_KEY` — and each of the last three is load-bearing: eviction has no ceiling without
+     `MAX_STORED_ORDERS`, and the derived-at-read pickup states are *derived from* the two
+     thresholds, so a `src/config.ts` built from the old list would have left Task 4.10 with nothing
+     to derive against. `CLIENT_VERSION`, `STORAGE_EVICTION_MARGIN_BYTES` and `RETURN_ATTEMPT_LIMIT`
+     were named here and declared in no design document; all three are real and are now in
+     requirements §5.2 with defaults, by the low-level design §7.2 rule that a value a deployment can
+     change is amended upstream and cited, never shadowed downstream.
+   - **`STORAGE_CAP_BYTES` is removed and is not to be reintroduced.** There is no configured byte
+     cap in this design. The store's byte ceiling is the platform's ~10 MB and eviction is driven by
+     the size of the write `chrome.storage.local` actually refused (Low-Level Design §5.2) — a
+     configured cap would be a second answer to the same question, and the two would disagree the
+     first time a user's orders grew. `MAX_STORED_ORDERS` is the *count* cap and is the one that
+     exists.
    - `DASHBOARD_ORIGIN` is **not** exported: FR-3.6.3 is cut from PoC scope (decision D6) and nothing
      consumes it.
 2. Wire the environment-varying ones through WXT `define` in `wxt.config.ts` so they are substituted
@@ -1051,8 +1110,12 @@ returns.
 2. Enforce the payload ceiling on the extracted content field — the request is rejected with
    `payload-too-large` before any model call. The ceiling comes from `Settings`, so accept it as a
    validation context rather than hardcoding.
-3. `OrderSchema` carries the fields FR-3.2.1 needs for window derivation: order date,
-   delivery date if known, item identity, and the retailer's stated return policy window if present.
+3. `OrderSchema` carries the fields FR-3.2.1 needs for window derivation: `ordered_at`,
+   `delivered_at` if known, item identity, and **`stated_return_days`** — the retailer's stated
+   return policy window in days where the page exposes one, an integer or absent. Name it exactly
+   that; Low-Level Design §3.2 carries it as the field FR-3.2.1's second source travels in, and Task
+   3.7 branches on it. It is **not** the same thing as a page-stated deadline *date*, which lands in
+   `return_by` with `window_inferred` false.
 4. Unit tests: a payload one byte over the ceiling raises; a well-formed payload round-trips; a
    missing required order field raises.
 5. Reference: Low-Level Design §3.1, §4.1; requirements FR-3.1.4, FR-3.2.1, §4.1.
@@ -1212,11 +1275,22 @@ and the version gate that rejects an unsupported client **before** any model or 
      independently-written tasks choosing different spellings would produce a system where every
      request from the real client is rejected — and both unit suites would pass. Task 3.18's golden
      payloads carry the header so the two sides are checked against one string. Decision D16.
-3. **The gate runs before the handler body.** §8.3 asserts on two endpoints that no upstream call
-   happens on rejection, so it must be a dependency, not a first line inside each handler.
+3. **The gate runs before the handler body, and it is registered on the router, not per route.**
+   §8.3 asserts on two endpoints that no upstream call happens on rejection, so it must be a
+   dependency rather than a first line inside each handler — and it is attached once, where the
+   routers are included in Task 6.5, so a route added later is gated by default. A gate a new
+   endpoint has to remember to opt into is a gate that will be missing from the endpoint added in a
+   hurry, and its absence is silent: the endpoint works, for every client, including the stale ones
+   `MIN_CLIENT_VERSION` exists to turn away. `/health` is inside the gate like everything else.
 4. Unit tests: a version below the floor raises; an absent header raises; a version at the floor
-   passes; a malformed version raises rather than being treated as new; **a header spelled any other
-   way is treated as absent** — this is the assertion that catches a divergence from §4.1.
+   passes; a malformed version raises rather than being treated as new — **each malformed shape Low-Level
+   Design §7.1 enumerates** (`1.2.x`, `v1.2.3`, `1.2`, `1.2.3.4`, empty, whitespace, duplicated
+   header, a negative component) takes the same path as an absent header; comparison is component-wise
+   on the integer triple, so `0.10.0` passes a `0.9.0` floor; **a header spelled any other
+   way is treated as absent** — this is the assertion that catches a divergence from §4.1. **The gate
+   is asserted route by route over the app's own route table**, read from the application rather than
+   from a list written in the test, so a route added without the gate turns this test red instead of
+   shipping ungated.
 5. Reference: Low-Level Design §3.3, §7.1; requirements §4.1 (header name), §4.2 (`client-too-old`),
    §5.1; decision D16.
 
@@ -1241,15 +1315,45 @@ of its inputs and an injected instant.
 
 **Instructions:**
 1. Create `server/app/services/__init__.py` and `server/app/services/window.py` with
-   `derive_window(order, item, now)` returning the deadline and the basis it was derived from.
-2. Handle the precedence FR-3.2.1 sets out: an explicit retailer-stated deadline wins; then a
-   policy window measured from the delivery date; then from the order date; and when none of them is
-   available, return an **undetermined** result rather than guessing a default window.
+   `derive_window(order, item, policy, now)` returning the deadline, whether it was inferred, and the
+   basis it was derived from. **`policy` is a parameter, not a lookup** — the function is pure, so
+   the per-retailer `default_return_days` is resolved by the caller (`IngestService`, **Task 5.1** —
+   corrected from "Task 3.9", which is `src/extract/`) from the page URL and passed in, through
+   `retailer_policy_for_url` in `app/config.py` (Task 2.2). Low-Level Design §3.2 carries the signature and the table below.
+2. Handle the precedence FR-3.2.1 sets out, in this order: (1) an explicit retailer-stated deadline
+   wins and is **not** marked inferred; (2) **`stated_return_days` (Task 3.2) counted from
+   `delivered_at`, or from `ordered_at` when `delivered_at` is absent** — the page exposed a policy
+   in days, which outranks anything configured; (3) `default_return_days` counted from
+   `delivered_at`; (4) `default_return_days` counted from `ordered_at` when `delivered_at` is absent;
+   (5) an **undetermined** result — `return_by` absent, still marked inferred — when there is no date
+   at all to count from. Rows 2 through 4 are marked inferred, because each is arithmetic on a date
+   and FR-3.2.1 requires any derived window to be marked so. Low-Level Design §3.2 carries the same
+   five rows.
+   - **Row 2 outranks rows 3 and 4 because a page is more current than a table.** `stated_return_days`
+     is what the retailer said about this order today; `default_return_days` is what we wrote down
+     about the retailer at some point in the past. A configured default that overrode a stated policy
+     would have the product quietly contradicting the page the user is looking at — a page
+     advertising sixty-day returns would be shown a thirty-day deadline, with `window_inferred` true,
+     which reads as a considered inference rather than a discarded fact.
+   - **The undetermined branch fires on a missing date, never on a missing policy.** Requirements
+     §5.3 gives `default_return_days` a system default of **30** behind any per-retailer override, so
+     a policy is always available and steps 2 and 3 cannot fail for want of one. Treating "no policy"
+     and "no date" as the same condition returns undetermined for every retailer not yet configured
+     — which is all of them on day one — and that reads in the popup as "we know nothing about any of
+     your orders."
+   - `delivered_at` and `ordered_at` are both **optional** on the order schema (Task 3.2): high-level
+     design §4.3 records that both are page-extracted and may be absent.
 3. `now` is a parameter. No `datetime.now()` inside — §8.5 rules out sleeping and §8.2 tests this
    across boundary dates.
-4. Unit tests: each precedence branch; the undetermined branch; day-boundary behaviour; an item whose
-   deadline has already passed.
-5. Reference: Low-Level Design §3.3, §4.1; requirements FR-3.2.1, FR-3.2.2.
+4. Unit tests: each of the **five** precedence branches, **including one that distinguishes branch 3
+   from branch 4** — an order with both dates present must derive from `delivered_at`, and an
+   inverted precedence must fail; **one that distinguishes branch 2 from branch 3** — an order with a
+   `stated_return_days` of 60 against a configured `default_return_days` of 30 must derive 60 days
+   and report a `basis` of `stated_days`, so folding the two sources together or ordering them the
+   wrong way round fails here; a retailer with no override falling back to the system default of 30
+   rather than to undetermined; the undetermined branch reached only with both dates absent;
+   day-boundary behaviour; an item whose deadline has already passed.
+5. Reference: Low-Level Design §3.2, §4.1; requirements FR-3.2.1, FR-3.2.2, §5.3.
 
 **Verification:**
 - `cd server && uv run pytest tests/unit/services/test_window.py`
@@ -1455,8 +1559,15 @@ halfway.
 "was this checked?" is answered by the type rather than by discipline.
 
 **Instructions:**
-1. Create `extension/src/validation/action.ts` with `validate_action(proposed, adapter):
+1. Create `extension/src/validation/action.ts` with `validate_action(proposed, adapter, step):
    ValidatedAction | ValidationRejection`.
+   - **The `step` argument is not optional and was missing here.** Low-Level Design §3.3 states it
+     directly — "`ActionValidator` takes the adapter and the step, not just the action" — because a
+     validator holding only the action can check the vocabulary but not whether the target is a field
+     *this retailer declared fillable at this step*, which is the stronger half of the bound. The
+     step is also what identifies an `irreversible_steps` member, so the confirmation gate §8.3
+     asserts ("confirmation at the irreversible step") acts on a fact the validator already
+     established rather than on a second lookup that could disagree with the first.
 2. `ValidatedAction` carries a private brand — no other module can construct one. Add a
    `// dev-note:` explaining that this is the whole point: `StepExecutor` accepts only
    `ValidatedAction`, so an unvalidated action is a compile error rather than a runtime check
@@ -1464,8 +1575,12 @@ halfway.
 3. Checks: the kind is one of the five; per-kind field rules match Task 3.3's server-side rules; for
    `fill`, the target selector must appear in the adapter's `fillable_fields` — an unknown target is
    rejected, not attempted.
-4. Rejections carry a reason the driver can log and act on; the validator never throws for a
-   malformed action.
+4. **Rejection is a returned value, never a raise.** `ValidationRejection` carries a `reason` the
+   driver logs and acts on, and the driver turns it into `report_stuck`. A raise would make an
+   exception the control flow of every model-proposed step, on the hot path, and it would leave the
+   rejection without the `reason` code every other failure in this system has. Low-Level Design §3.3
+   names the pair `ValidatedAction | ValidationRejection` the outcome type; the validator never
+   throws for a malformed action.
 5. Unit tests: each of the five kinds validates in its correct shape; a `fill` at a target outside
    `fillable_fields` rejects; a `fill` at a password-typed field in the fixture rejects; a sixth
    invented kind rejects; a `click` carrying a value rejects; `ValidatedAction` cannot be constructed
@@ -1808,9 +1923,17 @@ on the first unscripted call by design. Decision D21.
 2. **Deterministic, not random.** Confirmation numbers are derived from the request, so the same
    booking twice yields the same number and a test can assert on it.
 3. Every confirmation number carries a **fixed recognisable prefix** — the marker Task 8.5 renders as
-   "simulated" (decision D22). Export the prefix as a module constant so the extension's expectation
-   and the server's production of it are traceable to one definition; put it in `contracts/` (Task
-   3.18) so both workspaces read the same value.
+   "simulated" (decision D22). The name and the value are **normative upstream**: requirements §5.1
+   defines `MOCK_CONFIRMATION_PREFIX` with the value **`SIM-`**. Do not invent either. Export it as a
+   module constant under exactly that name so the extension's expectation and the server's production
+   of it are traceable to one definition; put it in `contracts/` (Task 3.18) so both workspaces read
+   the same value.
+   - **Why the name is cited rather than left to the executor.** Requirements §5.2 states the failure
+     mode: two independently declared prefixes that drifted apart would *silently* disable the
+     FR-3.4.5b marker. A prefix chosen here and a prefix expected in Task 8.5 are two declarations
+     unless both quote the same upstream constant, and the mismatch produces no error — only a
+     simulated booking that renders as real, which is the exact failure D22 exists to prevent. One
+     definition in `contracts/` is the right structure; naming it upstream is what keeps it one.
 4. `check_eligibility` returns eligible for every address **except one designated unserviceable
    postcode**, declared as a module constant and documented in `server/AGENTS.md`.
    - **Why a deliberately failing postcode.** FR-3.4.2's graceful second answer — what the user sees
@@ -1859,8 +1982,9 @@ the four repository tasks that follow do not serialise behind it.
    records and their booked addresses. Add a `// dev-note:` with exactly that reasoning; a future
    reader simplifying `rebuild` to "clear everything" is the failure this note exists to stop.
 4. **Write `extension/src/storage/index.ts` in this task, complete.** List every export the storage
-   package will have — including the repositories Tasks 4.8–4.11 have not written yet — so those four
-   tasks add a *file* each and never edit a shared one.
+   package will have — including the repositories Tasks 4.8–4.11 have not written yet, and the
+   `ReadOnlyStore` type Task 4.7 declares — so those four tasks add a *file* each and never edit a
+   shared one.
    - **Why this changed.** Tasks 4.6–4.12 were previously a seven-task fully serial chain, justified
      as protecting "one state machine, one serialising queue". The actual serialising constraint was
      this barrel file, not the invariant: each repository already lives in its own module. Writing
@@ -1904,13 +2028,49 @@ as **one** `chrome.storage.local.set`.
 3. A rejected `set` (quota) surfaces to the caller with the store unchanged; the queue continues.
 4. `transact` must not be re-entrant — a mutation that calls `transact` deadlocks. Detect and throw
    with a clear message rather than hanging.
-5. Unit tests against the Task 2.6 fake: two concurrent `transact` calls apply in order and produce
+5. **Declare `ReadOnlyStore` here, and have `StorageCoordinator` implement it.** It is a **flat
+   surface of exactly seven members**, matching Low-Level Design §3.4's diagram member for member:
+   `list_orders`, `get_order`, `find_item`, `get_pickup`, `list_unsettled_pickups`,
+   `active_return_for_item`, `address`. It is flat rather than a set of per-repository accessors
+   because an accessor returning a repository would hand the popup `upsert`, `promote` and `delete`
+   with the reads, which is the leak the type exists to close; the names are qualified because three
+   repositories each have a `get`. Nothing that writes appears on it: no `transact`, no
+   `evict_to_fit`, no `evict_if_over_cap`, no `clear_all`.
+   Task 8.3 constructs the popup against this type, which is what turns §2.2's `reads only` qualifier
+   from a rule someone remembers into one the compiler enforces. Add a `// dev-note:` saying that a
+   mutator reflexively re-exported onto this type is the only way the single-writer rule can be
+   broken without anyone noticing. Low-Level Design §3.4, §7.2; decision D19's barrel is where it
+   is listed.
+6. Unit tests against the Task 2.6 fake: two concurrent `transact` calls apply in order and produce
    one `set` each; a multi-key mutation commits as a single `set` (assert the call count); an armed
-   quota rejection leaves the store byte-identical; a re-entrant call throws.
-6. Reference: Low-Level Design §4.3, §5.1.
+   quota rejection leaves the store byte-identical; a re-entrant call throws; **`ReadOnlyStore`
+   exposes exactly the seven members of step 5 and no member that writes** — a type-level test that
+   spells the seven names out and asserts the surface contains nothing else, so it fails both when a
+   mutator is added to the view and when a read is silently dropped from it.
+7. **Give the single-`set` law one enforcement point rather than five scattered assertions (added
+   2026-08-28, seventh review, DAL-1).** Low-Level Design §3.4 states it as a SHALL — *every
+   invariant that spans more than one record is written in a single `set`* — and a SHALL with no
+   test is a comment. Add `tests/storage/single-set-law.test.ts` as the law's home, holding one row
+   per multi-record write in the design, each row driving the real call against the Task 2.6 fake
+   and asserting `set` was called **exactly once**:
+   - `PickupRepository.save_intent` — the pickup and its `ConsentStamp`;
+   - `PickupRepository.promote` — the intent and the confirmed booking;
+   - `ReturnDriver`'s `transition` — the return request and the driver session;
+   - the §4.5 already-collected branch — the pickup's `Collected` and the request's `LabelPrinted`;
+   - `clear_all` — three collections and the address.
+   Keep the rows in this one file even though four of the five behaviours are also tested in their
+   own task's suite: the point of the law is that the *next* multi-record write is correct by
+   default, and a single file named after the law is the thing a reviewer greps for and an author
+   adds a row to. Add a `// dev-note:` stating the law's mechanical test — if a worker dying between
+   the two writes leaves a store state some section of the design calls unreachable, the writes are
+   one invariant and belong here. Low-Level Design §3.4, §8.2.
+8. Reference: Low-Level Design §3.4, §4.3, §5.1, §7.2, §8.2.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/coordinator.test.ts`
+- `cd extension && bun run test tests/storage/single-set-law.test.ts` — five rows, each asserting a
+  single `set` call.
+- Split any one of the five into two `set` calls — that row fails; revert.
 
 **Requirements covered:** FR-3.1.5
 
@@ -1984,13 +2144,23 @@ time rather than storing them.
 **Instructions:**
 1. Create `extension/src/storage/pickups.ts` with `save_intent`, `promote`, `get`,
    `list_unsettled`, `mark_collected`, `mark_abandoned`, `delete`.
+   - **Keyed by `booking_intent_id`, and by nothing else.** It is the key both ERDs declare on
+     `PICKUP` (requirements §2.2, high-level design §4.1), it exists before the network call, and it
+     is the only identifier the record is ever addressed by locally. Do not introduce a second local
+     id: a record carrying both a client-generated intent id and a carrier-issued one has two
+     identities that diverge on exactly the branch this task exists for — the lost schedule response,
+     where the intent is recorded and the confirmation may never arrive. `confirmation_number` is a
+     *field* `promote` attaches, and it is what the server's URLs use; it is not this store's key.
 2. **`save_intent` records the consent stamp and the address before the network call.** FR-3.4.5a
    requires the consent to survive a lost response, so it is written first; `promote` then attaches
    the `confirmation_number` and the day when the response arrives.
 3. **No `etag` field, no setter for one** (rule 3). Add a `// dev-note:`.
 4. `Abandoned` and `Collected` are **derived on read** from the stored day and settlement flags —
    §3.4 is explicit that they are not stored, so a store that sat idle past the pickup day reads
-   correctly without a background job having written anything.
+   correctly without a background job having written anything. **Apply the derivation inside the
+   repository, on every read path** — `get` and `list_unsettled` alike, and `list_unsettled` returns
+   `Pickup[]`. Two read paths that disagree about whether to derive would report the same record in
+   two different states, and the one that skipped it would be the one eviction consults.
 5. Unit tests: `save_intent` then a simulated lost response leaves a consented, unpromoted record;
    `promote` attaches the confirmation and day; a record whose day is in the past reads as
    `Abandoned` without any write; `mark_collected` settles it; `list_unsettled` excludes settled and
@@ -2043,9 +2213,22 @@ implement the clear-all that must not orphan a real-world commitment.
 
 **Instructions:**
 1. Add to `coordinator.ts`: `evict_if_over_cap()` and `evict_to_fit(incoming_bytes)`.
-2. Measure with `chrome.storage.local.getBytesInUse` **before and after**, and evict down to
-   `STORAGE_CAP_BYTES - STORAGE_EVICTION_MARGIN_BYTES` rather than to the cap. There is no
-   `unlimitedStorage`, so a store that sits exactly at the cap fails the next write.
+2. **The two evictors answer different questions and return different units** — Low-Level Design
+   §5.2, corrected here 2026-08-28 by the decision D18 sweep. `evict_if_over_cap()` counts orders
+   against `MAX_STORED_ORDERS` and returns an `EvictedOrders` count. `evict_to_fit(incoming_bytes)`
+   takes the size of the write `chrome.storage.local` actually refused and evicts oldest-first until
+   it has freed **that many bytes plus `STORAGE_EVICTION_MARGIN_BYTES`**, returning a
+   `ReclaimedBytes`. There is no configured byte cap to evict *down to*: the ceiling is the
+   platform's ~10 MB and there is no `unlimitedStorage` (rule 8), so the only byte figure available
+   is the one the failed write reported. This step previously said "evict down to
+   `STORAGE_CAP_BYTES - STORAGE_EVICTION_MARGIN_BYTES`", which named a constant no document declares
+   and described a cap-driven loop the design rejects by name — it cannot converge, because a store
+   of thirty large orders under a count cap of fifty is not over any cap and would evict nothing.
+   - Candidate size is estimated by **serialising** the order and the records that travel with it,
+     because `getBytesInUse` answers per *key* and each collection is one key. The margin exists
+     because that estimate excludes Chrome's per-entry overhead. The truth is checked once, not per
+     candidate: one `getBytesInUse` on the orders key **before and after** the batch is what the
+     method returns and what the retry decision uses — never the sum of the estimates.
 3. Build the **protected set** as the union of: items with an active return, unsettled pickups and
    their booked addresses, and the user's address. Eviction chooses among the rest — oldest
    `first_seen_at` first.
@@ -2150,7 +2333,12 @@ typed failure.
 **Instructions:**
 1. Create `server/app/services/ingest.py` with `IngestService.ingest(request, now)`.
 2. Call the model through `bedrock.invoke_with_tool("parse", ...)` with the Task 4.1 parse tool.
-3. Run `derive_window` (Task 3.7) over each parsed item and attach the deadline and its basis.
+3. **Resolve the retailer policy once, above the pure function.** Call
+   `retailer_policy_for_url(request.page_url)` from `app/config.py` (Task 2.2) — this is the
+   URL-to-`retailer_key` resolution Low-Level Design §3.2 and §7.1 assign to this service — then run
+   `derive_window` (Task 3.7) over each parsed item with that policy, and attach the deadline, the
+   `window_inferred` flag and the `basis`. Resolving here is what keeps `derive_window` pure; an
+   unknown host resolves to the system default of 30 rather than raising.
 4. A model result that yields no usable order raises `ParseUnusable` — the endpoint reports it rather
    than returning an empty list, because "we could not read this page" and "this page has no orders"
    are different answers to the user.
@@ -2254,12 +2442,16 @@ abstraction that turns a user question into a persisted pause rather than a bloc
 
 **Instructions:**
 1. Create `extension/src/driver/tab.ts` with `TabHandle` exposing `url`, `dom()`, `is_live()`,
-   `navigate()`, and `TabHandleFactory.from_session(session)` / `create(url)`.
+   `navigate()`, and `TabHandleFactory.for_session(tab_id, tab_url)` / `create(url)`. **Use those
+   names**: Low-Level Design §3.3 and §7.2 both call it `for_session` and both pass the two stored
+   values rather than the session object, because corroborating a reused tab id needs the stored
+   *url* to compare against.
 2. `is_live()` asks `chrome.tabs.get` — the handle holds a tab **id**, not a tab object, because the
    worker that created it may be gone. A stale handle reports not live rather than throwing.
-3. Create `extension/src/driver/prompt.ts` with `UserPrompt`: asking the user records the question in
-   the session and **returns**; it does not await. The answer arrives later as a message (Task 5.6),
-   possibly to a different worker instance.
+3. Create `extension/src/driver/prompt.ts` with `UserPrompt`: `ask(question, choices)` records the
+   question in the session, surfaces the prompt and **returns a `PendingQuestion`**; it does not
+   await. The answer arrives later as a message (Task 5.6), re-entering through
+   `ReturnDriver.advance(user_input)`, possibly in a different worker instance. Low-Level Design §3.3.
 4. `// dev-note:` on `UserPrompt`: an `await` here would be a promise the worker cannot keep — it dies
    after ~30s idle and the user takes longer than that.
 5. Unit tests: a handle for a closed tab reports not live; `dom()` on a closed tab fails cleanly;
@@ -2368,11 +2560,23 @@ behaviour.
 **Instructions:**
 1. Create `server/app/routes/__init__.py` and `server/app/routes/health.py` with an `APIRouter`
    exposing `GET /health` returning `{"status": "ok"}`.
-2. `/health` performs **no** upstream call and requires **no** client version — a health check that
-   depends on Bedrock or USPS reports their health, not ours, and a version-gated health check is
-   unusable from a load balancer.
-3. Unit test: the route returns 200 and the documented body.
-4. Reference: Low-Level Design §3.3, §7.1.
+2. `/health` performs **no** upstream call — a health check that depends on Bedrock or USPS reports
+   their health, not ours.
+3. **`/health` is inside the client version gate like every other route** (corrected 2026-08-28,
+   seventh review, CONF-2). This step previously read "requires **no** client version — a
+   version-gated health check is unusable from a load balancer," which contradicted requirements
+   §4.1 ("on every endpoint **including `/health`**"), Low-Level Design §2.1 and §8.2, and Task 3.8
+   step 3 of this very plan. The gate is registered on the **router** in Task 3.8, not per handler,
+   so this route inherits it by construction and there is nothing to add here — but there is
+   something not to do: **do not exclude this route from the router's dependencies, and do not write
+   a test asserting an unheadered request returns 200.** Task 3.8's route-table assertion walks every
+   registered route and would fail. The load-balancer cost is real and is accepted upstream; see
+   Low-Level Design §2.1, which records the consequence and the resolution (a probe that sends the
+   header, never an exemption).
+4. Unit test: the route returns 200 and the documented body **for a request carrying a supported
+   `X-Boomerang-Client-Version`**, and returns 426 `client-too-old` when the header is absent — the
+   same two assertions every other route gets.
+5. Reference: Low-Level Design §2.1, §3.3, §7.1, §8.2; requirements §4.1; decision D16.
 
 **Verification:**
 - `cd server && uv run pytest tests/unit/routes/test_health.py`
@@ -2715,15 +2919,20 @@ a real server.
    person applies during the PoC.
 2. Write the USPS credentials into SSM by hand. If Task 0.2's access has not arrived, deploy with
    `CARRIER_ADAPTER=mock` and confirm the startup log emits the Task 6.5 warning.
-3. Smoke test from a real loaded extension, not `curl`: `/health` responds; one ingest round trip
-   succeeds; and a request from **any other origin is rejected by CORS**. The last one is the
+3. Smoke test from a real loaded extension, not `curl`: `/health` responds **to a request carrying
+   `X-Boomerang-Client-Version`** — the gate covers `/health` too (requirements §4.1), so a bare
+   probe returns 426 and that is the correct behaviour, not a deployment failure; one ingest round
+   trip succeeds; and a request from **any other origin is rejected by CORS**. The last one is the
    assertion that matters — it is the only browser-side control on an unauthenticated endpoint.
 4. Record the deployed Function URL and the measured cold-start time in `docs/spikes/deploy.md`.
    Compare the cold start against NFR-6.4's budget and against Task 0.3's measurement; a cold start
    that breaks the budget is an upstream amendment (decision D25), not a footnote.
 
 **Verification:**
-- `/health` returns 200 over the Function URL.
+- `/health` returns 200 over the Function URL **when the request carries a supported
+  `X-Boomerang-Client-Version`**, and 426 `client-too-old` when it carries none (corrected
+  2026-08-28, seventh review, CONF-2 — the bare-probe form of this check could not pass against a
+  correctly gated deployment).
 - A request with a spoofed `Origin` header is refused.
 - `docs/spikes/deploy.md` records the URL and the cold-start figure.
 
@@ -2936,7 +3145,10 @@ gate, request-id isolation, deadlines, and CORS.
    - two concurrent requests carry distinct request ids and neither's id appears in the other's log
      records;
    - an upstream that exceeds the request deadline returns `upstream-unavailable` rather than hanging;
-   - `GET /health` needs no version header and makes no upstream call;
+   - `GET /health` makes no upstream call, **and is gated like every other route** — a request
+     without `X-Boomerang-Client-Version` returns 426, a request with a supported one returns 200
+     (corrected 2026-08-28, seventh review, CONF-2; this row previously read "needs no version
+     header," contradicting requirements §4.1, Task 3.8 and Task 6.1);
    - a configured origin gets a CORS header and an unconfigured one does not.
 2. Reference: Low-Level Design §8.3, §6.2, §7.1; requirements §4.2, §5.1, NFR-6.1, NFR-6.4, NFR-6.7.
 
@@ -3069,9 +3281,14 @@ carrier, and persist consent before the booking call.
 collected and refused outcomes as distinct results.
 
 **Instructions:**
-1. Implement `cancel_pickup(pickup_id)`: call `DELETE /pickups/{id}`; the server refreshes then
+1. Implement `cancel_pickup(booking_intent_id)`: look the record up by its store key, then call
+   `DELETE /pickups/{confirmation_number}` with the confirmation `promote` attached; the server refreshes then
    cancels, so the extension holds no ETag and never sends one.
-2. On success, settle the local record. On an **already-collected** result — the server's refresh
+2. On success, **delete the local pickup record** — there is no `Cancelled` state to write it into
+   (Low-Level Design §4.5; requirements §2.2, amended seventh review, CONSIST-1). A cancelled pickup
+   and a pickup that was never booked are the same fact, so the record goes and the owning
+   `RETURN_REQUEST` stays exactly where it is, at `LabelReady` with its label still printable. On an
+   **already-collected** result — the server's refresh
    found the box gone — **do not report a cancellation**: mark it collected, move the owning
    `RETURN_REQUEST` to `LabelPrinted` per FR-3.4.6, and tell the user it has already been picked up.
    On `upstream-unavailable`, leave the record unsettled so a retry is possible, and say the pickup
@@ -3079,9 +3296,14 @@ collected and refused outcomes as distinct results.
    holds no ETag and has nothing to do with it.
 3. The local record is updated **after** the server confirms, never optimistically. A pickup that
    exists at USPS and not in our store is the failure mode this ordering avoids.
-4. Unit tests: a successful cancel settles the record and leaves the `RETURN_REQUEST` at `LabelReady`
-   (FR-3.4.6 — cancelling a pickup is not a terminal state for the return); an already-collected result
-   marks collected, reports collected rather than cancelled, and moves the request to `LabelPrinted`;
+4. Unit tests: a successful cancel **deletes** the pickup record — assert a subsequent `get_pickup`
+   returns nothing and that no record is left in any state — and leaves the `RETURN_REQUEST` at
+   `LabelReady` (FR-3.4.6 — cancelling a pickup is not a terminal state for the return); the order it
+   belonged to is evictable again on the next pass, which is the property the deletion buys; an
+   already-collected result marks collected, reports collected rather than cancelled, **and moves the
+   request to `LabelPrinted` in the same `set` as the `mark_collected` write** (Low-Level Design §4.5
+   and §8.2's single-`set` law row — the two are one fact and a worker dying between them leaves a
+   collected pickup whose return still shows a live label);
    a refusal leaves the record unsettled; the extension sends no ETag on any path; a cancel is not
    retried automatically.
 5. Reference: Low-Level Design §4.5; requirements FR-3.4.6, FR-3.4.7; repo `AGENTS.md` rule 3.
@@ -3192,6 +3414,11 @@ gesture, and the standing-permission offer that comes **after** the user has see
 2. Render the ranked list from stored orders through `src/ranking/` (Task 3.11), with the deadline and
    the urgency ordering; items with an undetermined window are shown as undetermined, not as "no
    deadline".
+   - **The popup reads through a `ReadOnlyStore` (Task 4.7), never a `StorageCoordinator`.** Every
+     popup mutation goes over `src/messaging/` to the worker, and every popup request needing the
+     network goes the same way — the popup constructs no `src/api/`, and there is no permitted path
+     from it to the network (Low-Level Design §2.2, §7.2). Holding the write-capable type here is how
+     that rule would first be broken.
 3. **"Scan this page"** is the first-run path: `activeTab` grants access only on a gesture, so the
    button click is what makes injection legal. There is no injection on page load and no `<all_urls>`
    (rule 8).
@@ -3257,8 +3484,9 @@ calendar offer, and the clear-all that warns about a live booking.
 1. **Confirmation screen:** shows the address, the carrier whose postage is on the box, and an
    explicit consent control. Consent is captured here and recorded before the booking call
    (FR-3.4.5a). The screen appears only when a pickup is actually being offered.
-2. **Simulated bookings are labelled as simulated.** A confirmation number carrying the
-   `MockCarrierAdapter` prefix (Task 4.14, published in `contracts/`) renders with a
+2. **Simulated bookings are labelled as simulated.** A confirmation number beginning with
+   `MOCK_CONFIRMATION_PREFIX` — requirements §5.1, value **`SIM-`**, produced by `MockCarrierAdapter`
+   in Task 4.14 and published in `contracts/` — renders with a
    **"simulated — no carrier was contacted"** marker on the confirmation screen and anywhere else the
    booking is shown.
    - **Why this exists.** Under `CARRIER_ADAPTER=mock` — requirements §5.1's default until USPS
@@ -3333,13 +3561,16 @@ reportable. This step list is also the demo script.
       without the affirmation.
    6. **Book the pickup.** Consent is captured before the call. The confirmation screen names a
       **day**, not a window — and carries the **"simulated"** marker, because this is the mock
-      carrier (Task 4.14, decision D22). *A confirmation number rendered without that marker here is
+      carrier and its confirmation number begins with `MOCK_CONFIRMATION_PREFIX` (`SIM-`, requirements
+      §5.1; Task 4.14, decision D22). *A confirmation number rendered without that marker here is
       a failure of this step, not a cosmetic issue.*
    7. **Open the calendar template.** A new tab opens a prefilled Google Calendar event. No Google
       sign-in, no OAuth consent screen appears at any point — if one does, stop and treat it as a
       defect against rules 1 and 2.
-   8. **Cancel the pickup.** The pickup returns to a cancelled state and the return's own state is
-      unaffected.
+   8. **Cancel the pickup.** The pickup **disappears from the popup entirely** — there is no
+      "cancelled" row, because the record is deleted (requirements §2.2, amended seventh review,
+      CONSIST-1) — and the return's own state is unaffected: the label is still listed as printed and
+      still valid for drop-off.
    9. **Reload the extension mid-return** and confirm the driver rehydrates rather than restarting.
    10. **Clear all data** with a live booking and confirm the double-confirmation warns that the
        booked pickup still happens.
@@ -3523,8 +3754,10 @@ second of which exists because of finding CLASS-3.
 
 **Instructions:**
 1. Create `tests/integration/cancellation.test.ts` with rows: a pickup booked and cancelled a day
-   later (clock advanced, not slept) settles locally after the server confirms; a cancel that finds
-   the pickup already collected reports collected rather than cancelled; a cancel refused after a good
+   later (clock advanced, not slept) **deletes the local pickup record** after the server confirms,
+   leaving the `RETURN_REQUEST` at `LabelReady`; a cancel that finds the pickup already collected
+   reports collected rather than cancelled, writing the pickup's `Collected` and the request's
+   `LabelPrinted` in one `set`; a cancel refused after a good
    refresh leaves the record unsettled and says the pickup may still happen.
 2. Assert the extension sends no ETag on any path.
 3. Reference: Low-Level Design §8.3, §4.5; requirements FR-3.4.6, FR-3.4.7.
@@ -3641,26 +3874,59 @@ the requirements actually define.
      budget would simply never have been built. An identifier sweep catches a missing requirement
      citation but not an invented constant, and **the invented constant is the one that compiles**.
      Decision D18.
+   - **The sweep was run by hand on 2026-08-28, against the documents rather than the code, and it
+     found more than D17 did.** Task 2.4's list was wrong in both directions: six constants
+     requirements §5.2 declares were missing from it, three it named were declared nowhere, and one —
+     `STORAGE_CAP_BYTES` — described a cap-driven eviction the low-level design rejects by name. All
+     four fixes are applied above. Two consequences for this task. First, the check is worth more
+     early than late: it needs no code, and every one of these defects would otherwise have been
+     found by an executor mid-batch with the wrong constant already written. Second, **the sweep
+     must run in both directions over the design documents too**, not only over the code — a
+     constant named in a plan task and in no requirements table is exactly the failure that
+     compiles, and `server/app/` and `extension/src/` do not exist yet when the plan is the thing
+     being got right.
    - Maintain a small allowlist for genuinely local constants that are not configuration, with the
      reason inline for each.
-3. Report the lists separately — an uncited requirement, an invented citation, an invented constant
-   and an unused parameter are four different problems with four different fixes.
-4. **Two known, deliberate exemptions**, both in an explicit allowlist with the reason inline:
+3. **Sweep the traceability table as its own direction.** Every `FR-` and `NFR-` id in the
+   requirements must have a row in low-level design §8.4, or an explicit excusal in it. This is not
+   the same check as step 1: FR-3.4.5b was cited twice in §8.2 and had no §8.4 row, so both of step
+   1's directions passed on a document whose traceability table reported a requirement as uncovered.
+   §8.4 is the artefact anyone asking "is this requirement covered?" actually reads.
+4. **Sweep for stale mentions after an amendment, as a named-name search rather than an id search
+   (added 2026-08-28, seventh review).** When any document amends a name — a field, a state, a type,
+   a constant, a section number, an endpoint, a task id, a decision id — the same name almost always
+   appears in the other two documents, and the failure mode is not a fabricated citation but two true
+   sentences that no longer describe one system. The script cannot know which names were amended, so
+   it takes them as arguments: `scripts/citation-sweep.sh --renamed OLD=NEW [...]` greps
+   `design/`, `plan/` and the code for every remaining occurrence of each `OLD` and reports them, and
+   greps each `NEW` so the author can confirm every place now using it means the same thing. It exits
+   non-zero while any `OLD` survives outside an allowlisted amendment log or a struck-through open
+   question — the two places an old name legitimately remains, and where it must say why. Low-level
+   design §9's fourth sweep direction states the standing rule this implements; run it as the last
+   step of any amendment, not as a review round.
+5. Report the lists separately — an uncited requirement, an invented citation, an invented constant,
+   an unused parameter, an untraced requirement and a surviving old name are six different problems
+   with six different fixes.
+6. **Two known, deliberate exemptions**, both in an explicit allowlist with the reason inline:
    - **FR-3.6.2** — the phase-2 dashboard is out of this plan's scope per low-level design §1.
    - **FR-3.6.3** — dashboard-to-extension messaging is cut from PoC scope (decision D6): the
      dashboard origin it requires does not exist and high-level design §11 Q1 leaves the hostname
      undecided.
    Both are unplanned rather than satisfied, and the allowlist is what keeps them visible instead of
    quietly absent.
-5. Wire the script into the `.github/workflows/ci.yml` repo job that Task 1.3 created with a
-   conditional skip; that skip can now be removed.
-6. Reference: Low-Level Design §8.4, §9 Q4; requirements §5.1, §5.2; decisions D6, D17, D18.
+7. Wire the script into the `.github/workflows/ci.yml` repo job that Task 1.3 created with a
+   conditional skip; that skip can now be removed. The `--renamed` mode is author-invoked and does
+   not run in CI — CI has no way to know what was renamed — so wire only steps 1 through 3.
+8. Reference: Low-Level Design §8.4, §9 Q4; requirements §5.1, §5.2; decisions D6, D17, D18.
 
 **Verification:**
 - `bash scripts/citation-sweep.sh` — exits zero with FR-3.6.2 and FR-3.6.3 listed as exemptions and
   nothing else uncited.
 - Introduce a constant named after nothing in §5.1 — the sweep fails; revert.
-- CI runs the sweep unconditionally.
+- Delete one §8.4 row — the sweep reports that requirement as untraced; restore it.
+- `bash scripts/citation-sweep.sh --renamed adapter_step_key=step_key` — exits zero, since that
+  rename was completed on 2026-08-28 and only the amendment logs still name the old field.
+- CI runs steps 1 through 3 unconditionally.
 
 **Requirements covered:** — (this task verifies every other task's citations; FR-3.6.2 and FR-3.6.3 are the two allowlisted exemptions)
 
