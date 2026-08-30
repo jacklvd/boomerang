@@ -27,7 +27,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAN_PATH = REPO_ROOT / "plan" / "boomerang-plan.md"
 TASKS_DIR = REPO_ROOT / "plan" / "tasks"
+REQUIREMENTS_DOC = REPO_ROOT / "design" / "boomerang-requirements.md"
 BASELINE_REF = "cf7e210"
+
+# AUTHORED, NOT DERIVED. The requirements the plan declares as deliberate gaps,
+# with the annotation the hand-written traceability table carried. This is the
+# ONLY sanctioned way for a requirement to have no covering task: the coverage
+# check in ``split-plan.py --verify`` fails on any other uncovered id, and
+# ``build-plan-index.py`` renders any other uncovered id as a loud cell.
+# Adding an entry here is a deliberate, reviewable act.
+DECLARED_GAPS = {
+    "FR-3.6.2": "**— (deliberate gap)**",
+    "FR-3.6.3": "**— (deliberate gap, out of PoC scope)**",
+}
+
+# Requirement ids are declared by their own heading in the requirements doc.
+REQ_HEADING_RE = re.compile(r"^#{2,4} ((?:FR|NFR)-[0-9.]+[a-z]?)\b")
 
 # The eight bold metadata fields every task carries, in document order.
 METADATA_FIELDS = [
@@ -91,6 +106,22 @@ def read_source(source: str) -> str:
         )
         return out.stdout
     return Path(source).read_text()
+
+
+def requirement_ids_from_doc(path: Path = REQUIREMENTS_DOC) -> set[str]:
+    """Every requirement id the requirements document declares as a heading.
+
+    This is the universe the coverage check is taken against: a requirement
+    exists because the design document gives it a heading, not because some
+    task happened to cite it.
+    """
+    if not path.exists():
+        return set()
+    return {
+        m.group(1).rstrip(".")
+        for line in path.read_text().split("\n")
+        if (m := REQ_HEADING_RE.match(line))
+    }
 
 
 def slugify(title: str, limit: int = 50) -> str:

@@ -29,25 +29,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from plan_lib import (  # noqa: E402
     BASELINE_REF,
+    DECLARED_GAPS,
     PLAN_PATH,
-    REPO_ROOT,
     TASKS_DIR,
     HEADING_RE,
     TASK_HEADING_RE,
     load_tasks_from_files,
     parse_id_list,
     read_source,
+    requirement_ids_from_doc,
 )
 
-REQUIREMENTS_DOC = REPO_ROOT / "design" / "boomerang-requirements.md"
-
-# AUTHORED, NOT DERIVED. The two requirements the plan declares as deliberate
-# gaps, with the annotation the hand-written table carried. Any OTHER
-# requirement with no covering task renders as a loud missing-coverage cell.
-DECLARED_GAPS = {
-    "FR-3.6.2": "**— (deliberate gap)**",
-    "FR-3.6.3": "**— (deliberate gap, out of PoC scope)**",
-}
+# ``DECLARED_GAPS`` -- the requirements the plan declares as deliberate gaps --
+# lives in ``plan_lib`` so this renderer and the coverage assertion in
+# ``split-plan.py --verify`` cannot disagree about which gaps are sanctioned.
 
 EN = "–"  # en dash, as used by the original tables
 
@@ -195,11 +190,7 @@ def requirement_universe(records, original_rows) -> list[str]:
     for r in records:
         reqs.update(r["fm"]["requirements_covered"])
     reqs.update(original_rows)
-    if REQUIREMENTS_DOC.exists():
-        for line in REQUIREMENTS_DOC.read_text().split("\n"):
-            m = re.match(r"^#{2,4} ((?:FR|NFR)-[0-9.]+[a-z]?)\b", line)
-            if m:
-                reqs.add(m.group(1).rstrip("."))
+    reqs.update(requirement_ids_from_doc())
     def key(r):
         head, _, rest = r.partition("-")
         nums = re.findall(r"[0-9]+", rest)
@@ -238,6 +229,44 @@ def build_traceability_table(records, original_rows) -> tuple[list[str], list[st
             unit = f"in-task ({', '.join(impl)})"
         out.append(f"| {req} | {impl_cell} | {unit} | {', '.join(integ) if integ else '—'} |")
     return out, uncovered
+
+
+def build_plan_summary_table(records, table: list[str]) -> list[str]:
+    """Rewrite the Plan Summary's Tasks and Tracks columns from the corpus.
+
+    The Batch label and the Theme cell are authored prose and are carried
+    through verbatim; the two count columns are derived, so a task added,
+    moved or re-tracked can never leave the summary asserting a stale number.
+    The ``Tracks`` cell counts distinct ``###`` track headings owned by that
+    batch's tasks -- the same definition the cross-check uses.
+    """
+    order = batch_order(records)
+    out: list[str] = []
+    seen_data = 0
+    for row in table:
+        if re.match(r"^\|[\s:|-]+\|$", row) or seen_data == 0:
+            # Header row and separator row: verbatim.
+            out.append(row)
+            seen_data += not re.match(r"^\|[\s:|-]+\|$", row)
+            continue
+        cells = row.strip().strip("|").split("|")
+        if len(cells) < 4:
+            out.append(row)
+            continue
+        label_cell, tasks_cell, tracks_cell = cells[0], cells[1], cells[2]
+        theme_cell = "|".join(cells[3:])
+        label = label_cell.strip().strip("*` ")
+        if label.lower() == "total":
+            tasks_cell = f" **{len(records)}** "
+        else:
+            key = "deployment" if label == "—" else label
+            if key in order:
+                rows_b = [r for r in records if str(r["fm"]["batch"]) == key]
+                tracks = {r["fm"]["track_heading"] for r in rows_b if r["fm"]["track_heading"]}
+                tasks_cell = f" {len(rows_b)} "
+                tracks_cell = f" {len(tracks)} "
+        out.append(f"|{label_cell}|{tasks_cell}|{tracks_cell}|{theme_cell}|")
+    return out
 
 
 DERIVED_MARKER = "**Derived from the task files.**"
@@ -600,7 +629,13 @@ def build_index(records, prose_lines: list[str]) -> str:
     out.extend(gen_table)
     out.extend(after)
 
-    verbatim(find_block(blocks, "## Plan Summary"))
+    # ---- Plan Summary --------------------------------------------------
+    h = find_block(blocks, "## Plan Summary")
+    before, table, after = split_table(prose_lines[h["i"] + 1 : h["end"]])
+    out.append(h["text"])
+    out.extend(before)
+    out.extend(build_plan_summary_table(records, table))
+    out.extend(after)
 
     text = "\n".join(out)
     return re.sub(r"\n{4,}", "\n\n\n", text).rstrip("\n") + "\n"
@@ -628,11 +663,28 @@ def main() -> int:
         print(line)
     print("=" * 72)
 
-    if args.check_only:
-        return 0
-
     prose = read_source(args.prose_source).split("\n")
     text = build_index(records, prose)
+
+    if args.check_only:
+        # The index is GENERATED. A hand-edit to any derived table -- the
+        # tracker, the traceability matrix, the per-track bullet lists, the
+        # Plan Summary counts -- is erased by the next rebuild, so it is a
+        # silent divergence between what a reader sees and what the corpus
+        # says. Rebuilding into memory and comparing catches that.
+        current = Path(args.out).read_text() if Path(args.out).exists() else ""
+        stale = current != text
+        print()
+        print(f"[{'FAIL' if stale else 'PASS'}] {args.out} is up to date with the task files"
+              + (" -- rerun scripts/build-plan-index.py" if stale else ""))
+        if stale:
+            import difflib
+            for line in list(difflib.unified_diff(
+                    current.split("\n"), text.split("\n"),
+                    fromfile="on-disk", tofile="rebuilt", lineterm="", n=1))[:60]:
+                print(f"       {line}")
+        return 1 if stale else 0
+
     Path(args.out).write_text(text)
     print(f"\nwrote {args.out} ({len(text.splitlines())} lines)")
     return 0

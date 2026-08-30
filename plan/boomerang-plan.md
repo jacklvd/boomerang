@@ -320,7 +320,7 @@ workspaces trades a risk reduction for a schedule loss.
 
 ### Track B: Extension workspace [extension]
 
-- [Task 1.2: WXT project scaffold and MV3 manifest](tasks/batch-01/1.02-wxt-project-scaffold-and-mv3-manifest.md) — prerequisites: none · conflicts: none
+- [Task 1.2: WXT project scaffold and MV3 manifest](tasks/batch-01/1.02-wxt-project-scaffold-and-mv3-manifest.md) — prerequisites: none · conflicts: 1.4
 - [Task 1.4: Generate and pin the extension keypairs](tasks/batch-01/1.04-generate-and-pin-the-extension-keypairs.md) — prerequisites: 1.2 · conflicts: 1.2
 
 ---
@@ -426,7 +426,7 @@ After all tracks complete:
 
 ### Track C: Server dependencies and version gate [server]
 
-- [Task 3.8: `app/deps.py` — app-state accessors and the client version gate](tasks/batch-03/3.08-app-deps-py-app-state-accessors-and-the-client.md) — prerequisites: 2.1, 2.2 · conflicts: none
+- [Task 3.8: `app/deps.py` — app-state accessors and the `X-Boomerang-Client-Version` gate](tasks/batch-03/3.08-app-deps-py-app-state-accessors-and-the-x.md) — prerequisites: 2.1, 2.2 · conflicts: none
 
 ---
 
@@ -458,7 +458,7 @@ After all tracks complete:
 ### Track G: Extension retailer adapters [extension]
 
 - [Task 3.13: `src/adapters/` — adapter type and registry](tasks/batch-03/3.13-src-adapters-adapter-type-and-registry.md) — prerequisites: 2.4 · conflicts: 3.14
-- [Task 3.14: The PoC retailer adapter](tasks/batch-03/3.14-the-poc-retailer-adapter.md) — prerequisites: 2.8, 3.13 · conflicts: 3.13
+- [Task 3.14: The PoC retailer adapter](tasks/batch-03/3.14-the-poc-retailer-adapter.md) — prerequisites: 0.1, 2.8, 3.13 · conflicts: 3.13
 
 ---
 
@@ -507,20 +507,20 @@ After all tracks complete:
 
 - [Task 4.3: `app/carriers/usps/token.py` — OAuth token provider](tasks/batch-04/4.03-app-carriers-usps-token-py-oauth-token-provider.md) — prerequisites: 2.1, 2.2 · conflicts: 4.4, 4.5
 - [Task 4.4: `app/carriers/usps/adapter.py` — `UspsAdapter`](tasks/batch-04/4.04-app-carriers-usps-adapter-py-uspsadapter.md) — prerequisites: 3.4, 3.5, 4.3 · conflicts: 4.3, 4.5
-- [Task 4.5: `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter`](tasks/batch-04/4.05-app-carriers-usps-scripted-py-scripteduspsadapter.md) — prerequisites: 3.4, 3.5 · conflicts: 4.3, 4.4
+- [Task 4.5: `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter` (test double)](tasks/batch-04/4.05-app-carriers-usps-scripted-py-scripteduspsadapter.md) — prerequisites: 3.4, 3.5 · conflicts: 4.3, 4.4
 
 ---
 
 ### Track E: Server runtime mock carrier [server]
 
-- [Task 4.14: `app/carriers/mock.py` — `MockCarrierAdapter`](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter.md) — prerequisites: 3.4, 3.5 · conflicts: none
+- [Task 4.14: `app/carriers/mock.py` — `MockCarrierAdapter` (runtime stub)](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter-runtime.md) — prerequisites: 3.4, 3.5, 3.18 · conflicts: none
 
 ---
 
 ### Track C: Extension storage [extension]
 
-- [Task 4.6: `src/storage/` — key layout, defensive read, and rebuild](tasks/batch-04/4.06-src-storage-key-layout-defensive-read-and-rebuild.md) — prerequisites: 2.4, 2.6 · conflicts: 4.7
-- [Task 4.7: `StorageCoordinator.transact` — the serialising queue](tasks/batch-04/4.07-storagecoordinator-transact-the-serialising-queue.md) — prerequisites: 4.6 · conflicts: 4.6
+- [Task 4.6: `src/storage/` — key layout, defensive read, rebuild, and the barrel](tasks/batch-04/4.06-src-storage-key-layout-defensive-read-rebuild-and.md) — prerequisites: 2.4, 2.6 · conflicts: 4.7
+- [Task 4.7: `StorageCoordinator.transact` — the serialising queue](tasks/batch-04/4.07-storagecoordinator-transact-the-serialising-queue.md) — prerequisites: 4.6 · conflicts: 4.6, 4.12
 - [Task 4.8: `OrderRepository`](tasks/batch-04/4.08-orderrepository.md) — prerequisites: 4.7 · conflicts: none
 - [Task 4.9: `ReturnRepository`](tasks/batch-04/4.09-returnrepository.md) — prerequisites: 4.7 · conflicts: none
 - [Task 4.10: `PickupRepository`](tasks/batch-04/4.10-pickuprepository.md) — prerequisites: 4.7 · conflicts: none
@@ -601,7 +601,7 @@ After all tracks complete:
 - [Task 6.2: `app/routes/orders.py` — `POST /orders/ingest`](tasks/batch-06/6.02-app-routes-orders-py-post-orders-ingest.md) — prerequisites: 3.8, 5.1, 6.1 · conflicts: 6.1, 6.3, 6.4
 - [Task 6.3: `app/routes/returns.py` — `POST /returns/next-step`](tasks/batch-06/6.03-app-routes-returns-py-post-returns-next-step.md) — prerequisites: 3.8, 5.2, 6.2 · conflicts: 6.1, 6.2, 6.4
 - [Task 6.4: `app/routes/pickups.py` — the four pickup endpoints](tasks/batch-06/6.04-app-routes-pickups-py-the-four-pickup-endpoints.md) — prerequisites: 3.8, 5.3, 6.3 · conflicts: 6.1, 6.2, 6.3
-- [Task 6.5: `app/main.py` — lifespan, handlers, CORS, Mangum](tasks/batch-06/6.05-app-main-py-lifespan-handlers-cors-mangum.md) — prerequisites: 2.2, 3.6, 4.2, 4.4, 4.14, 6.1, 6.2, 6.3, 6.4 · conflicts: none
+- [Task 6.5: `app/main.py` — lifespan, handlers, CORS, adapter selection, Mangum](tasks/batch-06/6.05-app-main-py-lifespan-handlers-cors-adapter.md) — prerequisites: 2.2, 3.6, 4.2, 4.4, 4.14, 6.1, 6.2, 6.3, 6.4 · conflicts: none
 
 ---
 
@@ -700,7 +700,7 @@ After all tracks complete:
 
 - [Task 8.3: Popup shell, ranked list, scan gesture, permission offer](tasks/batch-08/8.03-popup-shell-ranked-list-scan-gesture-permission.md) — prerequisites: 3.11, 3.17, 8.2 · conflicts: 8.4, 8.5
 - [Task 8.4: Popup return surfaces — choice, affirmation, stuck](tasks/batch-08/8.04-popup-return-surfaces-choice-affirmation-stuck.md) — prerequisites: 8.3 · conflicts: 8.3, 8.5
-- [Task 8.5: Popup pickup, calendar, and clear-all surfaces](tasks/batch-08/8.05-popup-pickup-calendar-and-clear-all-surfaces.md) — prerequisites: 3.12, 4.12, 8.4 · conflicts: 8.3, 8.4
+- [Task 8.5: Popup pickup, calendar, clear-all, and the simulated-booking marker](tasks/batch-08/8.05-popup-pickup-calendar-clear-all-and-the-simulated.md) — prerequisites: 3.12, 4.12, 8.4 · conflicts: 8.3, 8.4
 
 ---
 
@@ -730,7 +730,7 @@ After all tracks complete:
 
 ### Track A: Harness [extension]
 
-- [Task 9.1: End-to-end extension test harness](tasks/batch-09/9.01-end-to-end-extension-test-harness.md) — prerequisites: 8.5 · conflicts: none
+- [Task 9.1: End-to-end extension test harness](tasks/batch-09/9.01-end-to-end-extension-test-harness.md) — prerequisites: 8.6 · conflicts: none
 
 ---
 
@@ -765,7 +765,7 @@ After all tracks complete:
 
 ### Track B: Citation sweep
 
-- [Task 10.2: Requirement citation sweep](tasks/batch-10/10.02-requirement-citation-sweep.md) — prerequisites: 7.6, 9.7 · conflicts: none
+- [Task 10.2: Requirement and configuration citation sweep](tasks/batch-10/10.02-requirement-and-configuration-citation-sweep.md) — prerequisites: 7.6, 9.7 · conflicts: none
 
 ---
 
@@ -804,7 +804,7 @@ named file.
 | [0.2](tasks/batch-00/0.02-file-the-usps-api-access-request.md) | File the USPS API access request | None | None | 0.1 | [ ] |
 | [0.3](tasks/batch-00/0.03-measure-bedrock-parse-and-action-latency.md) | Measure Bedrock parse and action latency | 0.1 | None | None | [ ] |
 | [1.1](tasks/batch-01/1.01-reconcile-the-existing-server-test-harness-with.md) | Reconcile the existing server test harness with the §8 layout | None | None | 1.2 | [ ] |
-| [1.2](tasks/batch-01/1.02-wxt-project-scaffold-and-mv3-manifest.md) | WXT project scaffold and MV3 manifest | None | None | 1.1 | [ ] |
+| [1.2](tasks/batch-01/1.02-wxt-project-scaffold-and-mv3-manifest.md) | WXT project scaffold and MV3 manifest | None | 1.4 | 1.1 | [ ] |
 | [1.3](tasks/batch-01/1.03-continuous-integration-for-both-workspaces.md) | Continuous integration for both workspaces | None | None | 1.1, 1.2 | [ ] |
 | [1.4](tasks/batch-01/1.04-generate-and-pin-the-extension-keypairs.md) | Generate and pin the extension keypairs | 1.2 | 1.2 | 1.1, 1.3 | [ ] |
 | [1.5](tasks/batch-01/1.05-extension-coverage-floor-and-pre-commit-hook.md) | Extension coverage floor and pre-commit hook | 1.2 | None | 1.1, 1.3, 1.4 | [ ] |
@@ -823,13 +823,13 @@ named file.
 | [3.5](tasks/batch-03/3.05-app-carriers-base-py-the-carrieradapter-protocol.md) | `app/carriers/base.py` — the `CarrierAdapter` protocol | 3.4 | None | 3.6, 3.8–3.17 | [ ] |
 | [3.6](tasks/batch-03/3.06-app-middleware-py-request-id.md) | `app/middleware.py` — request id | 2.3 | None | 3.1–3.5, 3.8–3.17 | [ ] |
 | [3.7](tasks/batch-03/3.07-app-services-window-py-return-window-derivation.md) | `app/services/window.py` — return-window derivation and urgency | 3.2 | None | 3.6, 3.8–3.17 | [ ] |
-| [3.8](tasks/batch-03/3.08-app-deps-py-app-state-accessors-and-the-client.md) | `app/deps.py` — app-state accessors and the client version gate | 2.1, 2.2 | None | 3.1–3.6, 3.9–3.17 | [ ] |
+| [3.8](tasks/batch-03/3.08-app-deps-py-app-state-accessors-and-the-x.md) | `app/deps.py` — app-state accessors and the `X-Boomerang-Client-Version` gate | 2.1, 2.2 | None | 3.1–3.6, 3.9–3.17 | [ ] |
 | [3.9](tasks/batch-03/3.09-src-extract-subtree-selection-and-sanitisation.md) | `src/extract/` — subtree selection and sanitisation | 2.4, 2.5, 2.8 | 3.10 | 3.1–3.8, 3.11–3.17 | [ ] |
 | [3.10](tasks/batch-03/3.10-src-extract-the-fail-closed-egress-scan.md) | `src/extract/` — the fail-closed egress scan | 3.9 | 3.9 | 3.1–3.8, 3.11–3.17 | [ ] |
 | [3.11](tasks/batch-03/3.11-src-ranking-urgency-ordering.md) | `src/ranking/` — urgency ordering | 2.4 | None | 3.1–3.10, 3.12–3.17 | [ ] |
 | [3.12](tasks/batch-03/3.12-src-calendar-template-url-and-ics.md) | `src/calendar/` — template URL and `.ics` | 2.4, 2.5 | None | 3.1–3.11, 3.13–3.17 | [ ] |
 | [3.13](tasks/batch-03/3.13-src-adapters-adapter-type-and-registry.md) | `src/adapters/` — adapter type and registry | 2.4 | 3.14 | 3.1–3.12, 3.15–3.17 | [ ] |
-| [3.14](tasks/batch-03/3.14-the-poc-retailer-adapter.md) | The PoC retailer adapter | 2.8, 3.13 | 3.13 | 3.1–3.12, 3.15–3.17 | [ ] |
+| [3.14](tasks/batch-03/3.14-the-poc-retailer-adapter.md) | The PoC retailer adapter | 0.1, 2.8, 3.13 | 3.13 | 3.1–3.12, 3.15–3.17 | [ ] |
 | [3.15](tasks/batch-03/3.15-src-validation-the-action-validator.md) | `src/validation/` — the action validator | 2.4, 3.13 | 3.16 | 3.1–3.12, 3.17 | [ ] |
 | [3.16](tasks/batch-03/3.16-src-validation-the-order-response-validator.md) | `src/validation/` — the order response validator | 2.4 | 3.15 | 3.1–3.12, 3.17 | [ ] |
 | [3.17](tasks/batch-03/3.17-src-permissions-two-tier-permission-state.md) | `src/permissions/` — two-tier permission state | 2.4, 2.7 | None | 3.1–3.16 | [ ] |
@@ -838,16 +838,16 @@ named file.
 | [4.2](tasks/batch-04/4.02-app-bedrock-py-settings-driven-client-and-per.md) | `app/bedrock.py` — settings-driven client and per-call-site models | 2.2 | 4.1 | 4.3–4.13 | [ ] |
 | [4.3](tasks/batch-04/4.03-app-carriers-usps-token-py-oauth-token-provider.md) | `app/carriers/usps/token.py` — OAuth token provider | 2.1, 2.2 | 4.4, 4.5 | 4.1, 4.2, 4.6–4.13 | [ ] |
 | [4.4](tasks/batch-04/4.04-app-carriers-usps-adapter-py-uspsadapter.md) | `app/carriers/usps/adapter.py` — `UspsAdapter` | 3.4, 3.5, 4.3 | 4.3, 4.5 | 4.1, 4.2, 4.6–4.13 | [ ] |
-| [4.5](tasks/batch-04/4.05-app-carriers-usps-scripted-py-scripteduspsadapter.md) | `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter` | 3.4, 3.5 | 4.3, 4.4 | 4.1, 4.2, 4.6–4.14 | [ ] |
-| [4.6](tasks/batch-04/4.06-src-storage-key-layout-defensive-read-and-rebuild.md) | `src/storage/` — key layout, defensive read, and rebuild | 2.4, 2.6 | 4.7 | 4.13 | [ ] |
-| [4.7](tasks/batch-04/4.07-storagecoordinator-transact-the-serialising-queue.md) | `StorageCoordinator.transact` — the serialising queue | 4.6 | 4.6 | 4.13 | [ ] |
+| [4.5](tasks/batch-04/4.05-app-carriers-usps-scripted-py-scripteduspsadapter.md) | `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter` (test double) | 3.4, 3.5 | 4.3, 4.4 | 4.1, 4.2, 4.6–4.14 | [ ] |
+| [4.6](tasks/batch-04/4.06-src-storage-key-layout-defensive-read-rebuild-and.md) | `src/storage/` — key layout, defensive read, rebuild, and the barrel | 2.4, 2.6 | 4.7 | 4.13 | [ ] |
+| [4.7](tasks/batch-04/4.07-storagecoordinator-transact-the-serialising-queue.md) | `StorageCoordinator.transact` — the serialising queue | 4.6 | 4.6, 4.12 | 4.13 | [ ] |
 | [4.8](tasks/batch-04/4.08-orderrepository.md) | `OrderRepository` | 4.7 | None | 4.9–4.11, 4.13 | [ ] |
 | [4.9](tasks/batch-04/4.09-returnrepository.md) | `ReturnRepository` | 4.7 | None | 4.8, 4.10, 4.11, 4.13 | [ ] |
 | [4.10](tasks/batch-04/4.10-pickuprepository.md) | `PickupRepository` | 4.7 | None | 4.8, 4.9, 4.11, 4.13 | [ ] |
 | [4.11](tasks/batch-04/4.11-addressrepository-and-sessionstore.md) | `AddressRepository` and `SessionStore` | 4.7 | None | 4.8–4.10, 4.13 | [ ] |
 | [4.12](tasks/batch-04/4.12-coordinator-cross-entity-operations-eviction-and.md) | Coordinator cross-entity operations — eviction and clear-all | 4.8, 4.9, 4.10, 4.11 | 4.7 | 4.13 | [ ] |
 | [4.13](tasks/batch-04/4.13-src-api-the-typed-server-client.md) | `src/api/` — the typed server client | 2.5, 3.15, 3.16, 3.18 | None | 4.6–4.12, 4.14 | [ ] |
-| [4.14](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter.md) | `app/carriers/mock.py` — `MockCarrierAdapter` | 3.4, 3.5 | None | 4.1–4.13 | [ ] |
+| [4.14](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter-runtime.md) | `app/carriers/mock.py` — `MockCarrierAdapter` (runtime stub) | 3.4, 3.5, 3.18 | None | 4.1–4.13 | [ ] |
 | [5.1](tasks/batch-05/5.01-app-services-ingest-py-ingestservice.md) | `app/services/ingest.py` — `IngestService` | 2.1, 3.2, 3.7, 4.1, 4.2 | None | 5.2–5.6 | [ ] |
 | [5.2](tasks/batch-05/5.02-app-services-action-py-actionservice.md) | `app/services/action.py` — `ActionService` | 2.1, 3.3, 4.1, 4.2 | None | 5.1, 5.3–5.6 | [ ] |
 | [5.3](tasks/batch-05/5.03-app-services-pickup-py-pickupservice.md) | `app/services/pickup.py` — `PickupService` | 2.1, 3.4, 3.5 | None | 5.1, 5.2, 5.4–5.6 | [ ] |
@@ -858,7 +858,7 @@ named file.
 | [6.2](tasks/batch-06/6.02-app-routes-orders-py-post-orders-ingest.md) | `app/routes/orders.py` — `POST /orders/ingest` | 3.8, 5.1, 6.1 | 6.1, 6.3, 6.4 | 6.6–6.8 | [ ] |
 | [6.3](tasks/batch-06/6.03-app-routes-returns-py-post-returns-next-step.md) | `app/routes/returns.py` — `POST /returns/next-step` | 3.8, 5.2, 6.2 | 6.1, 6.2, 6.4 | 6.6–6.8 | [ ] |
 | [6.4](tasks/batch-06/6.04-app-routes-pickups-py-the-four-pickup-endpoints.md) | `app/routes/pickups.py` — the four pickup endpoints | 3.8, 5.3, 6.3 | 6.1, 6.2, 6.3 | 6.6–6.8 | [ ] |
-| [6.5](tasks/batch-06/6.05-app-main-py-lifespan-handlers-cors-mangum.md) | `app/main.py` — lifespan, handlers, CORS, Mangum | 2.2, 3.6, 4.2, 4.4, 4.14, 6.1, 6.2, 6.3, 6.4 | None | 6.6–6.8 | [ ] |
+| [6.5](tasks/batch-06/6.05-app-main-py-lifespan-handlers-cors-adapter.md) | `app/main.py` — lifespan, handlers, CORS, adapter selection, Mangum | 2.2, 3.6, 4.2, 4.4, 4.14, 6.1, 6.2, 6.3, 6.4 | None | 6.6–6.8 | [ ] |
 | [6.6](tasks/batch-06/6.06-returndriver-construction-transition-and-start.md) | `ReturnDriver` — construction, `transition`, and `start` | 4.9, 4.10, 4.11, 5.4, 5.5 | 6.7, 6.8 | 6.1–6.5 | [ ] |
 | [6.7](tasks/batch-06/6.07-state-machine-edges-and-rehydration.md) | State machine edges and rehydration | 6.6 | 6.6, 6.8 | 6.1–6.5 | [ ] |
 | [6.8](tasks/batch-06/6.08-selector-first-step-loop-and-the-model-fallback.md) | Selector-first step loop and the model fallback | 3.10, 4.13, 5.5, 6.7 | 6.6, 6.7 | 6.1–6.5 | [ ] |
@@ -879,9 +879,9 @@ named file.
 | [8.2](tasks/batch-08/8.02-entrypoints-background-ts-the-worker-wiring-graph.md) | `entrypoints/background.ts` — the worker wiring graph | 3.17, 4.12, 5.6, 7.10, 8.1 | None | 8.3 | [ ] |
 | [8.3](tasks/batch-08/8.03-popup-shell-ranked-list-scan-gesture-permission.md) | Popup shell, ranked list, scan gesture, permission offer | 3.11, 3.17, 8.2 | 8.4, 8.5 | None | [ ] |
 | [8.4](tasks/batch-08/8.04-popup-return-surfaces-choice-affirmation-stuck.md) | Popup return surfaces — choice, affirmation, stuck | 8.3 | 8.3, 8.5 | None | [ ] |
-| [8.5](tasks/batch-08/8.05-popup-pickup-calendar-and-clear-all-surfaces.md) | Popup pickup, calendar, and clear-all surfaces | 3.12, 4.12, 8.4 | 8.3, 8.4 | None | [ ] |
+| [8.5](tasks/batch-08/8.05-popup-pickup-calendar-clear-all-and-the-simulated.md) | Popup pickup, calendar, clear-all, and the simulated-booking marker | 3.12, 4.12, 8.4 | 8.3, 8.4 | None | [ ] |
 | [8.6](tasks/batch-08/8.06-walk-the-whole-product-by-hand-in-a-real-browser.md) | Walk the whole product by hand in a real browser | 8.5 | None | None | [ ] |
-| [9.1](tasks/batch-09/9.01-end-to-end-extension-test-harness.md) | End-to-end extension test harness | 8.5 | None | None | [ ] |
+| [9.1](tasks/batch-09/9.01-end-to-end-extension-test-harness.md) | End-to-end extension test harness | 8.6 | None | None | [ ] |
 | [9.2](tasks/batch-09/9.02-ingestion-and-permission-rows.md) | Ingestion and permission rows | 9.1 | None | 9.3–9.7 | [ ] |
 | [9.3](tasks/batch-09/9.03-driving-rows.md) | Driving rows | 9.1 | None | 9.2, 9.4–9.7 | [ ] |
 | [9.4](tasks/batch-09/9.04-state-machine-and-terminal-rows.md) | State machine and terminal rows | 9.1 | None | 9.2, 9.3, 9.5–9.7 | [ ] |
@@ -889,7 +889,7 @@ named file.
 | [9.6](tasks/batch-09/9.06-cancellation-rows.md) | Cancellation rows | 9.1 | None | 9.2–9.5, 9.7 | [ ] |
 | [9.7](tasks/batch-09/9.07-platform-rows.md) | Platform rows | 9.1 | None | 9.2–9.6 | [ ] |
 | [10.1](tasks/batch-10/10.01-prod-bundle-assertion-in-ci.md) | Prod-bundle assertion in CI | 1.4, 8.5 | None | 10.2, 10.3 | [ ] |
-| [10.2](tasks/batch-10/10.02-requirement-citation-sweep.md) | Requirement citation sweep | 7.6, 9.7 | None | 10.1, 10.3 | [ ] |
+| [10.2](tasks/batch-10/10.02-requirement-and-configuration-citation-sweep.md) | Requirement and configuration citation sweep | 7.6, 9.7 | None | 10.1, 10.3 | [ ] |
 | [10.3](tasks/batch-10/10.03-enforce-the-module-dependency-graphs.md) | Enforce the module dependency graphs | 6.5, 8.5 | None | 10.1, 10.2 | [ ] |
 **Eligible tasks** (nothing started yet — Batch 0 has no prerequisites):
 - Task 0.1: Walk the retailer return flow by hand
@@ -1077,7 +1077,7 @@ about the shipped bundle and the module graph.
 | FR-3.4.4 | 5.3, 7.9 | in-task (5.3, 7.9) | 7.4, 9.5 |
 | FR-3.4.5 | 3.4, 4.4, 4.10, 5.3, 7.9, 8.5, I.3 | in-task (3.4, 4.4, 4.10, 5.3, 7.9, 8.5, I.3) | 7.4, 9.5 |
 | FR-3.4.5a | 3.4, 4.10, 7.9, 8.5 | in-task (3.4, 4.10, 7.9, 8.5) | 9.5 |
-| FR-3.4.5b | **— NO TASK CITES THIS REQUIREMENT** | — | — |
+| FR-3.4.5b | 4.14, 8.5 | in-task (4.14, 8.5) | — |
 | FR-3.4.6 | 4.4, 4.10, 5.3, 6.4, 7.10, 8.5, I.3 | in-task (4.4, 4.10, 5.3, 6.4, 7.10, 8.5, I.3) | 7.5, 9.6 |
 | FR-3.4.7 | 7.9, 7.10, 8.5 | in-task (7.9, 7.10, 8.5) | 7.4, 7.5, 9.5, 9.6 |
 | FR-3.4.8 | 2.1, 3.4, 3.5, 4.4, 4.11, 5.3, 6.4, 7.9, 8.5, I.3 | in-task (as listed) | 7.4, 9.5 |
@@ -1094,10 +1094,10 @@ about the shipped bundle and the module graph.
 | FR-3.7.3 | 3.17, 8.3 | in-task (3.17, 8.3) | 9.2 |
 | NFR-6.1 | 2.3, 2.8, 3.1, 3.6, 3.10, 4.12, 8.5 | in-task (2.3, 2.8, 3.1, 3.6, 3.10, 4.12, 8.5) | 7.2, 7.6 |
 | NFR-6.2 | 7.9 | in-task (7.9) | 9.5 |
-| NFR-6.3 | 2.1, 2.8, 3.5, 3.16, 4.2, 4.5, 4.13, 6.1, 6.7, 8.2 | in-task (as listed) | 9.7, 10.3 |
+| NFR-6.3 | 2.1, 2.8, 3.5, 3.16, 4.2, 4.5, 4.13, 4.14, 6.1, 6.7, 8.2 | in-task (as listed) | 9.7, 10.3 |
 | NFR-6.4 | 2.5, 5.1, 6.8, 8.4 | in-task (2.5, 5.1, 6.8, 8.4) | 7.6, 9.7, I.2 |
 | NFR-6.5 | 1.2, 1.4, 2.2, 3.16, 4.3, 4.6, 4.12, 5.6, 6.5, I.1 | in-task (as listed) | 10.1, 10.3, I.2 |
-| NFR-6.6 | 2.2, 4.2, 4.3, 6.5, I.1 | in-task (2.2, 4.2, 4.3, 6.5, I.1) | 10.1 |
+| NFR-6.6 | 2.2, 4.2, 4.3, 6.5, I.1 | in-task (2.2, 4.2, 4.3, 6.5, I.1) | I.2 |
 | NFR-6.7 | 2.2, 6.1, 6.5, I.1 | in-task (2.2, 6.1, 6.5, I.1) | 7.6 |
 
 **Two gaps, stated rather than hidden.** FR-3.6.2 (landing page and install funnel) has no task. It
@@ -1132,14 +1132,14 @@ FR ones.
 
 | Batch | Tasks | Tracks | Theme |
 |-------|-------|--------|-------|
-| 0 | 3 | 3 | De-risking — the retailer flow, USPS access, and Bedrock latency, before anything is built on them |
-| 1 | 5 | 2 | Scaffolding — both workspaces exist, CI runs, the extension IDs are pinned, coverage is enforced |
+| 0 | 3 | 2 | De-risking — the retailer flow, USPS access, and Bedrock latency, before anything is built on them |
+| 1 | 5 | 4 | Scaffolding — both workspaces exist, CI runs, the extension IDs are pinned, coverage is enforced |
 | 2 | 8 | 7 | Foundations — errors, config, logging, shared types, and the test fakes |
 | 3 | 18 | 11 | Leaf modules — wire models, carrier protocol, extraction, ranking, validation, and the frozen contracts |
-| 4 | 14 | 6 | Adapters and stores — Bedrock, USPS, the mock carrier, and the whole storage layer |
+| 4 | 14 | 5 | Adapters and stores — Bedrock, USPS, the mock carrier, and the whole storage layer |
 | 5 | 6 | 5 | Services — the three server services and the driver's collaborators |
 | 6 | 8 | 2 | Assembly — routes and app wiring; the return state machine |
-| — | 3 | 1 | **Deployment track** — the Lambda topology, a live smoke test, and USPS sandbox reconciliation |
+| — | 3 | 0 | **Deployment track** — the Lambda topology, a live smoke test, and USPS sandbox reconciliation |
 | 7 | 10 | 3 | Server integration tests, and the return flows end to end in the worker |
 | 8 | 6 | 3 | Entrypoints — content script, background worker, popup surfaces, and the manual acceptance gate |
 | 9 | 7 | 2 | Extension integration tests across all six §8.3 row groups |

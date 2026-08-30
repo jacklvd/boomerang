@@ -16,8 +16,8 @@ conflicts_with: []
 conflicts_with_raw: "None"
 parallel_with: []
 parallel_with_raw: "All of Batches 7–10"
-requirements_covered: ["NFR-6.4", "NFR-6.5"]
-requirements_covered_raw: "NFR-6.4, NFR-6.5"
+requirements_covered: ["NFR-6.4", "NFR-6.5", "NFR-6.6"]
+requirements_covered_raw: "NFR-6.4, NFR-6.5, NFR-6.6"
 sections_covered: []
 status: "not_started"
 ---
@@ -35,7 +35,9 @@ a real server.
 **Instructions:**
 1. Apply to `dev`. State is local today — `infra/AGENTS.md` warns that a second person applying will
    corrupt it, so either move to the S3 backend it sketches or make it explicit that exactly one
-   person applies during the PoC.
+   person applies during the PoC. This apply is where NFR-6.6's topology stops being a
+   `terraform plan` and becomes a running deployment — low-level design §8.4 names Task I.1
+   and this task as that requirement's two owners.
 2. Write the USPS credentials into SSM by hand. If Task 0.2's access has not arrived, deploy with
    `CARRIER_ADAPTER=mock` and confirm the startup log emits the Task 6.5 warning.
 3. Smoke test from a real loaded extension, not `curl`: `/health` responds **to a request carrying
@@ -55,4 +57,4 @@ a real server.
 - A request with a spoofed `Origin` header is refused.
 - `docs/spikes/deploy.md` records the URL and the cold-start figure.
 
-**Requirements covered:** NFR-6.4, NFR-6.5
+**Requirements covered:** NFR-6.4, NFR-6.5, NFR-6.6
