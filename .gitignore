@@ -14,3 +14,7 @@ Thumbs.db
 
 # husky generates this on install
 .husky/_/
+
+# Python bytecode (scripts/)
+__pycache__/
+*.pyc
