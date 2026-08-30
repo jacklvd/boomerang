@@ -1,0 +1,3248 @@
+# Boomerang — Low-Level Design
+
+> **Status:** Implementation-ready specification.
+> Upstream: [requirements](boomerang-requirements.md) and
+> [high-level design](boomerang-high-level-design.md). Where this document and those disagree,
+> **they win** — this one refines, it does not re-decide.
+> Repo conventions live in the per-workspace `AGENTS.md` files and are not repeated here.
+>
+> **Section references.** A bare `§n` always means a section of *this* document. A section of an
+> upstream document is always written with the document named — "requirements §4.2", "high-level
+> design §6.3". All three documents have a §4.2 and a §5.2, so an unqualified number was ambiguous
+> in the first draft of this document and is now reserved for local use.
+
+---
+
+## 1. Overview
+
+> **Revised 2026-08-27, from the implementation-plan review** recorded in
+> [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md). That review decomposed this
+> document into 91 tasks and, in doing so, found things a reader of the design alone could not:
+> a class serving two incompatible roles, a header three modules had to agree on that no document
+> named, a serial chain that was an export list rather than an invariant, and a requirement whose
+> only cost fell on the manifest. The amendments are marked in place, and §10 carries the full list.
+> **`Dn` in those markings means a decision in that record** — not the `D1`–`D7` product decisions in
+> [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), which are a separate and older series.
+
+This document specifies module structure, type design, collaboration and testing for the two
+surfaces that carry the PoC's critical path:
+
+| Surface | Covered here | Why |
+|---|---|---|
+| **Extension** (WXT, MV3, TypeScript) | Fully | Owns ingestion, the return driver, all persistent state, and most of the functional requirements |
+| **Server** (FastAPI, Python 3.13) | Fully | Owns the model calls, the carrier integration and every credential |
+| **Client** (Next.js) | **Not covered** | It is a read-only view over data the extension hands it (`client/AGENTS.md`). Phase 1 is a landing page with no logic; Phase 2 renders a list it does not compute. It has no class design worth specifying, and inventing one would imply logic that must not live there |
+
+~~The extension side of the dashboard contract — the enumerated `externally_connectable` message
+surface of FR-3.6.3 — **is** specified, because it lives in the extension.~~
+
+**Amended 2026-08-27 (plan decision D6): FR-3.6.3 is out of PoC scope, so there is no dashboard
+contract to specify.** The extension declares no `externally_connectable` key, `src/messaging/`
+routes internal messages only, and `DASHBOARD_ORIGIN` has left the configuration surface
+(requirements §5.2). The reasoning is upstream and is not repeated here beyond its consequence for
+this document: the requirement's entire cost fell on the manifest — a widened attack surface and a
+widened Web Store permission disclosure — for a surface the PoC never opens, since FR-3.6.1's popup
+already renders the ranked list. Every specification this document previously carried for that
+surface is struck rather than deleted, so that reinstating FR-3.6.3 is a matter of unstriking rules
+that were reasoned about, not of reconstructing them.
+
+### 1.1 The four constraints that shape every decision below
+
+These come from the high-level design and are restated because they are the reason the structure
+looks the way it does, rather than preferences an implementer may trade away.
+
+1. **The service worker dies mid-flow, routinely.** MV3 terminates an idle worker after ~30 s, and
+   three states in the FR-3.3.9 machine block on a human. So no module may hold flow state in
+   memory, and every state transition is a write.
+2. **The server is stateless.** There is no repository layer on the server, no session, no cache
+   beyond a cold-start credential cache. Anything that looks like server-side memory is a bug.
+3. **Model output is hostile input** (high-level design §7.4). Validation is a boundary, not a helper — it gets its
+   own module on both sides, and nothing bypasses it.
+4. **The action validator must be unreachable from the page** (§3.1). It runs in the service
+   worker; only the *result* of validation crosses into the tab.
+
+---
+
+## 2. Package and Module Structure
+
+### 2.1 Server
+
+One Python package, layered. The layering rule is one-directional and is the only structural
+invariant worth enforcing in review:
+
+```mermaid
+flowchart TD
+    R["routes"] -- "declares the dependency" --> D["deps"]
+    R --> S["services"]
+    R --> E["errors"]
+    R --> M
+    D --> E
+    S --> C["carriers"]
+    S --> B["bedrock"]
+    S --> M["models"]
+    C --> E
+    B --> E
+    S --> E
+    R -.-> ALL["config and logging"]
+    S -.-> ALL
+    C -.-> ALL
+    D -.-> ALL
+```
+
+**Every arrow runs from the importer to the module it imports, without exception.** Solid arrows are
+the layering rule; dotted arrows mark the two cross-cutting leaves, which everything may import and
+which import nothing in this graph. The direction is load-bearing rather than decorative: plan Task
+10.3 encodes this graph as `import-linter` contracts, where an arrow drawn backwards becomes a
+contract that forbids the import the code actually needs and permits the one it must never make.
+
+**Routes never call `carriers` or `bedrock` directly, and services never import `fastapi`.** The
+first keeps HTTP concerns out of the carrier integration; the second is what makes services
+testable without a client. Unlike the extension graph in §2.2, this one draws the layering rule
+rather than every edge — `main` and `prompts` are omitted because they sit outside the layering, not
+because importing them is forbidden. **`app/middleware.py` is omitted for a different reason and it
+is worth separating:** middleware is not above routes in this graph, it is *around* the whole app.
+It runs before routing has chosen a handler and after that handler has returned, which is exactly
+why §7.1's `request_id` binding lives there and nowhere else. Drawing it as a layer would suggest a
+route could call it.
+
+**`routes` imports `models` directly**, and the edge is drawn because §2.1 names `models` as a node
+and a graph that names a node it never connects invites the reader to infer the wrong rule. A route
+declares its request and response schemas — that is how FastAPI validates a body before a service
+ever sees it — so the dependency is not an accident to be refactored away. It is the mechanism by
+which hostile input is rejected above the service layer.
+
+| Module | Purpose | Exports |
+|---|---|---|
+| `app/main.py` | ASGI app, lifespan, exception handlers, router registration, the Mangum handler | `app`, `handler` |
+| `app/routes/` | The seven endpoint handlers, one module per resource — `health`, `orders`, `returns`, `pickups`. HTTP in, service call, schema out | One `APIRouter` per module |
+| `app/config.py` | Typed settings from environment, validated once, **plus the bundled per-retailer policy table and the host-suffix map that resolves into it** (§7.1) | `Settings`, `get_settings`, `retailer_policy_for_url` |
+| `app/errors.py` | The exception hierarchy behind the requirements §4.2 error shape | `BoomerangError` and subclasses |
+| `app/logging.py` | Redacting formatter, `request_id` binding | `configure_logging`, `bind_request_id` |
+| `app/middleware.py` | Generates or adopts the request identifier | `RequestIdMiddleware` |
+| `app/deps.py` | FastAPI dependencies: app-state accessors, and **the `X-Boomerang-Client-Version` gate** on every endpoint including `/health` | `get_settings_dep`, `get_carrier_adapter`, `require_supported_client` |
+| `app/bedrock.py` | The single cached Bedrock client, per-call-site model selection | `client`, `model`, `verify_config` |
+| `app/models/` | Pydantic request and response schemas. **This is the server's validation boundary** | Schemas per endpoint |
+| `app/services/ingest.py` | Orchestrates parse, validate, derive window | `IngestService` |
+| `app/services/window.py` | Derives `return_by`, sets `window_inferred` — pure | `derive_window` |
+| `app/services/action.py` | The FR-3.3.7 fallback: DOM in, one validated action out | `ActionService` |
+| `app/services/pickup.py` | Eligibility gate, schedule, refresh, cancel orchestration | `PickupService` |
+| `app/carriers/base.py` | The carrier protocol every adapter satisfies | `CarrierAdapter` |
+| `app/carriers/usps/` | OAuth token handling and the five operations, plus the scripted test double | `UspsAdapter`, `ScriptedUspsAdapter` |
+| `app/carriers/mock.py` | The runtime stub the server constructs when `CARRIER_ADAPTER=mock`. **Not a test double** | `MockCarrierAdapter` |
+| `app/prompts/` | Tool schemas for the two forced-tool-choice call sites | Tool definitions |
+
+**`app/deps.py` sits in front of the routes, and it is in this table because it owns a control**
+(added 2026-08-28, sixth review, CONF-2). Until this revision it appeared exactly once in this
+document, inside a §7.2 sentence about header spelling — no module row, no node in the graph above,
+no §8.2 test row — while being the module that enforces the client version gate the plan review
+escalated a requirements amendment to protect (D16). A document that fixes a control upstream and
+then omits the module enforcing it has moved the defect rather than closed it.
+
+**The arrow runs `routes` → `deps`, and the ordering it does not draw is the point.** `deps` sits
+*below* routes in the import graph — `app/routes/` declares `require_supported_client` in its router
+dependencies, and `deps` imports only `config` and `errors`, nothing above itself. What the graph
+does not show, because an import graph cannot, is that at run time the dependency resolves *before*
+the handler body: `require_supported_client` reads `X-Boomerang-Client-Version`, compares it
+component-wise against `MIN_CLIENT_VERSION`, and raises `ClientTooOld` — so a request below the
+threshold never reaches a service, a model or a carrier. That ordering is the whole value of the
+gate, and it is why the dependency is registered on the **router**, not per handler: a gate a new
+endpoint has to remember to opt into is a gate that will be missing from the endpoint added in a
+hurry.
+
+**`/health` is inside the gate deliberately, per requirements §4.1, and the cost is accepted with
+open eyes.** A version-gated health check cannot be called by a load balancer or an uptime monitor
+that sends no `X-Boomerang-Client-Version` header — such a probe receives 426, not 200, and a
+naive health check would read the service as permanently down. That cost is real and it is taken
+anyway, for two reasons. First, the gate's value is that it is *uniform*: an endpoint outside it is
+an endpoint whose exemption has to be re-justified every time the route list grows, and the
+exemption that gets added in a hurry is the one that matters. Second, the cost is currently
+theoretical — requirements §5.1 deploys behind a Lambda Function URL, which performs no health
+probing of its own. If a load balancer is ever placed in front, the resolution is a probe that sends
+the header like any other client, **not** an exemption carved into the gate; §7.1's
+`min_client_version` default makes that probe trivial to satisfy.
+
+**`app/deps.py` also holds the app-state accessors**, `get_settings_dep` and `get_carrier_adapter`,
+which is why it is one module rather than two: both are the same mechanism — a dependency reading
+something the lifespan put on application state — and splitting them would give the gate a module of
+its own with one function in it. The layering rule is unaffected, since `deps` imports `config` and
+`errors` and nothing below routes.
+
+**`app/services/window.py` is deliberately a module of functions, not a class.** It holds no state
+and depends on nothing; making it a class would only give it somewhere to hide one.
+
+**There is no `app/validation/`, and §1.1 constraint 3 is still satisfied.** The extension needs a
+named validation module because its hostile input arrives as a parsed JSON response that TypeScript
+will happily assert a type onto; the server's hostile input arrives as a request body and as a
+Bedrock tool-call payload, and both are parsed by Pydantic models that reject on shape before any
+service sees them. The boundary exists on both sides — on the server it is the schema layer rather
+than a module of its own. What this costs is that the boundary is only as strong as the models are
+strict, so `app/models/` schemas forbid extra fields and bound every string, and the tool-call
+payload is parsed through a model rather than read from a dictionary.
+
+**There is no `repositories/` package, and there must not be.** High-level design §6.3 puts all
+persistent state on the client. A repository layer on the server is the shape a database arrives in.
+
+**`app/carriers/mock.py` sits outside `app/carriers/usps/`, and the placement is the whole point
+(plan decision D21).** Before this revision one class, `MockUspsAdapter`, served two jobs that pull
+in opposite directions: it was the double the §8.3 integration tests script outcomes into, *and* it
+was the adapter §7.1 constructs when `CARRIER_ADAPTER=mock` — which, per requirements §5.1, is the
+**default** until USPS access is granted. Those roles want contradictory behaviour on an unscripted
+call. A test double should **raise**, because an unscripted call is a test asserting against a
+default nobody chose. A runtime stub must **succeed**, because it is what the whole product runs on
+today. One class cannot do both, and the version that ships is the forgiving one, so every
+integration test in §8.3 would have been quietly asserting against fallback behaviour instead of
+against a scripted outcome.
+
+So they are two classes with two homes. `ScriptedUspsAdapter` stays in `app/carriers/usps/` next to
+the adapter whose behaviour it imitates, raises on any call it has no outcome for, and is
+**unreachable from configuration** — no value of `CARRIER_ADAPTER` selects it, and §8.2 carries a
+test that asserts exactly that. `MockCarrierAdapter` sits at `app/carriers/mock.py`, one level up,
+because it is not USPS-shaped: it is a deterministic stand-in for *a carrier*, and putting it under
+`usps/` would imply a fidelity it does not have and does not need.
+
+### 2.2 Extension
+
+One WXT package. `entrypoints/` is framework-owned and holds as little logic as it can; `src/` holds
+everything testable.
+
+```mermaid
+flowchart TD
+    CS["entrypoints content"] --> EXTRACT["src extract"]
+    CS -- "scan result" --> BG["entrypoints background"]
+    BG -- "injects for a one shot scan" --> CS
+    BG --> DRIVER["src driver"]
+    BG --> MSG["src messaging"]
+    BG -- "all egress: ingest, fallback action, eligibility, schedule, refresh, cancel" --> API
+    BG -- "order validation" --> VALID
+    BG -- "persists the ingest result" --> STORE
+    BG -- "query, record, register" --> PERM["src permissions"]
+    POPUP["entrypoints popup"] -- "every mutation, and every request needing egress" --> MSG
+    POPUP -- "reads only" --> STORE
+    POPUP -- "request needs a page gesture" --> PERM
+    POPUP --> RANK["src ranking"]
+    POPUP -- "ics delivery only" --> CAL["src calendar"]
+    PERM --> CHROME["chrome permissions and scripting APIs"]
+    DRIVER -- "TabHandle reads, StepExecutor actions" --> CHROME
+    BG -- "one shot executeScript, calendar tab create" --> CHROME
+    STORE --> CSTORE["chrome storage local"]
+    DRIVER --> VALID["src validation"]
+    DRIVER --> ADAPT["src adapters"]
+    DRIVER --> API["src api"]
+    DRIVER --> CAL
+    DRIVER --> STORE["src storage"]
+    DRIVER -- "egress scan on the fallback payload" --> EXTRACT
+    MSG --> STORE
+    API --> VALID
+    STORE --> TYPES["src types"]
+    RANK --> TYPES
+```
+
+**This graph is complete for the extension: an edge that is not drawn is not permitted, and an edge
+carrying a qualifier is permitted only for what the qualifier says.** The popup reaches the store
+directly for reads and never for writes — see the single-writer rule below — and nothing outside
+`src/storage/` reaches `chrome.storage` at all.
+
+**Two edge kinds are drawn here, and only one of them is an import (stated 2026-08-28, seventh
+review, PKG-2/INTERACT-2).** Every edge between two `src/` modules, and every edge from an
+`entrypoints/` module into `src/`, is a **static import**: the tail imports the head, and these are
+the edges plan Task 10.3 encodes as `eslint-plugin-boundaries` rules. The edges into the two
+platform nodes — `chrome permissions and scripting APIs` and `chrome storage local` — are **calls
+into the browser**, and they are drawn because the monopolies below are structural rules and a rule
+that is only prose is a rule the linter cannot see. The two edges *between* entrypoints,
+`CS -- "scan result" --> BG` and `BG -- "injects for a one shot scan" --> CS`, are neither: they are
+**runtime deliveries over `chrome.runtime` messaging**, and no import crosses them in either
+direction. That distinction is why §4.7's popup-to-worker hop is not a missing edge — see §4.7.
+
+**The worker is the only egress point, and the popup makes no network call at all (stated
+2026-08-28, from the sixth review).** There is no `POPUP --> API` edge and no `MSG --> API` edge, so
+under the completeness rule above there is no permitted path from the popup to the network — and
+that is the intended property, not an omission. Every request the popup needs travels the
+`POPUP --> MSG --> BG --> API` path: the popup asks, the worker calls, the answer comes back over
+messaging. §4.7 draws the one flow where this was previously ambiguous. The qualifier on
+`POPUP --> MSG` was widened from "every mutation" to "every mutation, and every request needing
+egress" in the same revision, because the earlier wording covered only writes and left a read that
+needs the network — the pre-offer eligibility check — with no drawn path, which is exactly how §4.3
+came to describe a call the graph forbids.
+
+**`chrome.tabs` and `chrome.scripting` have monopoly holders in the same way `chrome.storage` does
+(stated 2026-08-28; corrected from two holders to three, seventh review, PKG-3).** **Three** modules
+may reach them, each for a named purpose, and the graph draws all three: `src/driver/` for
+`TabHandle`'s reads and `StepExecutor`'s action execution; `src/permissions/` for
+`registerContentScripts` after a grant; and `entrypoints/background.ts` for exactly the two calls
+§2.2 already names — the one-shot `executeScript` of a first-run scan and `chrome.tabs.create` for
+the calendar template. No other module touches either API, and `entrypoints/background.ts` touches
+them for nothing beyond those two calls. The earlier wording said "only `src/driver/` and
+`src/permissions/`" and then described a third holder in the next sentence, which is a rule
+contradicted by its own paragraph — the worker is a holder, with the narrowest licence of the three.
+`chrome.storage.local` is drawn the same way, with `src/storage/` as its single holder. All four
+platform edges were previously asserted only as §8.2 test rows ("never reach `chrome.tabs`
+directly"), which is a rule stated as a test; the higher-privilege APIs deserve the structural
+treatment too, and the completeness rule above is only true if the platform edges are drawn.
+
+**The driver's four injected collaborators have module homes, and they are here rather than left to
+be inferred (added 2026-08-28).** `UserPrompt`, `TabHandle`, `TabHandleFactory` and `StepExecutor`
+are all owned by **`src/driver/`**. Each is a seam that exists so the driver can be unit-tested
+without a browser (§3.3), and a seam whose module is unstated is a seam a later refactor can move
+somewhere the graph does not constrain. `SessionStore` is the deliberate exception and is called out
+below: it is diagrammed as a driver collaborator but lives in `src/storage/`, because what it
+persists is governed by the store's rules.
+
+**Two modules are exempt from the completeness rule, and they are exempt by a property rather than
+by fiat: `src/types/` and `src/config.ts` are leaves.** Neither imports anything — `src/types/` is
+declarations and `src/config.ts` is build-substituted literals — so neither can participate in a
+cycle, and an edge into a leaf constrains nothing. **Every module may import them.** The alternative
+is fifteen arrows into each, which would obscure the edges that carry a real rule. The exemption is
+stated because the rule above is only worth having if it has no silent exceptions: §7.2 has
+`src/api/` reading `API_BASE_URL`, §5.2 has `src/storage/` reading `MAX_STORED_ORDERS`, and §3.5
+assigns entity types to four consumers, and every one of those would otherwise be a violation of a
+graph that declares itself exhaustive.
+
+**`src/extract/` is the one module that runs in two execution contexts, and the split is along the
+line between reading a page and inspecting a payload.** Extraction has to run where the DOM is, so
+it is injected with the content script. The FR-3.1.3 egress scan has to run where the payload is at
+the moment it would leave, and on the fallback path (§4.2) that is the worker — the driver holds the
+captured DOM and is about to hand it to `src/api/`. So the graph carries `DRIVER --> EXTRACT`,
+qualified for the scan and for nothing else: the driver may ask "is this payload safe to send?" and
+may not ask `src/extract/` to touch a page.
+
+This is not a compromise the split was designed around; it is why the scan is a **pure function of a
+payload** (§8.2) rather than a DOM operation. A pure function has no context of its own and runs
+wherever it is called, which is what lets one module serve a content script and a worker without
+either half depending on the other's globals. The alternative — scanning inside the content script
+at capture time — would put the check at the wrong moment: the payload that gets sent is the one the
+driver holds after capping and after any later mutation, and a scan run earlier would be attesting
+to a value that is no longer the one leaving.
+
+**`src/permissions/` has two inbound edges because FR-3.7.2's second tier needs both.** The popup
+owns the one call that spends a user gesture; the worker owns everything gesture-free — the
+`permissions.contains` query, the decision that a standing grant is worth offering, recording the
+outcome of the offer, and `chrome.scripting.registerContentScripts` once a grant lands. A graph
+drawing only the popup's edge would make the tier unimplementable as written, since none of those
+four can be reached from a document that is closed most of the time.
+
+**The worker has four edges the driver also has, and that is deliberate.** Ingestion (§4.1) is not
+a return: no `DriverSession` exists, no state machine is running, and routing a page scan through
+`src/driver/` would put the driver on the critical path of the one flow that must work before any
+return is possible. So `entrypoints/background.ts` reaches `src/api/`, `src/validation/` and
+`src/storage/` itself for ingestion, and reaches the content script through
+`chrome.scripting.executeScript` for the FR-3.1.1 first-run "Scan this page". The worker is thin in
+both flows — it routes, it does not decide — but ingestion is short enough that the routing is the
+whole of it.
+
+| Module | Purpose | Execution context |
+|---|---|---|
+| `entrypoints/content.ts` | Recognise, wait for render, extract, strip, cap. Nothing else | Isolated world, retailer tab |
+| `entrypoints/background.ts` | Service worker: message router, driver host, egress | Background |
+| `entrypoints/popup/` | The primary surface; ranks at render time | Extension page |
+| `src/extract/` | Subtree selection, script stripping, size capping, **and the FR-3.1.3 fail-closed egress scan** — FR-3.1.2, FR-3.1.3 | **Both.** Extraction runs injected with the content script, where the DOM is; the scan runs in the **worker**, where the payload is when it is about to be sent |
+| `src/adapters/` | The bundled adapter registry and its types | Data, read in the worker |
+| `src/driver/` | The FR-3.3.9 state machine, session persistence, step execution, **and the decision to abort a flagged fallback transmission as `report_stuck`** | Worker |
+| `src/validation/` | Action validator and order validator — the two hostile-input boundaries | Worker |
+| `src/storage/` | The only module that touches `chrome.storage.local` | Worker and popup |
+| `src/api/` | Typed client for the seven endpoints; maps `reason` codes to typed errors | Worker |
+| `src/ranking/` | Urgency ordering, computed at render — FR-3.2.2. **Pure:** takes the orders and the current instant as arguments, reads no clock of its own | Popup |
+| `src/calendar/` | **Pure.** Builds the template URL and the `.ics` text. Delivers neither | Context-free |
+| `src/permissions/` | Query, decide whether to offer, record the outcome — FR-3.7.2 | Popup for the request, worker for the rest |
+| `src/messaging/` | ~~Internal and external message routing, with origin checks~~ **Internal message routing only** — popup-to-worker. The external half went with FR-3.6.3 (plan decision D6) | Worker |
+| `src/types/` | The entity types and the driver session shape. No behaviour, no imports | All |
+| `src/config.ts` | Build-time constants. **Reads no network** — high-level design §8.4 | All |
+
+**`src/storage/` is the only module permitted to import `chrome.storage`.** Everything else asks
+it. This is what makes the eviction rule, the deletion carve-out and the state-machine persistence
+testable in one place instead of scattered across the driver.
+
+**`src/extract/` is separate from `entrypoints/content.ts`** because the extraction and capping
+logic is where FR-3.1.3 is enforced, and it needs to be unit-testable against a DOM fixture without
+loading an extension.
+
+**FR-3.1.3 is two obligations of different strengths, and each one is assigned here rather than
+left to be inferred.** The requirement binds every path that sends DOM, and until this revision only
+its byte ceiling had an owner.
+
+- **The absolute prohibition — never transmit the label page or any page reached after label
+  generation — binds both egress paths, and is structural on only one of them.** Ingestion sends
+  the order-list subtree by construction (§4.1), so on that path there is nothing to enforce. On the
+  driver's fallback path it is *not* structural: the fallback fires precisely when the adapter did
+  not recognise the page, so the adapter cannot be asked whether the page in front of it is the
+  label page. That is why the requirement pairs the prohibition with a scan rather than resting on
+  it, and why the scan below is the mechanism by which the prohibition is honoured on the path where
+  it is not free.
+- **The fail-closed scan is owned by `src/extract/`, and the decision it forces is owned by
+  `src/driver/`.** Before any `POST /returns/next-step` payload is returned for transmission, the
+  extractor scans the candidate DOM for tracking-number and postal-address patterns and reports a
+  match. `src/extract/` is the right home: it already holds the capping that runs on the same path,
+  it already runs in the tab where the DOM is, and it is already fixture-testable without a browser
+  — the three properties the scan needs. What it does **not** own is the consequence. A scan result
+  is a fact; turning a fact into an abandoned step and a handed-back flow is a state-machine
+  decision, and `src/driver/` is the module that owns FR-3.3.9's edges. So the extractor never
+  transmits and never suppresses: it returns the match, the driver aborts the call it was about to
+  make, and the step surfaces as `report_stuck` for the user to finish manually.
+
+**Fail closed means the scan's own failure aborts too.** An extractor that throws while scanning has
+not established that the payload is clean, and a payload not established as clean is not sent. The
+requirement states its own residual — a pattern scan is a heuristic and will miss some layouts — so
+what this design asserts is that the scan runs on every fallback egress and that a match stops the
+transmission, not that the scan is complete. See §6.2, which carries the row, and §8.2, which
+carries the assertions.
+
+**`chrome.permissions.request` is issued by the popup, and only by the popup.** A service worker
+has no user gesture to spend, and a gesture does not survive being forwarded to it in a message —
+the call simply rejects. So `src/permissions/` is split by what needs a gesture: the request itself
+is made from the popup, and everything gesture-free — `permissions.contains`, deciding whether the
+standing grant is worth offering yet, recording the outcome, and calling
+`chrome.scripting.registerContentScripts` after a grant — stays in the worker. FR-3.7.2's second
+tier is unobtainable from anywhere else, which makes this a placement constraint rather than a
+preference. High-level design §5.1's first-run sequence was corrected to match.
+
+**`src/ranking/` takes the current instant as an argument and has no class diagram.** It is one
+pure function — orders in, ordered orders out — so there is no collaborator graph to draw and
+nothing to inject beyond the instant itself. That instant comes from the popup's render, which is
+also what makes FR-3.2.2's "derived at render" literally true: two renders a second apart are two
+different arguments, not two reads of a hidden clock. The §8.2 stability assertion depends on this
+— a ranking function that read `Date.now()` internally could not be asked twice with the same
+input.
+
+**`src/calendar/` builds bytes and hands them to someone else.** FR-3.5.3 requires the `.ics`
+fallback to be generated locally, and `URL.createObjectURL` is not exposed in the MV3 worker's
+global scope, so the usual blob-download path is unavailable from the context the module would
+otherwise live in. Rather than take a `downloads` permission that FR-3.7.1's minimal manifest does
+not list, the module stays pure — it returns a template URL string or `.ics` text and delivers
+neither. Opening the template URL is `chrome.tabs.create` from the worker, which is fine; delivering
+the `.ics` is a blob and an anchor in the popup, which is a page and has both. The permission we do
+not request is worth more than the convenience of downloading from the worker.
+
+**`SessionStore` lives in `src/storage/`, not in `src/driver/`.** It is diagrammed in §3.3 as a
+driver collaborator because that is who uses it, but `DRIVER_SESSION` is persisted state and is
+governed by the same atomicity, quota and rebuild rules as everything else the store holds. A
+session store that reached `chrome.storage` directly would break the invariant stated two paragraphs
+above on the very entity whose durability the design depends on most.
+
+**The worker is the only writer.** This resolves what the first draft left open: the popup and the
+worker can both run, `chrome.storage.local` guarantees atomicity per `set` and nothing across a
+read-then-write pair, and two writers would lose orders in a way that surfaces as "the extension
+forgot my J.Crew order" — unattributable and unreproducible. Every popup mutation goes through
+`src/messaging/` to the worker. The popup still *reads* directly, because a stale read costs a
+re-render and a lost write costs an order.
+
+**One repository per file, and `src/storage/index.ts` is written complete before any of them
+(added 2026-08-27, plan decision D19).** The four repositories of §3.4 and `SessionStore` are five
+separate modules; the package's barrel is not a fifth peer but a declaration of the package's shape,
+so it is authored **up front**, exporting from modules that at that moment are stubs, and is not
+touched again as each repository is filled in. This is a file-layout rule rather than a design
+change, and it is recorded here because omitting it had a real cost: the implementation plan
+serialised all seven storage tasks into a chain, and when the reason was traced it was not the
+serialising queue or any invariant this section defends — it was that every task would have edited
+the same export list. Writing the barrel first makes the four repositories mutually parallel and
+takes the plan's storage batch from seven slots to four. **The test for whether a serial chain is
+real is whether the file has to stay whole.** `coordinator.ts` does, and §3.4's `transact` is why.
+An export list does not.
+
+---
+
+## 3. Class Design
+
+### 3.1 Server — carriers and services
+
+```mermaid
+classDiagram
+    class CarrierAdapter {
+        <<Protocol>>
+        +check_eligibility(address) EligibilityResult
+        +schedule(request) ScheduledPickup
+        +refresh(confirmation_number, address) RefreshedPickup
+        +cancel(confirmation_number, address, etag) None
+        +servable_locations() list
+    }
+    class UspsAdapter {
+        -http_client
+        -token_provider
+        +check_eligibility(address) EligibilityResult
+        +schedule(request) ScheduledPickup
+        +refresh(confirmation_number, address) RefreshedPickup
+        +cancel(confirmation_number, address, etag) None
+        +servable_locations() list
+    }
+    class ScriptedUspsAdapter {
+        -scripts
+        +check_eligibility(address) EligibilityResult
+        +schedule(request) ScheduledPickup
+        +refresh(confirmation_number, address) RefreshedPickup
+        +cancel(confirmation_number, address, etag) None
+        +servable_locations() list
+        +push(method, outcome) None
+        +assert_drained() None
+    }
+    class MockCarrierAdapter {
+        -clock
+        +check_eligibility(address) EligibilityResult
+        +schedule(request) ScheduledPickup
+        +refresh(confirmation_number, address) RefreshedPickup
+        +cancel(confirmation_number, address, etag) None
+        +servable_locations() list
+    }
+    class TokenProvider {
+        -cached_token
+        -expires_at
+        +get_token() str
+        +invalidate() None
+    }
+    class PickupService {
+        -carrier
+        -clock
+        +eligibility(address) EligibilityResult
+        +schedule(request) ScheduledPickup
+        +refresh(confirmation_number, address) RefreshedPickup
+        +cancel(confirmation_number, address, etag) None
+    }
+    CarrierAdapter <|.. UspsAdapter
+    CarrierAdapter <|.. ScriptedUspsAdapter
+    CarrierAdapter <|.. MockCarrierAdapter
+    UspsAdapter --> TokenProvider
+    PickupService --> CarrierAdapter
+```
+
+**`CarrierAdapter` is a `typing.Protocol`, not an ABC.** Nothing needs to subclass it, each
+implementation is separate rather than a partial override, and a structural type keeps the test
+double from inheriting behaviour it should not have. With three implementations rather than two
+this matters more than it did: the protocol is the only thing they share, which is what makes the
+§8.2 assertion that no configuration value selects `ScriptedUspsAdapter` a statement about wiring
+rather than about types.
+
+**`refresh` and `cancel` both take an address.** This is not redundancy — USPS requires the address
+the pickup was booked against, which is why `BOOKED_ADDRESS` exists as an immutable snapshot
+separate from the editable `ADDRESS`. An adapter signature that omitted it would make the high-level design §4.2 rule
+unenforceable at the type level, which is the only place it can be enforced on a stateless server.
+
+**`PickupService.cancel` takes the ETag and passes it straight through.** The token is the
+client's: requirements §4.1 defines `DELETE /pickups/{confirmation_number}` as a cancel using a
+freshly obtained ETag, and §4.5 has the worker refreshing to get one and then sending it. A
+stateless server has nowhere to have kept it. So the route reads it from the request, the service
+takes it as a parameter, and the adapter receives it unmodified — the service performs no refresh of
+its own and holds no ETag between calls. The signature matters more than it looks: a
+`cancel(confirmation_number, address)` cannot call a
+`CarrierAdapter.cancel(confirmation_number, address, etag)` at all, and the only way to make it
+compile is to have the service refresh internally, which would put a second, invisible refresh on a
+path whose whole correctness argument is that exactly one refresh precedes each cancel. The
+ordering guarantee of FR-3.4.6 lives in the worker (§4.5); what the server guarantees is
+pass-through and a typed `EtagExpired` when the carrier refuses. See §8.2.
+
+**`servable_locations()` exists on the adapter** because FR-3.4.8 forbids substituting a package
+location the carrier cannot honour, and which locations are servable is carrier knowledge. Returning
+the reduced set is what lets the extension re-ask rather than guess.
+
+**`TokenProvider` caches for the warm container lifetime only**, and `invalidate()` exists so a 401
+can force one retry with a fresh token rather than failing the user's schedule call. That single
+retry is the *only* retry on a write path in the system. It is constructed **once per container**
+from the credential the lifespan already fetched, and `invalidate()` clears **the token and never the
+credential** — a 401 must not turn into a Parameter Store round trip on a path a user is waiting on.
+Its lifetime is therefore the container's, not the request's: two concurrent requests in the same
+warm container share one token, and the second one to see a 401 finds a token another already
+refreshed.
+
+**Both stand-ins implement all five Protocol methods.** For `MockCarrierAdapter` that is because
+§7.1 makes it the default until USPS access is granted, and an implementation covering two of five
+would leave refresh, cancel and `servable_locations` unimplemented on the only path that currently
+runs. For `ScriptedUspsAdapter` it is because four of the §8.3 integration rows are otherwise
+unwritable.
+
+**`MockCarrierAdapter` is deterministic and it announces itself (plan decisions D21 and D22).** It
+is eligible everywhere except **one designated unserviceable postcode**, so FR-3.4.2's graceful
+second answer has a way to be reached without arming anything; its confirmation numbers are derived
+from the request rather than random, so the same booking twice is the same number and a test can
+name it; and it computes the next available date from the current date through its injected clock
+rather than returning a fixed string that goes stale. Above all, **every confirmation number it
+returns carries a fixed prefix** — `MOCK_CONFIRMATION_PREFIX`, exported as a module constant,
+published in `contracts/` and specified upstream at requirements §5.1 — because a fabricated
+confirmation number that looks real is the one failure in this system a user cannot detect and
+cannot recover from. They stop tracking the parcel, no carrier arrives, and the return window
+closes. See requirements FR-3.4.5b, and §7.2 for what the popup does with the prefix.
+
+**A script is a per-method queue of outcomes, consumed in order, and an unscripted call raises.**
+`push(method, outcome)` appends one; each call to that method takes the next. ~~It falls back to a
+default success when the queue is empty.~~ **Amended 2026-08-27 (plan decision D21): an empty queue
+raises.** The forgiving fallback was the load-bearing half of the conflation described in §2.1 — it
+existed so the same class could serve as the running server's carrier, and it meant a §8.3 row that
+forgot to script an outcome passed against a default nobody chose. Now that the runtime path belongs
+to `MockCarrierAdapter`, the double can be strict, and strict is what a double should be. Queue-per-method rather than argument matching, because what the tests need to express is
+*sequence* — eligible and then refused at schedule, a schedule whose response is lost, a cancel that
+first sees a stale ETag — and an argument matcher makes an ordering test read as though order did
+not matter. An outcome is a value to return, an exception to raise, or the sentinel that produces
+the transport failure of a dropped response rather than returning anything. A test that leaves
+outcomes unconsumed fails at teardown through `assert_drained()`: a script nobody drained is usually
+a flow that never ran. The two rules are a pair — raising on an empty queue catches the call nobody
+scripted, and draining catches the outcome nobody called.
+
+### 3.2 Server — ingestion and the model boundary
+
+```mermaid
+classDiagram
+    class IngestService {
+        -bedrock_client
+        +ingest(dom, page_url) list
+    }
+    class ActionService {
+        -bedrock_client
+        +next_step(dom, retailer_key, step_key) ProposedAction
+    }
+    class OrderSchema {
+        +retailer str
+        +retailer_order_id str
+        +ordered_at date or None
+        +delivered_at date or None
+        +stated_return_days int or None
+        +return_by date or None
+        +window_inferred bool
+        +items list
+    }
+    class RetailerPolicy {
+        +retailer_key str
+        +default_return_days int
+    }
+    class DerivedWindow {
+        +return_by date or None
+        +window_inferred bool
+        +basis str
+    }
+    class ProposedAction {
+        +kind ActionKind
+        +target str or None
+        +value str or None
+    }
+    class ActionKind {
+        <<enumeration>>
+        click
+        select_option
+        fill
+        pause_for_user
+        report_stuck
+    }
+    class DeriveWindow {
+        <<pure function>>
+        +derive_window(order, item, policy, now) DerivedWindow
+    }
+    ProposedAction --> ActionKind
+    IngestService --> OrderSchema
+    IngestService --> DeriveWindow
+    ActionService --> ProposedAction
+    DeriveWindow --> RetailerPolicy
+    DeriveWindow --> DerivedWindow
+```
+
+Both services call Bedrock with **tool calling and a forced tool choice** (high-level design §6.8). Neither parses
+prose; there is no free-text path to write a parser for, which is the point of the decision.
+
+**`OrderSchema` carries `delivered_at`, and until this revision it did not** (added 2026-08-28,
+sixth review, CONSIST-1). The field sits on `ORDER` in both upstream ERDs and FR-3.2.1 derives the
+return window *from the delivery date* — so the input the derivation starts from was present in
+every document except the one that says how to compute it. An absent field disagrees with nothing,
+which is why five review rounds passed over it; it is the same shape as the `label_carrier` gap §10
+records closing.
+
+**`OrderSchema` carries `stated_return_days`, and until this revision nothing did** (added
+2026-08-28, seventh review, CONF-1). FR-3.2.1 derives the window "from the delivery date **and the
+retailer's stated policy where the page exposes one**, and from a configured per-retailer default
+where it does not" — three sources, of which this document had two. A page advertising sixty-day
+returns without printing a date would have been assigned thirty by the configured default, silently
+and with `window_inferred` true, which reads as a considered inference rather than a discarded fact.
+The field is an integer count of days or absent, page-extracted like the two dates, and it is
+**distinct from row 1**: row 1 is a deadline the page states outright, needs no arithmetic and is
+therefore not inferred; `stated_return_days` is a policy that still has to be counted from a date,
+and FR-3.2.1's second bullet requires any derived window to be marked inferred. It lives on
+`OrderSchema` rather than on `RetailerPolicy` because it is a property of the page this order was
+read from, not of the retailer as configured — the same retailer can state different policies on
+different product categories, and `RetailerPolicy` is the fallback for when the page states nothing.
+Plan Task 3.2 already asks the extraction schema for "the retailer's stated return policy window if
+present"; this is the field that value arrives in.
+
+**It is not a stored field, and it is deliberately absent from both ERDs.** `stated_return_days` is
+an *input* to the derivation, carried on the ingest wire and consumed by `derive_window`; what the
+extension persists is the derivation's output, `return_by` and `window_inferred`, which both ERDs
+already declare on `ORDER`. So no upstream amendment is owed here under D25 — the requirement
+already names this source at FR-3.2.1 and this document was the one behind it, which is why §10
+records this as a design correction rather than an upstream one. If a later revision ever wants to
+show the user *why* a window says what it says, `DerivedWindow.basis` is the value to persist, and
+that would be an ERD amendment.
+
+**Three date fields are optional and one is not, and the optionality is the whole of FR-3.2.1's
+difficulty.** `ordered_at` and `delivered_at` are page-extracted, and high-level design §4.3 says
+plainly that both "may be absent or wrong" when an order first enters the store — a delivered date
+in particular is often on a different page from the order list this parse reads. `return_by` is
+optional because it is the *output*: an order whose window cannot be derived has none, and FR-3.2.3
+requires that to be shown as unknown rather than guessed. `window_inferred` is the one field that is
+never absent, because "we do not know whether this was inferred" is not a state any surface can
+render honestly. This is also why `first_seen_at` — not `ordered_at` — is what eviction orders on
+(§5.2): it is the one date the extension observes itself.
+
+**`derive_window` takes the policy as a parameter, because it is pure** (CONF-1). §2.1 declares it
+pure and §8.2 asserts it derives from `default_return_days`, but no signature showed how the value
+reached it, and a pure function cannot read configuration. It takes four arguments —
+`derive_window(order, item, policy, now)` — and the `policy` is a `RetailerPolicy` resolved by
+`IngestService` from the `page_url` it already receives, against the per-retailer table requirements
+§5.3 defines. The table is **configuration and lives in `app/config.py`** with the rest of it, and it now has
+rows in §7.1's `Settings` table with its source, default and validation, plus the host-suffix map
+`IngestService` resolves through — `retailer_policy_for_url(page_url)` (added 2026-08-28, seventh
+review, CONF-3). This document assigns the value an owner and a route rather than inventing the
+parameter, which upstream already declares.
+
+**The precedence is stated here because a test asserting "derives from `default_return_days`" cannot
+distinguish a correct precedence from an inverted one.** In order:
+
+| # | Source | `window_inferred` | When it applies |
+|---|---|---|---|
+| 1 | A deadline the page states outright | `false` | The retailer published a date. Nothing is derived, so nothing is inferred |
+| 2 | `stated_return_days` counted from `delivered_at`, or from `ordered_at` when `delivered_at` is absent | `true` | **The page exposed a policy in days.** FR-3.2.1's second source. It is arithmetic on a date, so it is inferred — but it is the retailer's own number, so it outranks anything configured |
+| 3 | `default_return_days` counted from `delivered_at` | `true` | The page stated no policy: a configured default and a known delivery date |
+| 4 | `default_return_days` counted from `ordered_at` | `true` | `delivered_at` absent — frequent, per high-level design §4.3 — so the older, more conservative date is used |
+| 5 | Undetermined: `return_by` absent | `true` | **No date at all.** Neither `delivered_at` nor `ordered_at` was extractable |
+
+**Rows 2 and 3–4 are ordered the way they are because a page is more current than a table.**
+`stated_return_days` is what this retailer said about this order today; `default_return_days` is what
+we wrote down about the retailer at some point in the past. When they disagree the page is right, and
+a configured default that overrode a stated policy would be the product quietly contradicting the
+page the user is looking at. Requirements §5.3 says the same thing from the other side by defining
+`default_return_days` as the "Assumed window when the page states no policy" — the fallback, not the
+primary.
+
+**`DerivedWindow.basis` names which of the five rows fired**, and it exists so the branch is
+observable rather than reconstructed: `stated_deadline`, `stated_days`, `default_days`, and
+`undetermined`, with the date used recorded alongside for the two counted cases. A precedence with no
+witness is a precedence that inverts without any test noticing, which is exactly the failure §8.2's
+window row is written to catch.
+
+**`default_return_days` itself always has a value, and its own precedence is the retailer's over the
+system's.** Requirements §5.3 gives it a per-retailer setting overriding a system default of **30**.
+So rows 3 and 4 never fail for want of a policy — a retailer that declares no override gets 30 — and
+row 5 is reached only when there is no *date* to count from, never when there is no *policy*. The
+distinction matters because it is the one an implementation gets backwards: a fallback chain that
+treats "no policy" and "no date" as the same condition will return undetermined for every retailer
+that has not been configured, which is all of them on day one.
+
+**Row 5 is a real branch and it is not an error.** An order with no derivable window is stored with
+`return_by` absent and `window_inferred` true, ranked last, and presented as unknown — §8.2's
+`src/ranking/` row already requires an unknown window to be listed and never omitted. Returning an
+error, or substituting today plus thirty days, would both be the product presenting a guess as a
+fact, which is the one thing FR-3.2.3 forbids.
+
+**`ActionKind` is a closed enumeration of exactly five members, and it is the single source the
+tool schema is generated from.** A hand-written JSON schema next to a hand-written Python type is
+two lists that drift; the model would then be offered a sixth verb nothing downstream can execute,
+or the type would admit a verb the schema never offers. Generating the schema's `enum` from the
+enumeration makes the drift unrepresentable. `kind` is not a `str`.
+
+**`target` and `value` are optional, and which of them is required depends on `kind`:**
+
+| `kind` | `target` | `value` | Meaning |
+|---|---|---|---|
+| `click` | required — a selector | must be absent | Press one control |
+| `select_option` | required — a selector | required — the option to choose | Choose from a closed set the page offers |
+| `fill` | required — a selector | required — the text to type | The only action carrying an attacker-chosen payload |
+| `pause_for_user` | must be absent | must be absent | Hand control back; the reason is the step, not a field |
+| `report_stuck` | must be absent | must be absent | Give up on this step and say so |
+
+"Must be absent" is enforced, not merely documented: a `pause_for_user` arriving with a `target`
+is rejected as malformed rather than accepted-and-ignored, because a model that filled in a field
+the verb has no use for is a model whose output should not be trusted for the field the verb *does*
+use. Three flat strings would have made every illegal shape representable and pushed the check into
+the reader of each field.
+
+**The kind is constrained by the tool schema, and validated again in the extension.** The server
+checking it is convenience; the extension checking it is the security boundary, because the server
+is the thing whose compromise the extension is defending against. The extension's copy of this
+table is `src/validation/`, and it is deliberately a second implementation rather than a shared
+one — a shared constant compromised on the server is compromised on both sides at once.
+
+### 3.3 Extension — the driver
+
+```mermaid
+classDiagram
+    class ReturnDriver {
+        -session_store
+        -orders
+        -returns
+        -adapter_registry
+        -validator
+        -executor
+        -tab_factory
+        -prompts
+        -api
+        +start(item_id) None
+        +resume() None
+        +advance(user_input) None
+        -transition(next_state) None
+        -derive_label_carrier(adapter, tab) str or None
+    }
+    class TabHandleFactory {
+        +for_session(tab_id, tab_url) TabHandle
+    }
+    class TabHandle {
+        +tab_id int
+        +url() str
+        +dom() str
+        +is_live() bool
+    }
+    class UserPrompt {
+        +ask(question, choices) PendingQuestion
+        +notify(message) None
+    }
+    class SessionStore {
+        +load() DriverSession
+        +save(session) None
+        +clear() None
+    }
+    class AdapterRegistry {
+        +for_url(url) RetailerAdapter
+        +for_key(key) RetailerAdapter
+    }
+    class RetailerAdapter {
+        +retailer_key str
+        +order_page_patterns list
+        +step_selectors map
+        +return_method_options ReturnMethodOptions
+        +label_carrier_patterns map
+        +supports_printable_label bool
+        +irreversible_steps set
+        +fillable_fields map
+    }
+    class ReturnMethodOptions {
+        +container str
+        +option str
+        +label str
+        +price str
+        +carrier_by_option map
+    }
+    class ReturnRepository {
+        +create(item_id) ReturnRequest
+        +update(request) None
+        +active_for_item(item_id) ReturnRequest
+        +delete(item_ids) None
+    }
+    class ActionValidator {
+        +validate(proposed, adapter, step) ValidationOutcome
+    }
+    class ValidationOutcome {
+        <<sum type>>
+    }
+    class ValidatedAction {
+        +kind ActionKind
+    }
+    class ValidationRejection {
+        +reason str
+    }
+    class StepExecutor {
+        +execute(action, handle) StepResult
+    }
+    ReturnDriver --> SessionStore
+    ReturnDriver --> AdapterRegistry
+    ReturnDriver --> ActionValidator
+    ReturnDriver --> StepExecutor
+    ValidationOutcome <|-- ValidatedAction
+    ValidationOutcome <|-- ValidationRejection
+    ActionValidator ..> ValidationOutcome : returns
+    StepExecutor ..> TabHandle : acts through
+    ReturnDriver --> TabHandleFactory
+    ReturnDriver --> UserPrompt
+    ReturnDriver --> OrderRepository
+    ReturnDriver --> ReturnRepository
+    TabHandleFactory --> TabHandle
+    AdapterRegistry --> RetailerAdapter
+    RetailerAdapter --> ReturnMethodOptions
+```
+
+**`ReturnDriver.transition()` is private and is the only writer of state.** Every public method
+routes through it, and it persists *before* acting — FR-3.3.9. An implementation that acts first and
+saves after is the specific bug this structure exists to prevent, because the worker can die between
+the two.
+
+**`RetailerAdapter.irreversible_steps` and `fillable_fields` are adapter data, not driver logic.**
+Irreversibility is per-retailer knowledge (high-level design §5.2), and `fillable_fields` is what lets the validator
+bound a `fill` by declared field rather than by arbitrary selector (SEC-2 in high-level design §6.8).
+
+**`ActionValidator` takes the adapter and the step, not just the action.** A validator that saw only
+the action could check the vocabulary but not whether the target is a field this retailer declared
+fillable — which is the stronger half of the bound.
+
+**`StepExecutor` is the only module that executes a model-proposed action against a retailer page.**
+That, and not "the only caller of `chrome.scripting.executeScript`", is the monopoly this design
+holds — stated as the narrower rule it would otherwise keep acquiring exceptions to. The worker
+makes other `chrome.scripting` calls that are not step execution and are not routed through the
+executor: `registerContentScripts` after a permission grant (§2.2), a one-shot `executeScript` to
+run the extractor on the active tab for a first-run scan (§4.1), and `TabHandle`'s reads (§3.3) —
+`dom()`, `url()` and the option and price reads of §4.6. None of them carries an action the model
+proposed, which is what the monopoly exists to guard: reading a page cannot navigate, submit, or
+spend, and it is the acting that needs a single audited door. Within a return, the executor receives
+a `ValidatedAction`
+— a type the validator alone can construct. An unvalidated action is therefore not merely
+discouraged but unrepresentable at the call site.
+
+**`UserPrompt.ask` records a pending question; it does not block for an answer** (revised
+2026-08-28, sixth review, CLASS-4). ~~`ask(question, choices) Answer`~~ read as a synchronous call
+returning the user's reply, and that signature cannot be honoured: §1.1's first constraint is that
+the service worker is terminated after roughly thirty seconds idle, and a person deciding whether
+the label printed takes longer than that whenever they are not already looking at the screen. A
+worker awaiting a return value is a worker that dies holding it. So `ask` returns a
+**`PendingQuestion`** — it persists the question and its choices with the session, surfaces the
+prompt, and returns. The driver then does what §4.4 already describes for every other pause: it
+stops. The answer re-enters through **`ReturnDriver.advance(user_input)`**, which is the mechanism
+that was already there and was previously in tension with `ask`'s return type rather than
+complementary to it.
+
+Three consequences, all of which the document already relied on and none of which its signatures
+said:
+
+- **A worker that dies before the answer arrives loses nothing.** The question is in the session, so
+  a rehydrating worker (§4.4) finds a return waiting on a person rather than a return with no
+  explicable position. This is the same persist-before-act rule the machine already follows.
+- **`Answer` is the payload of `advance`, not the return of `ask`.** It is `user_input` under a
+  different name at a different call site, which is why §3.5 declines to pin its shape: one producer
+  — the surface the user replied on — and one consumer.
+- **There is no unattended resume.** An answer arriving is an *event*, and events are what `advance`
+  is for. Nothing in the driver polls for one, which is what §8.2's "no unattended resume" row
+  asserts.
+
+**`StepExecutor.execute` takes the `TabHandle`, not a raw `tab_id`** (revised 2026-08-28, sixth
+review, CLASS-5). ~~`execute(action, tab_id)`~~ took the one value this document argues at length is
+untrustworthy on its own — "tab IDs are reused, so a rehydrated session's stored ID may now address
+a different page entirely" — so the corroboration that makes the id safe happened by driver
+convention, one call earlier, and the executor's boundary was the single place the argument was not
+carried through. Taking the handle moves the check into the type: a `TabHandle` exists only because
+`TabHandleFactory.for_session` built it from stored values that `is_live()` can then corroborate,
+and the executor cannot be handed a bare integer that nothing checked. Paired with `ValidatedAction`
+— which the validator alone constructs — both of the executor's arguments now carry their own proof:
+the action was validated for *this* adapter and step, and the page is the one the session claims.
+Neither property is a rule a reviewer has to remember.
+
+**`ActionValidator.validate` returns a `ValidationOutcome`, because rejection is a designed result
+rather than an absence** (revised 2026-08-28, sixth review, CLASS-6). ~~`validate(...) ValidatedAction`~~
+had no way to say no, though saying no is half its job: §3.2 requires a `pause_for_user` arriving
+with a `target` to be *refused*, and §8.2 asserts four separate rejection cases. The outcome is a
+sum of `ValidatedAction` and **`ValidationRejection`**, the latter carrying a `reason`. The driver
+branches on it and turns a rejection into `report_stuck` — which §8.2's "rejection yields
+`report_stuck`" row already required, and which a raise would have made an exception-driven control
+flow on the hot path of every model-proposed step. It is a return rather than a raise for the same
+reason `derive_label_carrier` returns "nothing determinable" rather than raising: this document's
+established idiom is that a designed negative outcome is a value. `ValidatedAction` remains
+constructible by the validator alone, so the security property is untouched — what changed is that
+the *other* branch now has a name and a `reason` code, instead of being unrepresentable in a
+signature that only described success.
+
+**`TabHandle` and `UserPrompt` are collaborators, not ambient calls.** The driver has to read the
+page and it has to stop and ask the user — FR-3.3.7's `pause_for_user` and FR-3.4.8's re-ask are
+both *the driver deciding to hand control back*. If those reach `chrome.tabs` and the popup directly
+from inside the driver, then the driver cannot be exercised without a browser, and the §8.2 unit
+rows for it are unwritable. Injected, a test drives the whole state machine against a scripted tab
+and a scripted user, and the browser only appears in the §8.3 integration rows.
+
+**The driver holds a `TabHandleFactory`, not a `TabHandle`.** §7.2 wires the worker's graph once,
+at startup, and a handle cannot be built then: it is per-tab and per-return, it holds a `tab_id`
+that does not exist yet, and it corroborates a `tab_url` that has not been visited. So the injected
+collaborator is the factory, and the driver calls `for_session(tab_id, tab_url)` once per `start`
+and once per `resume`, from the values the session carries. Building it from *stored* values is also
+what makes §4.4's rehydration check expressible at all — `is_live()` has to be answerable against a
+handle constructed from what the record claims, before the driver is willing to act on that claim.
+A handle injected at wiring time would have had to be trusted rather than checked.
+
+**`TabHandle.is_live()` is a distinct question from having a `tab_id`.** Tab IDs are reused, so a
+rehydrated session's stored ID may now address a different page entirely; the handle answers by
+corroborating the stored `tab_url` against the live one, and the driver treats a dead handle as a
+resume failure rather than acting on the wrong tab. This is the type-level form of the §4.4 rule.
+
+**`start(item_id)` resolves the item through `OrderRepository`.** An item ID by itself is not
+addressable — the store is keyed by order — so `Order` carries its `items` and the repository
+exposes a `find_item(item_id)` returning the item together with the order it belongs to. The driver
+needs both: the item names what is being returned, the order names the retailer whose adapter and
+host permission apply. `ReturnRepository.active_for_item(item_id)` uses the same lookup, which is
+what keeps FR-3.3.10's one-active-return rule checkable before a second flow starts.
+
+**`ReturnRepository` is a driver collaborator, because the driver owns the machine and the machine
+lives on the `RETURN_REQUEST`.** FR-3.3.9's states are states *of a return request* — FR-3.3.10
+says so directly when it calls `LabelPrinted`, `DroppedOff`, `HandedOff` and `Aborted` terminal for
+one. A driver that held only `SessionStore` could run the machine and never record it. Two
+consequences follow and both are binding:
+
+- **`start(item_id)` calls `active_for_item` before anything else**, and refuses with the existing
+  request named by its state when one comes back. Checking after a session exists would have already
+  created the second driver FR-3.3.10 exists to prevent.
+- **`transition(next_state)` writes the return request and the session in the same `transact`.**
+  The persist-before-act guarantee is worth nothing if it covers one of the two records carrying the
+  machine: a worker dying between two separate writes leaves a session at one state and a request at
+  another, and no rule says which to believe on the way back up.
+
+**`ReturnRequest.state` is authoritative and `DriverSession.state` is a mirror.** Both records carry
+a `state` field and the split has to be stated or it becomes the bug above. The rule:
+
+| Record | Lifetime | What its `state` means |
+|---|---|---|
+| `ReturnRequest` | The whole life of the return, including long after any driver has stopped | **The FR-3.3.9 state.** This is what FR-3.3.10 reads, what the popup renders, and what eviction's non-terminal carve-out tests |
+| `DriverSession` | Only while a driver is attached; `SessionStore.clear()` on reaching a terminal | The *driving* position — the tab, the step, and a copy of the state written in the same `transact` so a rehydrating worker can check the two agree before trusting either |
+
+A terminal state clears the session and leaves the request. This is why `SessionStore.clear()`
+exists, why §4.4 can conclude that a session with no matching tab is `Stalled` without consulting
+anything else, and why a return request in a terminal state has no session at all — which is the
+correct answer to "what is driving this?" once nothing is.
+
+**`RetailerAdapter.return_method_options` is a structure, not a selector, because FR-3.3.4 needs
+pairs.** The requirement is to stop and present *every* option the driver can see, each with its
+cost stated, to mark an unreadable price **unknown** rather than omit the option, and never to
+select while any price in the set is unknown. The single `return_method_selector` that requirements
+§5.3 carried until this revision cannot express that:
+it can find a control, but not the label and the price that belong to it, so the pairing would have
+to be re-derived inside the driver once per retailer — which is exactly where FR-3.3.4's SHALL NOT
+would then have to be re-derived too. So the adapter declares the container, the repeated option
+within it, and the label and price within *that*, in the same way `step_selectors` declares steps.
+A price selector that matches nothing is a readable option with an unknown price, which is the case
+FR-3.3.4 names — and, per the same requirement, an FR-3.7.3 adapter-health signal, because a
+retailer whose prices stopped being readable has changed its flow.
+
+**`carrier_by_option` and `label_carrier_patterns` are the first two of FR-3.3.5's three sources,
+and `ReturnDriver.derive_label_carrier` is what walks them in order.** `label_carrier` gates the
+entire pickup path and had no owner in this document before this revision. It has one now, and the
+order of preference is the requirement's, not a convenience:
+
+1. **The option the user chose.** `ReturnMethodOptions.carrier_by_option` maps a presented option to
+   the carrier whose postage it yields. This is the primary source and it consults no page: the user
+   already told us, under FR-3.3.4, and the adapter already knew what each option meant.
+2. **Recognition on the label page, in the browser.** `label_carrier_patterns` is a per-carrier map
+   of selectors and patterns — branding, and the tracking-number format — matched against the label
+   page locally. FR-3.1.3 forbids *transmitting* that page, not reading it, which is the distinction
+   that makes this source available at all.
+3. **Asking.** `UserPrompt.ask` — "whose label is this?" — is a question a person holding a printed
+   label answers in one glance.
+
+**A miss at source three is not a value.** `derive_label_carrier` returns nothing determinable, the
+driver does not schedule, and the flow completes as a drop-off. It **never falls back to USPS**:
+that is FR-3.3.5's explicit SHALL NOT, and the reason is the failure it produces — a pickup that
+books, a box left out, and nobody coming, discovered after the window closes. The rule is stated
+here, where the derivation lives, rather than only at the server's `WrongCarrierLabel` backstop,
+because a client-supplied field checked server-side is a second line and the requirements say so.
+The flow this method sits in is §4.6.
+
+### 3.4 Extension — storage
+
+```mermaid
+classDiagram
+    class StorageCoordinator {
+        -orders
+        -pickups
+        -returns
+        -addresses
+        -clock
+        +transact(fn) None
+        +evict_if_over_cap() EvictedOrders
+        +evict_to_fit(bytes_needed) ReclaimedBytes
+        +clear_all(options) ClearResult
+    }
+    class OrderRepository {
+        -clock
+        +upsert(orders) None
+        +list() list~Order~
+        +get(order_id) Order
+        +find_item(item_id) ItemInOrder
+        +delete(order_ids) None
+    }
+    class PickupRepository {
+        -clock
+        +save_intent(request, consent) Pickup
+        +promote(booking_intent_id, response) Pickup
+        +get(booking_intent_id) Pickup
+        +list_unsettled() list~Pickup~
+        +mark_collected(booking_intent_id) None
+        +mark_abandoned(booking_intent_id) None
+        +delete(booking_intent_id) None
+    }
+    class ReturnRepository {
+        +create(item_id) ReturnRequest
+        +update(request) None
+        +active_for_item(item_id) ReturnRequest
+        +delete(item_ids) None
+    }
+    class AddressRepository {
+        +get() Address
+        +set(address) None
+        +clear() None
+    }
+    StorageCoordinator --> OrderRepository
+    StorageCoordinator --> PickupRepository
+    StorageCoordinator --> ReturnRepository
+    StorageCoordinator --> AddressRepository
+```
+
+**Every entity has exactly one key, and the keys are declared upstream** (revised 2026-08-28, sixth
+review, CLASS-3/CONSIST-2). `item_id` and `return_request_id` were used as primary keys throughout
+this section while §3.5 deferred entity fields to the upstream ERDs, which did not contain them —
+so the store's keys were defined in no document at all. Both are now declared in requirements §4.2's
+ERD and high-level design §4.2's, as locally generated opaque strings unique across the store and
+never transmitted. `ORDER` keeps its natural key, `(retailer, retailer_order_id)`, which is what
+`upsert` merges on.
+
+**`PickupRepository` is keyed by `booking_intent_id`, and the `pickup_id` this section used
+alongside it is gone** (same revision). It was a second key for one record, and the two would have
+diverged on precisely the branch that matters: a schedule whose response is lost leaves a `Booking`
+record that has an id the client generated and no id derived from a booking. `booking_intent_id` is
+already declared upstream, is already generated locally, and is already written *before* the
+schedule call — so the record has one identity from the instant it exists, on every branch. `get`,
+`mark_collected` and `delete` now take it, as `promote` and `mark_abandoned` already did.
+
+**`list_unsettled() list[Pickup]` names its element type, and the derivation happens beneath it, not
+above** (CLASS-1, DAL-1). "Unsettled" is a real predicate — it must exclude the two states §5.2
+derives at read from `PICKUP_SETTLED_AFTER_DAYS` and `BOOKING_ABANDONED_AFTER_HOURS` — and a bare
+`list` communicated none of it. **The rule for the derivation is that `PickupRepository` applies it
+on every read, in one place, and no caller ever observes a stored state that should have been
+derived away.** `get` returns a pickup already resolved to `Collected` or `Abandoned` if the elapsed
+interval says so, and `list_unsettled` filters on the resolved value. Stating one application point
+is what stops the eviction path and the popup's detail view reporting the same pickup in two
+different states — which they could have, since §5.2 named the derivation only where eviction uses
+it. The stored value is left alone; the derivation is a read-time projection, not a write, which is
+what keeps it free of the background timer this runtime cannot provide.
+
+**`upsert` merges by `(retailer, retailer_order_id)` and must never touch `first_seen_at`.** FR-3.1.5
+orders eviction on it, so a revisit that refreshed it would silently reset an order's age and make
+the retention ceiling unenforceable. This is the single most likely accidental regression in the
+storage layer and belongs in a test, not a comment.
+
+**`save_intent` and `promote` are two calls because the schedule response is what carries the
+address to snapshot.** §5.2: the provisional record is written before the call so a lost response
+leaves evidence, and promotion writes `BOOKED_ADDRESS` from the *response*, never from the client's
+own address.
+
+**`save_intent` takes the consent stamp as a second argument, because NFR-6.2's record has to be
+written by the same call that creates the thing it consents to.** NFR-6.2 requires `consented_at`
+and `consent_extension_version` on the `PICKUP` record, captured at the confirmation screen that
+precedes `POST /pickups`, and **never recorded server-side** — the server is stateless and this is
+the one place a consent record could otherwise have gone missing. Passing it in makes three things
+structural rather than remembered:
+
+- **There is no `Pickup` without a consent stamp.** The provisional record and its consent are one
+  `set`, inside the same `transact`, so no crash can leave a booked pickup whose consent is unproven.
+- **The stamp comes from the confirmation screen, not from the repository.** `consented_at` is when
+  the user pressed the button, not when storage got round to writing; a `clock` call inside
+  `save_intent` would record the wrong instant and would still record one if the screen was never
+  shown.
+- **`consent_extension_version` is the version of the disclosure the user actually saw**, which is
+  the extension version at the moment of the gesture. It is read from the manifest at the screen and
+  carried, for the same reason.
+
+`promote` does not take it and does not rewrite it. Consent is given once, before the network call;
+the carrier's answer cannot retroactively change what the user agreed to. §4.3 draws the path and
+the §8.3 row "Schedule writes the consent record" asserts both fields land with the provisional
+write rather than the promotion.
+
+**`clear_all` returns a result rather than `void`** because §4.3's deletion carve-out requires
+enumerating uncancelled pickups and offering to cancel them first. A repository method that just
+deleted would make the carve-out impossible to honour from the call site.
+
+**The two operations that span entities belong to `StorageCoordinator`, not to `OrderRepository`.**
+Eviction deletes orders and must not orphan a pickup that is still unsettled; `clear_all` reads
+pickups to build its result and then deletes across all three. Hanging those off the order
+repository made it depend on the other two, which is a repository knowing about entities that are
+not its own. The coordinator is the only object that knows more than one, and each repository is
+left owning exactly one key.
+
+**`transact(fn)` is the composed-write mechanism, and it is not a transaction.** `chrome.storage`
+offers atomicity per `set` call and nothing across a read-then-write pair, so the honest primitive is
+a serialising queue: `transact` runs `fn` with exclusive access to the store, reads what it needs,
+and commits **every touched key in a single `set`**. That gives two guarantees and withholds a third
+— no two composed writes interleave, and a composed write lands whole or not at all; but a write
+that has landed **cannot be rolled back** by a later failure in the same worker. Anything needing to
+survive a rollback must therefore be ordered last. Since §2.2 makes the worker the only writer, one
+queue in one worker covers every writer there is. This is what `save_intent` and `promote` run
+inside, and what makes the read-modify-write in `upsert` safe against a second scan arriving mid
+flight.
+
+**The rule `transition` follows is general, and it is stated here as a law rather than left as one
+good instinct** (added 2026-08-28, sixth review, DAL-2). **Every invariant that spans more than one
+record SHALL be written in a single `set`.**
+
+**"Invariant" here has a mechanical test, so the law can be applied rather than interpreted (defined
+2026-08-28, seventh review, UNCLEAR-2).** An invariant spanning more than one record is any statement
+that must be true of two or more stored records *together*, such that **a reader observing one record
+updated and the other not would draw a conclusion this design says is impossible**. The test is that
+last clause, and it is applied by asking one question of a proposed pair of writes: *if the worker
+died between them, is the resulting store a state some section of this document declares unreachable?*
+If yes, the two writes are one invariant and go in one `set`; if no, they are independent and may be
+separate. The distinction it draws is real rather than rhetorical. `transition`'s request and session
+are one invariant, because a request in `Driving` with no session is a state §4.1 says cannot exist.
+The `Collected`/`LabelPrinted` pair in §4.5 is one invariant, because a collected pickup whose request
+still shows a live label is a return the popup would offer to complete for a box that has gone. By
+contrast, `upsert`ing an order and later writing an unrelated pickup for a different item are **not**
+one invariant: each is independently true, nothing cross-reads them, and forcing them into one `set`
+would buy nothing. Note also what the law does not say. It does not require every write inside one
+`transact` to be one `set` as a matter of style, and it does not make a many-field write to a single
+record an invariant needing special handling — one record is one key, and one key is already atomic.
+
+`transition` is the case the document already argued —
+the request and the session carry the machine between them, and a worker dying between two separate
+writes leaves them disagreeing with no rule saying which to believe. But it is not the only such
+pair: `save_intent` writes a pickup and its `ConsentStamp`, and `clear_all` deletes three
+collections and the address. Each is one `set`, for the same reason, and the generalisation is what
+makes the next one correct by default instead of by someone remembering. The corollary is the
+honest limit of `transact`: because a landed write cannot be rolled back, a composed write that has
+to survive a *later* failure in the same callback must be ordered last — which is the existing
+`save_intent`/`promote` rule, now derived from the law rather than stated beside it. **There is no
+startup repair pass, and there does not need to be**: a partial multi-record write is not reachable
+when every such write is one `set`, so the only recovery `src/storage/` implements is §5.2's rebuild
+on an unreadable or forward-versioned store.
+
+**Both repositories that reason about time take a `clock`.** `upsert` stamps `first_seen_at`,
+eviction compares against it, and `mark_abandoned` fires on an elapsed interval — all three are
+otherwise `Date.now()` calls buried in a method, which makes retention and abandonment testable only
+by waiting. With an injected clock the §8.2 rows for FR-3.1.5 and the `Booking → Abandoned`
+transition run instantly and deterministically. `ReturnRepository` takes none, because it stamps
+nothing.
+
+**It is one clock instance injected twice, not two clocks.** `StorageCoordinator` receives it and
+hands the same object to each repository that needs one. Two clocks free to disagree would let a
+pickup be stamped after the order that must outlive it, and the resulting eviction bug would appear
+only under a test that advanced one and not the other — which is to say, never in CI and once in
+production.
+
+**The cancellation flow needs four `PickupRepository` operations, so they are declared.** §4.5
+loads a pickup by id to recover its confirmation number and booked address, writes `Collected` when
+the refresh reveals the carrier already came, and deletes the record once a cancel succeeds. Those
+are `get`, `mark_collected` and `delete`. `mark_collected` is separate from a general `update`
+because `Confirmed → Collected` is the one transition in the pickup lifecycle that is *observed*
+rather than commanded — §5.2 — and a repository method named for it is what keeps that observation
+from being written as an arbitrary state assignment somewhere in the worker.
+
+**`ReturnRepository.delete(item_ids)` exists because `ClearResult.returns_deleted` is a count of
+something, and eviction has to take return requests with the orders they belong to.** Both callers
+are the coordinator's cross-entity operations. `clear_all` deletes every return and reports the
+number; eviction deletes an order's returns as it deletes the order, because a `RETURN_REQUEST`
+keyed to an item whose order is gone is unreachable — `find_item` is the only way in, per the last
+paragraph of this section — and would sit in the quota forever. It takes item IDs rather than order
+IDs so that the coordinator, which is the object that knows an order's items, does the joining; the
+return repository continues to know only its own key. The **non-terminal carve-out is the
+coordinator's**, not this method's: §5.2 forbids evicting an order whose return is still running, so
+by the time `delete` is called that question has already been answered and the method's job is to
+delete what it is told.
+
+**The popup gets a `ReadOnlyStore`, not a `StorageCoordinator`, and the single-writer rule is
+therefore a type rather than a convention** (added 2026-08-28, sixth review, CLASS-2). §7.2 said the
+popup "constructs a `StorageCoordinator` over the same repositories" and never calls the four
+mutating methods — which is a rule a future popup feature can break without a single signature
+changing, and §2.2's `POPUP -- "reads only" --> STORE` qualifier had nothing enforcing it. So
+`src/storage/` exports a second, narrower type:
+
+```mermaid
+classDiagram
+    class ReadOnlyStore {
+        +list_orders() list~Order~
+        +get_order(order_id) Order
+        +find_item(item_id) ItemInOrder
+        +get_pickup(booking_intent_id) Pickup
+        +list_unsettled_pickups() list~Pickup~
+        +active_return_for_item(item_id) ReturnRequest
+        +address() Address
+    }
+    class StorageCoordinator {
+        +transact(fn) None
+        +evict_if_over_cap() EvictedOrders
+        +evict_to_fit(bytes_needed) ReclaimedBytes
+        +clear_all(options) ClearResult
+    }
+    StorageCoordinator ..|> ReadOnlyStore
+```
+
+**`ReadOnlyStore` is a flat surface of exactly seven members, and the enumeration above is the whole
+of it** (redrawn 2026-08-28, seventh review, CLASS-1). The first drawing of this diagram returned
+three types — `OrderReads`, `PickupReads`, `ReturnReads` — that no section defined and no plan task
+built; they are gone, and nothing else in this document ever named them. The surface is flat rather
+than a set of per-repository accessors for a reason that is not cosmetic: an accessor returning a
+repository would hand the popup `upsert`, `promote` and `delete` along with the reads, which is the
+exact leak the type exists to close. Method names are qualified — `get_order`, `get_pickup` — because
+three repositories each have a `get` and a view that flattens them cannot keep the bare name.
+
+The reads are the same reads the repositories perform, called through the coordinator that owns
+them, so §3.4's derivation rule still applies at one point: `get_pickup` and `list_unsettled_pickups`
+return states already resolved to `Collected` or `Abandoned` where the elapsed interval says so, and
+the popup cannot see a stored state that should have been derived away. `StorageCoordinator`
+satisfies it, so the worker
+holds one object and passes it wherever a read is all that is wanted; the popup is constructed with
+`ReadOnlyStore` and cannot name `transact`, `evict_to_fit`, `evict_if_over_cap` or `clear_all` at
+all. **It reads through the same repositories, which is the property §7.2 was protecting** — a
+read-only copy of the data would not see §5.2's derived states — so nothing about what the popup can
+*see* changes; only what it can reach. A popup feature that needs a write now fails to compile
+rather than passing review, and the compile error points at `src/messaging/`, which is where the
+write belongs.
+
+**`AddressRepository` is owned by `StorageCoordinator` like the other three, and `clear_all` deletes
+the address with everything else — through `clear()`.** The address is user data under the same
+Limited Use disclosure as the orders; a "delete everything" that quietly kept the user's home
+address would be the single worst thing this design could leave behind. So the repository declares
+the operation rather than leaving the coordinator to remove a key it does not own: `clear()` is the
+one call, and `clear_all` makes it inside the same `transact` as the other three deletions, so a
+partial clear is not a reachable state. It is not counted in `ClearResult` — there is at most one
+and the caller does not need a number — but it is gone, and the §8.2 row for `clear()` asserts a
+subsequent `get()` returns nothing. Eviction never calls it: FR-3.1.5's ceiling is about order age,
+and an address has no age the product reasons about, which is also why `AddressRepository` takes no
+clock.
+
+**`Order` carries its `items`, and `find_item` is the only way in.** The store has one key per
+order; an item has no key of its own. `find_item` returns the item *and* its order together, because
+every caller needs the retailer as well as the item — see §3.3.
+
+### 3.5 The types the diagrams name
+
+Most type names above are the high-level design's entities under their implementation names, and
+this document deliberately does not restate them: `Order`, `OrderItem`, `ReturnRequest`, `Pickup`,
+`Address` and `BookedAddress` are defined by **high-level design §4.2**, and its ERD is the
+authority on their fields and cardinalities. Restating them here would create a second definition to
+keep in sync, and the first thing to drift would be the field that matters.
+
+**The deferral only works if the target actually contains what is deferred, and for three fields it
+did not** (2026-08-28, sixth review, CLASS-3/CONSIST-2). `item_id`, `return_request_id` and
+`pickup_id` were used as primary keys across §3.3, §3.4 and §5.2 and appeared in neither upstream
+ERD — so this section pointed at a definition that was not there, and the store's keys existed in no
+document. That is closed two ways rather than one, because the three were not the same problem:
+`item_id` and `return_request_id` are genuine entity keys and are now **declared upstream**, in both
+ERDs, with their type, generation and uniqueness scope (see §10's amendment table). `pickup_id` was
+not a missing declaration but a **redundant key** and has been removed — `booking_intent_id` was
+already declared upstream and already written before the schedule call, so it is the pickup's
+identity on every branch including the lost-response one. The rule this leaves is worth stating,
+since it is the one the deferral rests on: **a key this document addresses records by is part of the
+entity and belongs upstream; a shape this document invents belongs in the table below.** A field
+that is neither is the gap that had opened.
+
+**`DriverSession` was in the table below and does not belong there** (moved 2026-08-28, seventh
+review, CLASS-2). It is an upstream entity — high-level design §4.2 names it and both ERDs declare
+it — so listing it among the shapes "defined here and nowhere else" was the deferral rule broken by
+the section that states it. Worse, its row enumerated twelve persisted fields where the ERDs declared
+five, and renamed two of those five on the way past. Under decision D25 the fix is upstream: the
+seven undeclared fields — `state`, `item_id`, `order_id`, `chosen_option`, `attempt_count`,
+`started_at`, `schema_version` — are now declared in **requirements §2.2's ERD and high-level design
+§4.1's**, with high-level design §4.2 carrying what each is for; and the rename is resolved the other
+way round, by **adopting the upstream spelling**. `last_written_at` is `last_progress_at`, upstream's
+name, everywhere in this document and in the plan. `adapter_step_key` was corrected *upstream* to
+`step_key`, because requirements §4.1's own `/returns/next-step` row already spells the concept
+`step_key` and one requirements document carrying two names for one field is the drift the ERD exists
+to prevent. Both are logged in §10.
+
+So this document restates none of `DriverSession`'s fields. What it still owns is behaviour, and that
+is where it stays: `state` is a mirror of the authoritative `ReturnRequest.state`, written in the same
+`transact` (§3.3); `tab_url` corroborates `tab_id` (§4.4); `chosen_option` carries FR-3.3.5's first
+source across the window §4.6 opens (below); `attempt_count` is bounded by `RETURN_ATTEMPT_LIMIT`
+(§7.2); `schema_version` is what makes §5.2's defensive read possible.
+
+Fourteen types are *not* upstream entities — they exist only because of a decision in this document,
+so they are defined here and nowhere else.
+
+| Type | Fields | Why it exists |
+|---|---|---|
+| `ValidatedAction` | `kind`, `target`, `value`, `adapter_key`, `step_key` | Constructible only by `ActionValidator`. Carries the adapter and step it was checked against, so `StepExecutor` cannot be handed an action validated for a different page |
+| `RetailerPolicy` | `retailer_key`, `default_return_days` | The per-retailer return window requirements §5.3 configures, resolved from the page URL by `IngestService` and passed into `derive_window` so the derivation stays pure — §3.2, §7.1. It is **configuration, not an entity**: nothing persists it, and a retailer with no entry gets the system default of 30 rather than an absent policy |
+| `DerivedWindow` | `return_by`, `window_inferred`, `basis` | The return of `derive_window`. `basis` names which of §3.2's five precedence rows fired — `stated_deadline`, `stated_days`, `default_days`, `undetermined` — and exists so an inverted precedence fails a test instead of quietly shipping. Only `return_by` and `window_inferred` are persisted; both are declared upstream on `ORDER` |
+| `ReadOnlyStore` | Seven members, no fields — `list_orders`, `get_order`, `find_item`, `get_pickup`, `list_unsettled_pickups`, `active_return_for_item`, `address` | The narrow view of `StorageCoordinator` the popup is constructed with, so §2.2's `reads only` qualifier is a type rather than a convention — §3.4, §7.2. It is a *surface*, not a record: it holds no state and is satisfied by the coordinator itself |
+| `PendingQuestion` | `question`, `choices`, `asked_at` | The return of `UserPrompt.ask`, and the reason `ask` does not block. MV3 terminates an idle worker after roughly thirty seconds, so a call that waited for a human answer would be a call that never returns; `ask` records the question and returns this record, and the answer arrives later as `advance(answer)` — §3.3, §9. Naming the return type is what stops the blocking reading from being re-derived |
+| `ReturnMethodOptions` | `container`, `option`, `label`, `price`, `carrier_by_option` | Adapter data describing where FR-3.3.4's options live and what each one means. Four selectors and a map, because the requirement needs option/label/price as a *pair set*, not a single control — §3.3. `carrier_by_option` is FR-3.3.5's first source |
+| `ConsentStamp` | `consented_at`, `consent_extension_version` | NFR-6.2's record, captured at the confirmation screen and passed into `save_intent`. A type rather than two loose arguments so that the pair cannot be split, half-supplied, or reordered at the one call site that writes it |
+| `EvictedOrders` | `count` | The return of `evict_if_over_cap()`. A count of **orders** |
+| `ReclaimedBytes` | `count` | The return of `evict_to_fit(bytes_needed)`. A count of **bytes** |
+| `ClearResult` | `orders_deleted`, `returns_deleted`, `pickups_deleted`, `uncancelled_pickups` | `uncancelled_pickups` is the carve-out: the caller must offer to cancel them before the deletion is presented as complete |
+| `EligibilityResult` | `eligible`, `next_pickup_date`, `reason` | The hard gate of FR-3.4.3. `next_pickup_date` is the carrier's own date, never computed locally, and is present only when `eligible`. `reason` is present only when **not** `eligible`, and the only legal value is `address-not-serviceable` — an eligibility check answers one question and has exactly one way to say no |
+| `ItemInOrder` | `item`, `order` | The result of `find_item`. A pair rather than a bare item, because no caller has ever wanted one without the other |
+| `ScheduledPickup` | `confirmation_number`, `scheduled_date`, `etag` | What `CarrierAdapter.schedule` returns. It is **not** the `Pickup` entity: it is the carrier's answer, before the client has decided to keep it. `etag` has no home in the ERD because the client stores the pickup and this token belongs to the booking that produced it |
+| `RefreshedPickup` | `state`, `scheduled_date`, `etag` | What `CarrierAdapter.refresh` returns. `state` is the carrier's own view — the value §4.5 branches on to decide whether a cancel is still possible — and `etag` is the fresh token the cancel must carry. Distinct from `ScheduledPickup` because a refresh has no confirmation number to return: the caller supplied it |
+
+**`EvictedOrders` and `ReclaimedBytes` are two types for two numbers that must never be confused.**
+Both evictors return an integer and the integers mean different things: `evict_if_over_cap()` counts
+orders removed to get back under FR-3.1.5's ceiling, `evict_to_fit(bytes_needed)` counts bytes freed
+to satisfy a quota rejection. Bare `int` returns made `if (freed < bytes_needed)` and
+`if (freed < orders_needed)` the same expression, and the caller that got it wrong would loop
+forever or give up early with no type error to catch it. They are one-field wrappers on purpose —
+the field carries no information the name does not, and the name is the entire point. This is also
+what makes the §5.2 rule legible at the call site: `evict_to_fit` is the only one that does not go
+**through** `transact` — it runs *inside* an in-flight transaction, on the quota-rejection path,
+performing its reads and its single eviction `set` directly rather than re-entering the queue — and
+it is now the only one whose return type says so. (Reworded 2026-08-28, seventh review, UNCLEAR-1:
+this sentence previously said "runs **outside** `transact`", which read as *after the transaction
+had ended* and contradicted §5.2. The two facts it was compressing are that `evict_to_fit` is
+lexically inside the failing transaction, and that it bypasses `transact` as an entry point. §5.2
+carries the full rule and the reason.)
+
+**`DriverSession.chosen_option` is persisted, not carried, and that is the whole of its reason for
+existing.** §4.6 moved `derive_label_carrier` to the label page, which is correct — source two
+matches against a page that does not exist until `Driving --> LabelReady`. What the move opened is a
+window: the user's chosen option is FR-3.3.5's **source one**, it is known at
+`AwaitingLabelChoice`, and it is not consumed until two transitions later. A worker that died in
+that window and held the option only in memory would rehydrate with source one gone and begin the
+derivation at source two — no exception raised, no wrong carrier written, just a question the
+adapter could have answered, indistinguishable from the unmapped-option case. That is a
+SHALL-ordered derivation silently changing order at runtime, and §8.2's "persist-before-act on every
+transition" is the rule it would otherwise be an exception to. So the field is written in the same
+`transact` as the `AwaitingLabelChoice --> Driving` transition, returned by §4.4's rehydration, and
+asserted by the §8.3 row that kills the worker inside the window.
+
+**Each of these types has exactly one owning module, and the three wire types have two.**
+`ValidatedAction` is owned by `src/validation/` — it is the only module that may construct one.
+`DriverSession` is owned by `src/driver/` and persisted through `src/storage/` — it is an upstream
+entity, so it appears in this ownership list and not in the table above. `RetailerPolicy` and
+`DerivedWindow` are owned by the **server**: `app/config.py` constructs the first, `app/services/window.py`
+the second, and neither crosses the wire — what reaches the extension is `return_by` and
+`window_inferred` on `OrderSchema`. `ReadOnlyStore` is owned by `src/storage/` and is the type
+`src/storage/index.ts` exports for the popup (decision D19). `PendingQuestion` is owned by
+`src/driver/`, alongside the `UserPrompt` that returns it. `ClearResult`,
+`ItemInOrder`, `EvictedOrders` and `ReclaimedBytes` are owned by `src/storage/`. `ReturnMethodOptions`
+is owned by `src/adapters/`, which is where the selectors it holds are authored. `ConsentStamp` is
+owned by `src/storage/` and constructed by the popup's confirmation screen — the one place a consent
+gesture exists. `EligibilityResult`, `ScheduledPickup` and
+`RefreshedPickup` are **response shapes of the pickup endpoints**, so they exist twice by design:
+`app/models/` defines the server's authoritative version and `src/api/` declares the extension's
+view of the same wire shape. No other extension module declares them — `src/driver/` and
+`src/storage/` receive them from `src/api/` — and the §2.2 rule that `src/api/` is the only egress
+module is what keeps the second copy from spreading. The pair is a deliberate duplication across a
+network boundary rather than a duplication inside one codebase, and the "Refresh a scheduled
+pickup" and "Eligibility, not serviceable" integration rows in §8.3 are what keep the two halves
+honest: they assert against the field names this section lists, so a rename on either side fails a
+test rather than a user's cancel.
+
+**`ScheduledPickup` and `RefreshedPickup` are adapter return types, not stored entities.** The
+`Pickup` the extension persists is assembled from a `ScheduledPickup` plus the `BookedAddress` the
+request carried; the server, being stateless, keeps neither. Their `etag` is the clearest reason
+they cannot be the ERD entity: it is a carrier concurrency token with a lifetime of one call pair,
+and putting it in the persisted model would invite exactly the caching FR-3.4.6 forbids.
+
+`StepResult` is the return type of `StepExecutor.execute` and `Answer` is the **payload of
+`UserPrompt.advance`, not the return of `ask`** (corrected 2026-08-28, seventh review, CLASS-4; this
+sentence previously gave `ask` the return type §3.3 and §9 retired in the sixth round, which is the
+reading that implies a blocking call in a runtime that terminates its worker after thirty seconds).
+`ask` returns a `PendingQuestion`, which has a row above. Each of `StepResult` and `Answer` is a
+small record whose shape follows from the one call site that produces it and the one that consumes
+it, and pinning their fields here would be documenting an implementation detail as a contract.
+
+---
+
+## 4. Class Interactions
+
+### 4.1 Ingestion, first run
+
+```mermaid
+sequenceDiagram
+    participant U as user
+    participant P as popup
+    participant CS as content-script
+    participant SW as service-worker
+    participant API as api-service
+    participant BR as bedrock
+
+    U->>P: clicks Scan this page
+    P->>SW: scan request with tab id
+    SW->>SW: activeTab grant valid for this gesture
+    SW->>CS: inject extractor
+    CS->>CS: wait for render, select subtree, strip, cap
+    CS-->>SW: capped payload plus byte count
+    SW->>SW: reject locally if over ceiling
+    SW->>API: POST orders ingest
+    API->>BR: forced tool call
+    BR-->>API: structured orders
+    API->>API: derive window, mark inferred
+    API-->>SW: orders plus request id
+    SW->>SW: validate every field
+    SW->>SW: persist, then evict if over cap
+    SW-->>P: stored count
+    P->>U: offer the standing permission
+```
+
+**The client-side ceiling check happens before the call, not after.** FR-3.1.3 binds the extension,
+and the server's identical ceiling is a backstop against a caller that is not our extension.
+
+**Validation happens after the response and before storage**, never in the other order. An order
+that fails is surfaced as unparsed and is not stored — high-level design §7.4.
+
+### 4.2 The adapter miss, which is the interesting path
+
+```mermaid
+sequenceDiagram
+    participant D as return-driver
+    participant AR as adapter-registry
+    participant X as extract egress scan
+    participant API as api-service
+    participant V as action-validator
+    participant EX as step-executor
+    participant U as user
+
+    D->>AR: selector for this step
+    AR-->>D: no match
+    D->>D: persist state before acting
+    D->>X: scan the capped step subtree it is about to send
+    alt flagged, or the scan itself could not complete
+        X-->>D: not clean
+        D->>D: treat as report stuck
+        Note over D,API: no call is made, FR-3.1.3 fails closed
+        D->>U: continue from here manually
+    else clean
+        X-->>D: clean
+        D->>API: POST returns next-step with dom and step key
+        Note over D,API: request carries retailer key, step key, steps driven
+        API-->>D: proposed action
+        D->>V: validate against vocabulary and adapter
+        alt outside vocabulary or unknown field
+            V-->>D: rejected
+            D->>D: treat as report stuck
+            D->>U: continue from here manually
+        else valid
+            V-->>D: validated action
+            D->>U: about to click X, confirm
+            U-->>D: confirms
+            D->>EX: execute
+            EX-->>D: step result
+        end
+    end
+```
+
+**The scan is the first thing on this path and the call is the second.** FR-3.1.3's obligation is
+about egress, not about capture, so the check belongs at the last moment before the payload leaves
+the extension — after capping, after any late mutation, in the worker that holds the bytes. Drawing
+it anywhere earlier would attest to a payload that is not the one sent.
+
+**The flagged branch never reaches `api-service`, and neither does a scan that fails.** Fail closed
+means the absence of a clean result is a stop, not a pass: a scanner that throws, times out, or
+returns nothing is treated exactly like a scanner that found a tracking number. Both land on
+`report_stuck`, which is a defined outcome the user can act on (`Driving --> Stalled`, requirements
+FR-3.3.9) rather than an error the user has to interpret. This is the only interaction in §4 that
+sends a page payload off the device, so it is the only one that draws the scan.
+
+**Every model-proposed action is confirmed, without exception** (high-level design §5.2). On a miss the driver has no
+configured knowledge of the step, which is exactly when the model has the most influence — so the
+"pause at irreversible steps" rule would be weakest precisely where it matters most. The rule is
+therefore "pause at irreversible steps *and* at every model-proposed action".
+
+**A timeout on the fallback call is `report_stuck`, not a wait.** NFR-6.4 budgets it at
+`MODEL_FALLBACK_TIMEOUT_MS`; a driver that hangs is worse than one that hands the step back, because
+the user cannot distinguish thinking from broken.
+
+### 4.3 Scheduling, with the provisional record
+
+```mermaid
+sequenceDiagram
+    participant SW as service-worker
+    participant PR as pickup-repository
+    participant API as api-service
+    participant PS as pickup-service
+    participant C as carrier-adapter
+
+    SW->>SW: confirmation screen, consent captured
+    SW->>PR: save intent with the consent stamp, state Booking
+    SW->>API: POST pickups
+    API->>PS: schedule
+    PS->>C: check eligibility
+    C-->>PS: serviceable, standardized address
+    PS->>C: schedule against that address
+    C-->>PS: confirmation number, etag, date
+    PS-->>API: scheduled pickup
+    API-->>SW: response carries the address USPS was given
+    SW->>PR: promote, snapshot address from response
+```
+
+**Eligibility is called inside `schedule`, every time** — FR-3.4.1 makes it a hard gate with no
+cache, and putting it in the service rather than the route is what makes "without exception"
+structurally true rather than a rule routes must remember.
+
+**The extension also calls `POST /pickups/eligibility` on its own, once, before it offers the
+pickup at all.** ~~The call site is the popup.~~ **Corrected 2026-08-28 (sixth review, PKG-1): the
+popup *initiates* the check and renders its answer; the service worker *makes* the call.** The popup
+has no egress — §2.2 draws no path from it to `src/api/` and §7.2 states it constructs no api client
+— so a call site in the popup was a sentence three other parts of this document contradicted. The
+request travels `POPUP --> MSG --> BG --> API` and the answer comes back the same way; §4.7 draws it.
+The *moment* is unchanged and is the part FR-3.4.2 constrains: immediately after a label is printed
+and before the "schedule a free pickup?" choice is rendered. This is FR-3.4.2's ordering: a user is never offered
+a pickup that cannot be booked, and an unserviceable address becomes a sentence on the confirmation
+screen rather than a failure after they said yes. The two calls are not redundant — the client one
+decides what to *show*, the server one decides what to *allow*, and only the second is a gate. If
+the two disagree because time passed between them, the schedule loses and raises; §6.1 explains why
+that is a 409 while the popup's own call is a 200.
+
+**The consent the confirmation screen captures is written by the very next call, and never sent.**
+NFR-6.2 requires `consented_at` and `consent_extension_version` on the `PICKUP` record; the diagram
+shows the only place either value exists — the gesture — flowing straight into `save_intent`
+(§3.4), inside the same `transact` that creates the provisional record. Three properties of this
+path are load-bearing:
+
+- **It lands before `POST /pickups`.** A pickup can exist without a carrier confirmation; it can
+  never exist without its consent, because the write that creates it is the write that records it.
+- **It is not in the request body.** The server neither receives, stores, nor forwards it. NFR-6.2
+  says the record is client-side, and the server being stateless means there is no second copy to
+  reconcile or to have to delete later.
+- **`promote` does not touch it.** The carrier's answer arrives afterwards and cannot change what
+  the user agreed to; a promotion that rewrote `consented_at` would be recording the wrong moment
+  and would erase the evidence for the branch where no response ever comes.
+
+**If the response is lost, the record stays in `Booking`** and no automatic retry fires. There is no
+server-side idempotency key — the server is stateless, so deduplication has nowhere to remember
+keys, and that decline is recorded and accepted in §5.2. `BOOKING_ABANDONED_AFTER_HOURS` is what
+stops the record pinning its order against eviction forever.
+
+### 4.4 Rehydration after worker termination
+
+```mermaid
+sequenceDiagram
+    participant CH as chrome
+    participant SW as service-worker
+    participant SS as session-store
+    participant T as driven-tab
+
+    CH->>SW: wake on event
+    SW->>SS: load session
+    SS-->>SW: state, tab id, tab url, step key, chosen option
+    SW->>T: query tab by id
+    alt tab missing
+        SW->>SW: move to Stalled
+    else url does not match stored url
+        SW->>SW: move to Stalled
+    else reconciled
+        SW->>SW: restore position, wait for the user
+    end
+```
+
+**A matching tab ID is not sufficient.** IDs are reused after a tab closes, so the stored URL is
+what turns "a tab with this ID exists" into "this is still the tab we were driving".
+
+**Nothing resumes by itself.** A rehydrated session waits for a person — FR-3.3.9.
+
+**The chosen option comes back with the rest, because one consumer of it runs after this point.**
+A session rehydrated between the label choice and the label page still owes FR-3.3.5's derivation,
+and that derivation's first source is the option the user picked — see §3.5 and §4.6. Rehydration
+returning everything *except* the value the next step needs is the shape of the defect: the flow
+completes, so nothing looks wrong, and only the ordering changed.
+
+### 4.5 Cancellation
+
+```mermaid
+sequenceDiagram
+    participant P as popup
+    participant SW as service-worker
+    participant PR as pickup-repository
+    participant API as api-service
+    participant PS as pickup-service
+    participant C as carrier-adapter
+
+    P->>SW: cancel this pickup
+    SW->>PR: load pickup
+    PR-->>SW: confirmation number and booked address
+    SW->>API: POST pickups refresh
+    API->>PS: refresh
+    PS->>C: refresh against the booked address
+    C-->>PS: current state and a fresh etag
+    PS-->>SW: refreshed pickup
+    alt already collected
+        SW->>PR: one transact: mark Collected and move the request to LabelPrinted
+        SW->>P: the carrier already took it
+    else still scheduled
+        SW->>API: DELETE pickup with the fresh etag
+        API->>PS: cancel
+        PS->>C: cancel with that etag
+        alt cancel accepted
+            C-->>PS: cancelled
+            PS-->>SW: ok
+            SW->>PR: delete the pickup record, the return request is untouched
+        else cancel refused
+            C-->>PS: refusal
+            PS-->>SW: typed error
+            SW->>PR: leave the pickup record unchanged
+            SW->>P: the pickup still stands, say so
+        end
+    end
+```
+
+**The refresh is mandatory and its result is not cached** — FR-3.4.6. USPS rejects a cancel carrying
+a stale ETag, and the only way to hold a fresh one is to have just asked. Two calls where one looks
+sufficient is the carrier's requirement, not an artefact of this design.
+
+**Both calls carry the booked address, not the current one.** `BOOKED_ADDRESS` exists precisely for
+this pair: a user who edited their address between scheduling and cancelling would otherwise send
+USPS an address that matches no booking, and the cancel would fail in a way that reads like a bug.
+
+**A pickup already collected is not an error, and the return request finishes with it — at
+`LabelPrinted`.** The refresh is also how the product learns that a carrier came, so the
+`Confirmed → Collected` transition is *observed here* rather than assumed elsewhere — see §5.2. This
+branch is the only place in the design where anything observes a return actually completing: the box
+is gone, the label went with it, and there is no further step the user can take. So the request
+moves to a terminal state, eviction stops protecting the order, and FR-3.3.10 permits a genuinely
+new return on the same item.
+
+**Both writes are one `set`, inside one `transact`** (added 2026-08-28, seventh review, INTERACT-1).
+"The box is gone and the label went with it" is a single fact spanning two records — the `PICKUP`'s
+`Collected` and the `RETURN_REQUEST`'s `LabelPrinted` — and §3.4's law says every invariant spanning
+more than one record is written in a single `set`. It applies here for a reason that is concrete
+rather than tidy: a worker terminated between two separate writes leaves a collected pickup whose
+return request still shows a live label, which is a return the popup offers to complete and a pickup
+§5.2's carve-out has stopped protecting. The user is shown a label for a box that has already gone.
+So `mark_collected` and the request's transition happen in the same `transact`, exactly as
+`transition` and `save_intent` already do, and §8.2's single-`set` row asserts the call count.
+
+**The terminal is `LabelPrinted`, and it is FR-3.3.9's, not a new one.** Reaching it here rests on
+an upstream amendment this revision made and cites rather than invents. FR-3.3.9 previously drew
+`LabelReady --> LabelPrinted` as *"user affirms printed"*, which conflated a field write with a
+terminal transition and left FR-3.4.5a and FR-3.4.6 — both of which require the return to sit at
+`LabelReady` while a pickup is outstanding — literally contradicting it. The requirement now reads
+**"the printed label leaves"**, and FR-3.3.6's affirmation writes the `label_printed` field without
+moving the request. Under that reading every clause agrees: a scheduled pickup holds the return at
+`LabelReady`, a cancel returns it to nothing it had left, and collection — the label physically
+leaving — is the transition. High-level design §5.2 and §5.4 carry the same wording.
+
+**No fifth terminal is introduced.** An earlier draft of this section wrote `Done` here. That was a
+state FR-3.3.9 does not define and high-level design §4.2 does not carry, so it was a low-level
+document legislating a machine it does not own — and it was unnecessary, because the amendment above
+makes an existing terminal exactly right. The four terminals remain `LabelPrinted`, `DroppedOff`,
+`HandedOff` and `Aborted`, and nothing in this document may add to them.
+
+**A cancel that fails after a successful refresh leaves the pickup standing, and the user is told
+that.** The refresh and the cancel are two calls and the second can fail on its own — a race with
+the carrier collecting between them, an ETag USPS considers stale despite having just issued it, a
+transport failure. Nothing is rolled back, because there is nothing to roll back: the refresh only
+read. The pickup record is left exactly as the refresh found it, the return request stays where it
+was, and the popup says the pickup still stands rather than reporting a cancellation that did not
+happen. The user's retry is another cancel from the top, refresh included — never a bare `DELETE`
+with the ETag from the failed attempt, which is precisely the stale value USPS will refuse. An
+`EtagExpired` on this path is the one case worth a distinct sentence, because it means the booking
+moved underneath us and the honest next step is a fresh refresh rather than a retry of the same
+call.
+
+**Deleting the pickup record is the right outcome, and the consequences are stated rather than
+left to be discovered.** A cancelled pickup and a pickup that was never booked are, after the
+cancel succeeds, the same fact: no carrier is coming. Keeping a `Cancelled` row would put a
+terminal record in front of `list_unsettled` on every read, pin its order against eviction (§5.2
+skips orders with an unsettled pickup — and a terminal one is not unsettled, so the skip would have
+to learn a new exception), and add a row to `ClearResult` that counts something the user already
+removed. So: the record is deleted, `list_unsettled` never sees it, eviction stops protecting its
+order from the next ingest onward, and `ClearResult.pickups_deleted` does not count it because
+there is nothing left to delete. What is *not* thrown away is the return request, which keeps the
+printed label — see below. The one thing lost is the history that a cancel happened, and at PoC
+nothing reads that history. **Upstream now says the same thing**: the `Cancelled` state both ERDs
+previously declared has been struck from requirements §2.2 and high-level design §4.2 under decision
+D25 (§10, seventh review, CONSIST-1), so the four states a `PICKUP` can be in are `Booking`,
+`Confirmed`, `Collected` and `Abandoned` in every document. This deletion is not a design writing
+around an upstream state; there is no such state any more. Note the asymmetry with the collected
+branch above: that one is two writes in one `set` because two records change together, while this
+one is a single deletion — the return request is not touched at all, so there is no second write and
+nothing to make atomic with it.
+
+**The return request stays at `LabelReady` — it never left.** Under the amended FR-3.3.9 a
+scheduled pickup does not move the request anywhere, so a cancelled pickup has nothing to move it
+back from; the popup simply stops offering a collection. The label is still valid and still printed,
+what the user cancelled was the pickup, and a drop-off remains available to them. Deleting the
+return alongside the pickup would throw away a working label.
+
+### 4.6 The label choice, and how the carrier gets decided
+
+```mermaid
+sequenceDiagram
+    participant D as return-driver
+    participant A as retailer-adapter
+    participant T as driven-tab
+    participant U as user
+    participant RR as return-repository
+    participant P as popup
+
+    D->>A: return method options for this retailer
+    A-->>D: container, option, label, price selectors
+    D->>T: read every option with its price
+    T-->>D: option label and price pairs
+    alt any price unreadable
+        D->>U: present the set, that one marked unknown
+        Note over D,U: FR-3.3.4 forbids selecting while any price is unknown
+        U-->>D: chooses
+    else all prices readable
+        D->>U: present the set with costs stated
+        U-->>D: chooses
+    end
+    alt user picks free drop off
+        D->>RR: state DroppedOff
+        Note over D,RR: AwaitingLabelChoice to DroppedOff, terminal, no label page
+    else user picks a printable label
+        D->>RR: state Driving and the chosen option
+        Note over D,RR: AwaitingLabelChoice to Driving, one transact
+        D->>D: drive to the label page
+        D->>RR: state LabelReady
+        Note over D,RR: Driving to LabelReady
+        D->>D: derive label carrier
+        Note over D: source 1 carrier by option, from the chosen option
+        alt no mapping for the chosen option
+            D->>T: match label carrier patterns on the label page
+            T-->>D: recognized carrier or nothing
+            Note over D,T: source 2, read locally, never transmitted
+        end
+        alt still undetermined
+            D->>U: whose label is this
+            U-->>D: answers or declines
+            Note over D,U: source 3, never a USPS default
+        end
+        alt carrier determined
+            D->>RR: label carrier
+            D->>P: offer a pickup if the carrier supports one
+        else undetermined
+            D->>P: drop-off only, no pickup offered
+        end
+        Note over D,P: either way the return ends at LabelPrinted when the printed label leaves
+    end
+```
+
+**The driver reads options and prices; the adapter only says where they are.** `ReturnMethodOptions`
+(§3.5) is four selectors and a map. Walking the container, pairing each option with its label and
+price, and marking an unreadable price **unknown** rather than dropping the option is the driver's
+work, because FR-3.3.4's SHALL NOT — never select while any price in the set is unknown — has to be
+enforced once, in one place, rather than once per adapter author.
+
+**An unreadable price is a presented option and an adapter-health signal.** The option still appears,
+its cost reads *unknown*, and the driver will not auto-select anything in that set. Separately it is
+an FR-3.7.3 health event: a retailer whose prices stopped parsing has changed its flow, and that is
+worth knowing before the selectors fail outright.
+
+**`derive_label_carrier` is called at the label page, not at the choice**, and it walks FR-3.3.5's
+three sources in the requirement's order — the chosen option's mapping, then client-side recognition
+on the label page, then asking. The ordering is forced by source two: `label_carrier_patterns` match
+against *the label page*, and that page does not exist until `Driving --> LabelReady: label page
+reached` (requirements FR-3.3.9). Deriving at the moment of choice would make source two
+unreachable and push every unmapped option straight to a question the page was about to answer. So
+the chosen option is **persisted** on the `DriverSession` in the same `transact` that writes
+`AwaitingLabelChoice --> Driving`, survives a worker death anywhere in the window, comes back with
+§4.4's rehydration, and is read at `LabelReady` — with all three sources available in order. It is
+persisted rather than carried in worker memory for the reason §1.1 constraint 1 gives for every
+other piece of flow state: the worker dies mid-flow routinely, and a value held only in memory
+across two transitions is a value that is sometimes not there. §3.3 states the rule the diagram draws: **a miss is not a value,
+and never USPS.**
+
+**The three branches out of the choice are the three edges FR-3.3.9 draws, and no others.** A free
+drop-off is `AwaitingLabelChoice --> DroppedOff` **directly**: there is no label to print, no label
+page to reach, and the return never passes through `LabelReady` or holds a carrier. A printable
+label is `AwaitingLabelChoice --> Driving`, and only the drive that follows reaches
+`Driving --> LabelReady`. A cancel is `AwaitingLabelChoice --> Aborted`, which this diagram does not
+draw because nothing after it is interesting. The distinction that matters downstream: **printable
+and non-printable are different edges, not one edge with a flag** — the earlier draft of this
+section merged them and wrote `LabelReady` on both, which is a transition the state machine does not
+define.
+
+**Source two reads the label page and does not transmit it.** FR-3.1.3's absolute prohibition is on
+sending that page anywhere; matching `label_carrier_patterns` against it happens in the tab, in the
+browser, and nothing leaves. This is the distinction §2.2 assigns and it is what makes the middle
+source available at all — without it, a user who chose an option the adapter has no mapping for
+would be asked a question the page already answers.
+
+**Undetermined is a complete, successful outcome, and it still ends at `LabelPrinted`.** The return
+reaches `LabelReady` with no `label_carrier` and the popup offers drop-off only — but the user is
+holding a printed label, so the terminal is the one `LabelReady` has: `LabelReady --> LabelPrinted:
+the printed label leaves`. "Drop-off only" here names what is *offered* (no pickup), not the
+`DroppedOff` state, which is reachable only from `AwaitingLabelChoice` and only when there was never
+a label to print. FR-3.4.2 is satisfied by *not* offering a pickup that could not be booked; the
+failure this avoids is a pickup that books, a box left out, and nobody coming.
+
+**A `DroppedOff` terminal writes the return request and nothing else.** It is entered straight from
+`AwaitingLabelChoice` when the user picks a free drop-off option, so no label page was reached, no
+carrier was derived, and no pickup record exists — there is nothing to cancel, nothing to refresh,
+and no consent to record, and the confirmation screen of §4.3 is never reached. The session is
+cleared, per §3.3, because a terminal state has nothing driving it.
+
+### 4.7 The pre-offer eligibility check
+
+Added 2026-08-28 (sixth review, PKG-1 and INTERACT-1). It earns a diagram by §10's own test: FR-3.4.2
+is an **ordering** constraint — the check completes before the pickup offer renders — and ordering is
+the one thing prose states worse than a diagram does. It is also the flow three sections of this
+document had drifted apart on, so drawing it is what stops them drifting again.
+
+```mermaid
+sequenceDiagram
+    participant P as entrypoints/popup
+    participant M as src/messaging
+    participant BG as entrypoints/background
+    participant A as src/api
+    participant S as server /pickups/eligibility
+
+    P->>P: label printed, label_carrier is USPS
+    P->>M: check-pickup-eligibility(address)
+    M->>BG: routed to the worker
+    BG->>A: eligibility(address)
+    A->>S: POST /pickups/eligibility, X-Boomerang-Client-Version
+    S-->>A: 200 EligibilityResult
+    A-->>BG: EligibilityResult
+    BG-->>M: result
+    M-->>P: result
+    P->>P: eligible renders the pickup offer, not eligible renders the second answer
+```
+
+**Every hop that is an import is an edge §2.2 already permits (narrowed 2026-08-28, seventh review,
+INTERACT-2).** Two of the five hops are import edges and the claim is about those two: `POPUP --> MSG`
+carries the request and `BG --> API` carries the egress, both drawn in §2.2, and the popup never
+touches `src/api/`. The `M->>BG` and `BG-->>M` hops are **not** import edges and no §2.2 arrow
+corresponds to them — they are `chrome.runtime` runtime deliveries, the third edge kind §2.2's
+"two edge kinds" paragraph names, and their absence from the graph is correct rather than a gap.
+The `A->>S` hop leaves the extension entirely and is a network call, drawn in §2.1's territory, not
+§2.2's. This distinction matters mechanically: plan Task 10.3 encodes only the import edges as
+`eslint-plugin-boundaries` rules, so a claim that *every* hop here is a graph edge would send someone
+looking for two rules the linter should never have. The resolution of PKG-1 stands on the two hops
+that are real edges, and it is the one consistent with §7.2's no-egress property, which is worth more
+than the hop it costs: a popup that cannot reach the network is a surface no compromised page can use
+as a proxy.
+
+**The check is a read, and it is still routed through messaging.** §2.2's qualifier previously read
+"every mutation", which is why this call had no drawn path — it is not a mutation. The qualifier now
+reads "every mutation, and every request needing egress", and the two rules compose cleanly: the
+popup reads the *store* directly and reaches the *network* never.
+
+**This is not the FR-3.4.1 gate and must not be mistaken for one.** §4.3's eligibility call, made
+inside `PickupService.schedule` on the server, is the gate. This one decides what to *show*. If the
+two disagree because time passed between them, the schedule loses and raises `AddressNotServiceable`
+as a 409, while this call answers 200 with `eligible: false` — §6.1 and §6.2 explain why a negative
+answer here is not an error. A design that merged them would have to make one of the two wrong.
+
+**A failure of this call is not a refusal.** If the request cannot be made, the popup does not
+silently drop the pickup offer, because "we could not ask" and "USPS will not come" are different
+sentences and the second one is a claim. It surfaces the failure; the label remains valid for
+drop-off either way, which is the outcome no failure on this path can take away.
+
+**Two failure kinds, two recoveries (split 2026-08-28, seventh review, ERR-1).** A *transport*
+failure — the worker unreachable, the network down, a 5xx, a timeout — is transient, so the popup
+offers **retry**: the same request may well succeed a moment later. A **426 `client-too-old` from the
+version gate is not transient and retry is the one thing that cannot fix it**, because every retry
+sends the same rejected version header; §8.3 requires the update prompt for this response and that is
+what the popup shows here, not a retry button. Offering retry on a 426 is a loop the user cannot exit,
+which is why the two are separated rather than described together as "a failure of this call". A 426
+is also the one case where the eligibility answer stays unknown for as long as the extension stays
+stale, so the pickup offer is withheld rather than deferred — and the drop-off path, which needs no
+server at all, is what the popup points at meanwhile.
+
+---
+
+## 5. Data Access
+
+### 5.1 The server has none
+
+Stated as a section because its absence is a design decision that reviewers will otherwise try to
+fill. No ORM, no migrations, no connection pool, no transaction boundaries. The only thing resembling
+a cache is `TokenProvider` and the SSM credential fetch, both scoped to the warm container lifetime
+and both populated in the FastAPI lifespan startup that Mangum runs on cold start.
+
+### 5.2 The extension's store
+
+`chrome.storage.local` is a key-value store with no queries, no indexes and no transactions. The
+repository layer exists to stop that shape leaking into the driver.
+
+| Concern | Approach |
+|---|---|
+| Layout | One key per entity collection, plus a singleton key for the address and one for the driver session |
+| Atomicity | `chrome.storage.local.set` is atomic per call. **Any multi-entity update is one `set` of one composed object**, never a sequence of writes |
+| Read-modify-write | Serialised by `StorageCoordinator.transact` (§3.4). There is exactly one writer — the worker (§2.2) — so one queue in one process covers every writer that exists |
+| Eviction, by count | `evict_if_over_cap` runs after every ingest, ordered by `first_seen_at`, skipping orders with a non-terminal return or an unsettled pickup |
+| Eviction, by bytes | `evict_to_fit` runs only on a quota rejection, same order and same skip rule, until the store has freed what the write needs |
+| Quota | A write that exceeds the quota **fails the operation that attempted it**. It is never swallowed — see below |
+| Derived state | `Booking → Abandoned` and `Confirmed → Collected` are **evaluated on read**, not written by a timer — see below |
+| Migration | A stored schema version key. On mismatch the store is **rebuilt, not migrated**, at PoC — with the pickup carve-out below |
+
+**The carve-out joins on `item_id`, in two hops, and the coordinator is what walks them.** Both
+evictors skip an order that has a non-terminal return or an unsettled pickup, and neither of those
+records mentions an order. High-level design §4.2's ERD is the chain:
+`ORDER → ORDER_ITEM → RETURN_REQUEST → PICKUP`, so the joins are
+
+| From | Via | To |
+|---|---|---|
+| `RETURN_REQUEST` | its `item_id` | the order, through `OrderRepository.find_item(item_id).order` |
+| `PICKUP` | its `return_request_id`, then that request's `item_id` | the same way |
+
+`PICKUP` carries no order reference and is not given one. Denormalising an `order_id` onto it would
+create a second path to the same answer that could disagree with the first, and the record it would
+disagree about is the one holding a booked carrier visit. So before evicting, the coordinator builds
+the protected set once — every `item_id` with a non-terminal return, plus every `item_id` reached
+from `list_unsettled()` — resolves each to its order, and skips those orders. That is also why this
+is the **coordinator's** rule and not `ReturnRepository.delete`'s (§3.4): the coordinator is the only
+object that can see all three keys, and the join is the whole reason cross-entity operations live
+there.
+
+**A quota-exceeded write is a failure the user is told about.** `chrome.storage.local` is bounded at
+roughly 10 MB without `unlimitedStorage`, which FR-3.7.1's minimal manifest does not request and
+this design does not add — an extension asking for unlimited storage invites exactly the review
+question the small manifest exists to avoid. So the ceiling is real and can be reached by a user
+with many large orders.
+
+**The remedy for a byte-quota rejection has to be byte-driven, which is why there are two
+evictors.** `evict_if_over_cap` counts orders against `MAX_STORED_ORDERS`; a store holding thirty
+unusually large orders under a cap of fifty is *not* over that cap, so calling it on a quota
+rejection would delete nothing and the retry would fail identically — a retry loop that cannot
+converge. `evict_to_fit` instead takes the size of the write that was refused and evicts oldest-first
+until at least that much has been freed, using the same `first_seen_at` order and the same carve-out
+for orders with a non-terminal return or an unsettled pickup. On rejection the coordinator calls
+`evict_to_fit` once and retries the write a single time; if it fails again — which happens when
+every remaining order is protected by the carve-out, or when the single write is simply larger than
+the quota — the operation raises, the caller surfaces it, and **nothing is silently dropped**. A dropped ingest costs a re-scan and is merely annoying; a dropped
+`save_intent` or `promote` costs a booked carrier visit the product can no longer see, which is the
+failure this whole layer is built to prevent. The one thing forbidden is catching the rejection and
+carrying on as though the write had landed.
+
+**`evict_to_fit` measures a candidate by serialising it, because the platform will not measure it
+for us.** `chrome.storage.local.getBytesInUse` answers for *keys*, and the layout row above stores each
+collection under a single key — so the only byte figure the API will produce is the size of the whole orders
+collection, which is useless for choosing which order to drop. The eviction candidate's cost is
+therefore computed the same way the store computes what it writes: the order and the records that
+travel with it are serialised to the JSON the coordinator would have written, and the length of that
+string is the estimate. It is an estimate and this document says so — Chrome's accounting includes
+the key and its own per-entry overhead — so `evict_to_fit` deliberately evicts until the freed
+estimate reaches the requested bytes **plus a margin**, rather than stopping at the first candidate
+whose arithmetic just barely covers the write. The truth is checked once, not per candidate: a
+single `getBytesInUse` on the orders key before and after the batch tells the coordinator what was
+actually reclaimed, and it is that figure — not the sum of the estimates — that the method returns
+and that the retry decision uses.
+
+**The two evictors return different units, and the names are what disambiguate them.**
+`evict_if_over_cap` returns the **number of orders** it removed, because a count is what a cap is
+expressed in and zero means the store was already under it. `evict_to_fit` returns the **number of
+bytes** actually reclaimed as measured above, because a count of orders tells its one caller
+nothing about whether the retry can succeed. The §3.4 and §3.5 diagrams carry that distinction in
+the types themselves — `EvictedOrders` and `ReclaimedBytes` — so the signatures are the record and
+this paragraph is the reason. Two `int`s would have made a caller that swapped them type-correct and
+wrong.
+
+**`evict_to_fit` runs inside the failing `transact` and must not re-enter it.** The coordinator
+serialises composed writes through a queue, and `evict_to_fit` is called from within a transaction
+that has already been admitted — so a call that went back through `transact` would wait on a queue
+that cannot drain until the caller it is blocking returns. It therefore performs its reads and its
+single eviction `set` **directly**, not through `transact`, and the queue's guarantee is preserved
+by the fact that nothing else can be running: the transaction that triggered the quota rejection
+still holds the slot. This is the one place in the design where a write bypasses the coordinator's
+own front door, and it is safe only because of that ordering. The rule that follows is narrow and
+absolute: `evict_to_fit` is callable **only** from the coordinator's quota-rejection path, never
+from a repository, never from the worker, and never from a second transaction.
+
+**Two state transitions have no event to fire on, so they are derived at read time.** Nothing wakes
+the worker when a booking has been outstanding for `BOOKING_ABANDONED_AFTER_HOURS`, and nothing
+tells us a carrier collected a box. Both are computed by the repository as it reads: a `Booking`
+older than `BOOKING_ABANDONED_AFTER_HOURS` is *reported as* `Abandoned`, and a `Confirmed` pickup
+more than `PICKUP_SETTLED_AFTER_DAYS` past its `scheduled_date` is *reported as* `Collected` — as is
+one a refresh has explicitly said was collected. This follows the precedent FR-3.2.2 already sets for urgency, which is derived from
+`return_by` at render rather than stored and refreshed. The consequence is worth stating plainly:
+**they are not stored transitions**, no alarm is registered for either, and the only writes are the
+ones that follow a real observation — `mark_abandoned` when the user is shown the abandoned record
+and confirms it, and the `Collected` write in §4.5 when a refresh reports it. Anything that reads
+the store must go through the repository, because a raw read of the key returns the un-derived
+state.
+
+**A derived state is never written back, and `mark_collected` on an already-deriving record is an
+idempotent write, not a no-op and not an error (stated 2026-08-28, seventh review, UNCLEAR-3).**
+Three rules, in the order a caller meets them. First, **derivation never persists**: the repository
+computes `Abandoned` and `Collected` on the way out and writes nothing on a read path, so a read is
+a read — a store that reported `Collected` for a week still holds `Confirmed` on disk, and the
+derivation is recomputed every time. Reads that wrote would make eviction and clear behaviour depend
+on how often the popup was opened. Second, **the two derived states are not symmetrical about
+writing**: `Abandoned` gets a real write (`mark_abandoned`) because the user is shown the record and
+confirms it, which is an observation; `Collected` past `PICKUP_SETTLED_AFTER_DAYS` gets none,
+because nothing observed anything — only §4.5's refresh, where the carrier actually said so, writes
+it. Third, **`mark_collected` on a record already deriving as collected proceeds normally**: it
+writes `Collected` to the stored state and runs §4.5's single-`set` pair, moving the return request
+to `LabelPrinted` along with it. It is not rejected, because the caller has learned something the
+derivation only guessed — the elapsed-time rule is an inference and the refresh is evidence, and
+turning evidence into an error would leave the store guessing forever. It is not skipped either,
+because the *return request* side of that invariant may still be unwritten: the derivation moves the
+pickup's reported state and touches nothing else, so a record deriving as `Collected` can sit beside
+a request still at `LabelReady`, and only the write closes that gap. `mark_collected` on a record
+whose stored state is already `Collected` writes the same values again and is safely repeatable; the
+only state it refuses is a `PICKUP` that does not exist, which is §6.2's not-found case.
+
+**The rebuild is triggered by a version mismatch, so the read that detects it must not assume a
+version.** A defensive read means: treat the stored blob as unknown-shaped, tolerate a missing or
+unparseable `schema_version`, and never let a field access on unexpected data throw before the
+rebuild decision is made. Concretely, an unreadable store rebuilds; a store whose version is newer
+than the running code's *also* rebuilds rather than attempting to interpret it — a downgraded
+extension reading a forward version is the one case where the code cannot know what it is looking
+at. The `PICKUP` carve-out below survives both, and it is read field-by-field with each field
+defaulted, because the whole point of preserving it is that it may be the only record of a real
+booking.
+
+**The rebuild-on-mismatch rule has one exception, and it is not optional.** Confirmation numbers
+cannot be re-derived — the server holds nothing, and there is no `GET /orders`. Discarding a
+`PICKUP` record leaves a real carrier visit booked that the user can no longer cancel through the
+product. So a rebuild preserves unsettled pickups and their booked addresses even when it discards
+everything else, and the same carve-out governs the user-initiated clear of §4.3.
+
+---
+
+## 6. Error Handling
+
+### 6.1 Server
+
+A single hierarchy, converted once at the boundary:
+
+```mermaid
+classDiagram
+    class BoomerangError {
+        +reason str
+        +message str
+        +status int
+    }
+    class UnrecognizedPage
+    class PayloadTooLarge
+    class UpstreamUnavailable
+    class AddressNotServiceable
+    class LocationNotServiceable
+    class WrongCarrierLabel
+    class EtagExpired
+    class ClientTooOld
+    class LabelNotPrinted
+    BoomerangError <|-- UnrecognizedPage
+    BoomerangError <|-- PayloadTooLarge
+    BoomerangError <|-- UpstreamUnavailable
+    BoomerangError <|-- AddressNotServiceable
+    BoomerangError <|-- LocationNotServiceable
+    BoomerangError <|-- WrongCarrierLabel
+    BoomerangError <|-- EtagExpired
+    BoomerangError <|-- ClientTooOld
+    BoomerangError <|-- LabelNotPrinted
+```
+
+Each subclass is the sole owner of one reason code, and the mapping is fixed rather than chosen per
+raise site:
+
+| Class | `reason` | Status | Raised when |
+|---|---|---|---|
+| `UnrecognizedPage` | `unrecognized-page` | 422 | The model could not extract an order from the submitted DOM |
+| `PayloadTooLarge` | `payload-too-large` | 413 | The DOM exceeds the ingest bound before it reaches the model |
+| `UpstreamUnavailable` | `upstream-unavailable` | 502 | Bedrock or USPS failed, timed out, or raised anything unhandled |
+| `AddressNotServiceable` | `address-not-serviceable` | 409 | A **schedule** was attempted against an address eligibility refuses. Never raised by the eligibility endpoint — see below |
+| `LocationNotServiceable` | `location-not-serviceable` | 409 | The requested package location is not one the carrier will honour |
+| `WrongCarrierLabel` | `wrong-carrier-label` | 409 | The label's carrier is not USPS, so no USPS pickup applies |
+| `EtagExpired` | `etag-expired` | 409 | The carrier rejected the ETag on a cancel |
+| `LabelNotPrinted` | `label-not-printed` | 409 | Raised by `PickupService.schedule`, before eligibility, when the request does not assert a printed label. The server is stateless and cannot observe FR-3.3.6's affirmation itself, so it checks the claim the request carries |
+| `ClientTooOld` | `client-too-old` | 426 | The client version is below the minimum the server will serve |
+
+**A negative eligibility answer is not an error, and the eligibility endpoint never raises one.**
+`POST /pickups/eligibility` returns 200 with an `EligibilityResult` carrying `eligible: false`,
+`reason: address-not-serviceable`, and no `next_pickup_date`. FR-3.4.2 requires the extension to
+present that as "no free pickup here, the return is still valid" — a sentence the extension can only
+write if it received a result to read it out of. Modelling it as a raised error instead would give
+one route two possible body shapes under the same status code, and would leave
+`EligibilityResult.eligible` with no reachable `false` case at all: the field would exist and never
+be populated.
+
+**`AddressNotServiceable` is therefore reserved for the schedule path**, where the same fact *is* a
+failure: the caller asked for a booking that cannot be made. `PickupService.schedule` calls
+eligibility itself (FR-3.4.3 forbids skipping it, and forbids reusing a prior result), and raises
+this when the answer comes back negative. A well-behaved client never sees it — it checked first —
+but the gate is server-side and does not depend on the client having been well-behaved.
+
+**The status code is not the branch key.** Five distinct reasons now share 409, so a client
+branching on status cannot tell a wrong carrier from a stale ETag from an unserviceable address
+from a label that was never printed.
+**The `reason` is the contract; the status is transport.**
+
+Each subclass fixes its own `reason` and status. One FastAPI exception handler renders the requirements §4.2
+shape and attaches the `request_id`; **no route builds an error response itself**, which is what
+keeps the shape from drifting across seven endpoints.
+
+**An unhandled exception becomes `upstream-unavailable` with a generic message, and the detail goes
+to the log under the same `request_id`.** The rule that makes this safe is NFR-6.1: exception text
+can contain field values, so exception detail never reaches the response body and never reaches the
+log unredacted. The `request_id` is what reconnects the user's report to the log line — and, with
+order contents, titles, addresses and confirmation numbers all unloggable, it is the *only* thing
+that can.
+
+**`LocationNotServiceable` is raised by `PickupService.schedule`, not by a route**, at the point the
+adapter reports the requested package location is not among those the carrier will honour, and its
+response body carries the **reduced servable-location list** in requirements §4.2's optional
+`details` object, as `details.servable_locations`. Without that list the extension can only re-ask
+blindly, and FR-3.4.8 forbids substituting a location on the user's behalf — so the list is the
+whole point of the error and not a decoration on it. It is the only reason code that populates
+`details`; every other one omits the key entirely, which is what the requirements §4.2 rule says and
+what the handler enforces.
+
+**Every upstream call carries a deadline, and exceeding it raises `UpstreamUnavailable`.**
+`BEDROCK_TIMEOUT_PARSE_MS`, `BEDROCK_TIMEOUT_ACTION_MS` and `USPS_TIMEOUT_MS` (§7.1) bound a single
+invoke and a single carrier call; all three are well below the function's 60-second timeout.
+**The Bedrock deadline is two fields, not one**, because NFR-6.4 states the two call sites have
+different budgets and SHALL be configurable independently: `bedrock_timeout_parse_ms` serves the
+10-second parse budget, `bedrock_timeout_action_ms` the 5-second action budget. `ActionService`
+reads the second and `IngestService` the first; neither reads a shared value, and there is no
+general "Bedrock timeout" for a call site to fall back to. The action default sits below the
+client's own `MODEL_FALLBACK_TIMEOUT_MS` (§7.2) so the server abandons the call first — a server
+still working after the client has given up and reported `report_stuck` holds a concurrency slot
+for an answer nobody will read. Without these, a hung
+upstream holds one of only five reserved concurrency slots for a full minute while the client that
+asked has already given up, which converts one slow dependency into an availability problem for
+every other user. A timeout is indistinguishable from a failure to the caller and maps to the same
+reason code deliberately: there is nothing the extension would do differently.
+
+**Redaction is an allowlist, not a denylist.** A formatter that strips known-sensitive keys fails
+the first time a new field is added upstream and nobody remembers to add it to the list — and the
+failure is silent, permanent, and discovered in a log that already contains the address. So the
+formatter emits **only fields it recognises as safe** — `request_id`, `reason`, timings, status,
+route, retailer key, counts — and anything unrecognised is replaced by its type and length rather
+than its value. The consequence is accepted deliberately: a new safe field logs as a placeholder
+until someone adds it, which is a debugging inconvenience. A new unsafe field logging in full is a
+breach of NFR-6.1, and one of those two failure modes is recoverable.
+
+### 6.2 Extension
+
+| Failure class | Handling |
+|---|---|
+| Typed API error carrying a `reason` | Mapped to a typed error and branched on. **Never branched on status code** |
+| Network failure, read-only call | **At most two retries** — three attempts total — with exponential backoff from roughly 500 ms and full jitter. Each attempt is bounded by `API_REQUEST_TIMEOUT_MS` and the whole sequence by `API_RETRY_BUDGET_MS`, both in §7.2; the sequence stops at whichever arrives first |
+| Network failure, `POST /pickups` | **No retry.** The intent record stays in `Booking`; the user is told it could not be confirmed and how to check with USPS |
+| Network failure, `DELETE /pickups/{confirmation_number}` | **No retry**, and not for the reason `POST /pickups` is not retried. The cancel carries an ETag issued by the refresh that preceded it, and USPS treats a token it has already seen as stale — so a bare retry is a call that is *guaranteed* to be refused. The recovery is the whole §4.5 pair again, refresh included; the pickup record is left standing meanwhile |
+| Validation failure on model output | Surfaced as *this page could not be read*, naming the page. Never a silent discard — that is indistinguishable from a broken extension |
+| Action outside the vocabulary | Treated as `report_stuck`; the flow hands back to the user |
+| Unknown `reason` from a newer server | Treated as an unrecoverable step, handed back. Forward compatibility runs in both directions |
+| **FR-3.1.3 egress scan flags a fallback payload** | **Nothing is transmitted.** The step aborts as `report_stuck` and the user continues manually. The scan failing to complete aborts the same way — *fail closed* means the scan's own error is a positive result, not a skip |
+| **Stored data unreadable, or its `schema_version` unrecognised** | The store is **rebuilt, not migrated** (§5.2), preserving unsettled pickups and their booked addresses. The user is told the local history was reset and can re-scan; nothing is retried against it first |
+
+**The retry asymmetry is the point.** Read-only calls are safe to repeat; a schedule call is not,
+and there is no idempotency key to make it so. The bound is small on purpose: these calls happen
+with a user watching, so a retry budget that outlasts their patience has spent it on the wrong
+thing. When the attempts are exhausted the failure is surfaced, never converted into a longer wait.
+
+**Every failure path the high-level design enumerates lands in one of the nine rows above.** The
+mapping is deliberately total, so a new failure never arrives without a defined handling:
+
+| Where the failure comes from | Row it lands in |
+|---|---|
+| Any server response carrying a known `reason` — every row of the §6.1 table | Typed API error |
+| Bedrock unavailable, slow, or returning an unusable parse, seen through the server | Typed API error, as `upstream-unavailable` |
+| USPS unavailable or refusing, seen through the server | Typed API error, by its specific reason |
+| Transport failure on ingest, eligibility, refresh, or any read | Network failure, read-only |
+| Transport failure on `POST /pickups` | Network failure, no retry |
+| Transport failure on `DELETE /pickups/{confirmation_number}` | Network failure on cancel, no retry — re-run refresh-then-cancel |
+| A model action failing the vocabulary or the fillable-field bound | Action outside the vocabulary |
+| A model parse failing schema validation in the extension | Validation failure on model output |
+| A retailer page changed under the adapter, so the selector matches nothing | Action outside the vocabulary — the step reports stuck |
+| A `reason` the running client does not recognise | Unknown reason from a newer server |
+| Chrome itself refusing — permission revoked, tab gone | Handed back to the user, never retried silently |
+| `chrome.storage.local` refusing on quota | Handled once by the coordinator — see §5.2 — and handed back if it fails again |
+| `chrome.storage.local` returning a blob that will not parse, or a `schema_version` the running code does not know | Store rebuild — the row above, with the `PICKUP` carve-out |
+| A fallback payload carrying a tracking number or a postal address, or an egress scan that throws | FR-3.1.3 egress scan flags — nothing is sent, the step is `report_stuck` |
+
+**`WrongCarrierLabel` is a backstop, and this revision made it one.** The server's 409 fires when a
+client sends a `label_carrier` the carrier adapter will not accept, and before §3.3 gave
+`derive_label_carrier` an owner it was the *only* place in the design where a wrong carrier could be
+caught at all — which made a server error the primary control for a client-side rule. It is not one
+now: FR-3.3.5's three sources are walked in the extension, a miss is not a value, and nothing is
+sent that was not either chosen, recognised, or answered for. The 409 stays exactly where it was and
+keeps its row, because the server's gates do not depend on the client having behaved. The dependency
+is recorded so that the reverse is not read into it: if `derive_label_carrier` were ever removed,
+this error would silently become the primary control again, and the failure it would then be
+catching — a pickup booked against the wrong carrier — is one nobody discovers until the window
+closes.
+
+**The two Chrome rows are worth naming explicitly** — the one for a revoked permission or a
+vanished tab, and the one for a quota refusal. Chrome failures are not server failures and have no
+`reason` code, but permission and tab failures end the same way: the user is told, and nothing
+retries behind their back.
+
+**Quota is the single exception, and the exception is bounded rather than silent.** §5.2's
+coordinator answers a quota rejection with one `evict_to_fit` and exactly one retry, which is a
+*repair* — the store is smaller on the second attempt than it was on the first, so the retry is
+attempting something different rather than hoping for a different answer to the same question. It
+is also invisible to no one: eviction removes the user's own stored orders, and the popup surfaces
+that a scan displaced older orders rather than letting the list quietly shorten. If the second
+attempt fails the operation raises and reaches the user like every other row here. So "never
+retried silently" holds as written for permission and tab failures, and holds in substance for
+quota: one bounded, state-changing, user-visible retry, and then the truth.
+
+---
+
+## 7. Configuration and Wiring
+
+### 7.1 Server startup order
+
+```mermaid
+flowchart TD
+    A["Mangum receives the invocation"] --> B{"cold start or warm"}
+    B -- "warm" --> G["route the request"]
+    B -- "cold" --> C["import app, build Settings from the environment"]
+    C --> D["lifespan startup"]
+    D --> E{"verify bedrock model config"}
+    E -- "absent or empty" --> X
+    E -- "present" --> H{"which carrier adapter"}
+    H -- "mock" --> M["construct MockCarrierAdapter, no SSM call, log at WARNING"]
+    H -- "usps" --> F["fetch USPS credentials from SSM"]
+    H -- "any other value" --> X
+    F --> K{"credentials present"}
+    K -- "yes" --> U["construct UspsAdapter and TokenProvider"]
+    K -- "no, ENVIRONMENT is prod" --> X["fail the cold start"]
+    K -- "no, ENVIRONMENT is dev" --> M
+    M --> S["store settings and adapter on app state"]
+    U --> S
+    S --> G
+```
+
+**Everything cached for the container lifetime is populated in the lifespan startup, and Mangum's
+lifespan handling must stay on.** With it off, startup never runs: no error, just a Parameter Store
+round trip on every request and a validation that never fires. This is written down because the
+failure is silent.
+
+**`BEDROCK_MODEL` has no default, and absence fails the cold start while a suspicious value only
+warns.** The two are different checks and the table's "warns" and this paragraph's "fails" are not
+in conflict once they are separated: an **unset or empty** model is a configuration error the
+process cannot recover from, so it raises and the cold start fails with a message naming
+`ListInferenceProfiles`. A model that is set but **lacks a regional-profile prefix** logs a warning
+and starts anyway, because the prefix requirement is model- and region-specific and this document
+will not encode a rule that turns a working deployment into a failed one the day Bedrock relaxes it.
+The failure being guarded is real either way: a bare model ID raises a validation error at *invoke*
+time — on a user's first parse, inside a Lambda — and the startup check is what moves that to a
+place someone is looking.
+
+**The SSM fetch happens on the USPS path only.** `MockCarrierAdapter` is the default until USPS
+access is granted, and a startup that fetched credentials unconditionally would fail — or hang
+against a VPC-less timeout — on the only path that currently runs. The branch is on the selected
+adapter, and `ENVIRONMENT` separately scopes the SSM path and the USPS base URL.
+
+**An unrecognised `CARRIER_ADAPTER` fails the cold start (added 2026-08-27, plan decision D21).**
+The branch has exactly two arms and no default arm, because the plausible default is the wrong one
+in both directions: falling through to the mock turns a typo into a deployment that fabricates
+confirmation numbers, and falling through to USPS turns it into a deployment that cannot start for a
+reason the message does not name. A third value is a configuration error, and configuration errors
+belong at the cold start with a message naming the value and the two it accepts.
+
+**Selecting the mock logs at `WARNING`, not `INFO`.** It is the default, so it is the case nobody
+reads a log line about, which is exactly why the line has to be loud enough to appear in a filtered
+view. The line an operator needs to be able to find is "this deployment is not talking to a
+carrier."
+
+**`ScriptedUspsAdapter` appears nowhere in this flowchart, and that absence is asserted.** §8.2
+carries a test that no value of `CARRIER_ADAPTER` reaches it — a double that a deployment can select
+is a deployment that can ship a double, and the flowchart is the only place that could happen.
+
+**A missing credential under `ENVIRONMENT=prod` fails the cold start**, on exactly the reasoning
+that governs `BEDROCK_MODEL`: a production deployment that silently degrades to a mock carrier
+returns fabricated confirmation numbers to real users, and the failure surfaces as a person waiting
+by their door for a carrier nobody asked for. Under `dev` the same absence falls back to
+`MockCarrierAdapter` and logs that it did, because the whole point of the stub is to work before the
+credential exists. Note that the FR-3.4.5b prefix is a **second** line of defence on the same
+failure and not a substitute for this one: this branch stops the bad deployment, and the prefix
+makes it visible in the one case a deployment slips through anyway — a `prod` bundle pointed at a
+mock-configured `dev` server, where neither `ENVIRONMENT` check is looking.
+
+**Settings and the adapter are constructed once, in the lifespan, and held on application state.**
+Routes read them from the request's application state and pass them into the service they call;
+nothing reads `os.environ` below the settings object, and no route constructs an adapter. Two
+reasons, and the second is the load-bearing one: a per-request construction re-reads SSM on a path a
+user is waiting on, and a module-level singleton makes the object un-substitutable — the §8.3
+integration tests build the ASGI app with a scripted adapter on state, which is only possible if
+state is where the adapter lives. FastAPI's dependency system is used for *reading* that state, not
+for building it; construction stays in the lifespan where its ordering is explicit.
+
+**Configuration is one typed `Settings` object, validated at construction.**
+
+| Field | Source | Default | Validation |
+|---|---|---|---|
+| `environment` | `ENVIRONMENT` | none, required | One of `dev`, `prod` |
+| `bedrock_model` | `BEDROCK_MODEL` | none, required | Non-empty; startup warns when it lacks a regional profile prefix |
+| `bedrock_model_parse` | `BEDROCK_MODEL_PARSE` | falls back to `bedrock_model` | Non-empty when set |
+| `bedrock_model_action` | `BEDROCK_MODEL_ACTION` | falls back to `bedrock_model` | Non-empty when set |
+| `bedrock_max_tokens` | `BEDROCK_MAX_TOKENS` | `4096` | Positive integer |
+| `aws_region` | `AWS_REGION` | `us-east-1` | Non-empty |
+| `carrier_adapter` | `CARRIER_ADAPTER` | `mock` | One of `mock`, `usps`. **The value §7.1's flowchart branches on** |
+| `usps_client_id` | SSM, not the environment | none | Required when the adapter is `usps` |
+| `usps_client_secret` | SSM, not the environment | none | Required when the adapter is `usps` |
+| `usps_base_url` | `USPS_BASE_URL` | `https://apis.usps.com` | Absolute URL, `https` scheme |
+| `max_ingest_bytes` | `MAX_INGEST_BYTES` | `262144` | Positive integer |
+| `bedrock_timeout_parse_ms` | `BEDROCK_TIMEOUT_PARSE_MS` | `9000` | Positive integer, below the function timeout |
+| `bedrock_timeout_action_ms` | `BEDROCK_TIMEOUT_ACTION_MS` | `4500` | Positive integer, below the function timeout |
+| `usps_timeout_ms` | `USPS_TIMEOUT_MS` | `8000` | Positive integer, below the function timeout |
+| `min_client_version` | `MIN_CLIENT_VERSION` | `0.1.0` | Three dot-separated non-negative integers |
+| `function_timeout_ms` | `FUNCTION_TIMEOUT_MS`, set by Terraform from the same value it gives the function | `60000` | Positive integer |
+| `log_level` | `LOG_LEVEL` | `INFO` | A known level name |
+| `retailer_policies` | **A literal in `app/config.py`, not the environment** | The bundled table, keyed by `retailer_key`; empty is legal | Each entry declares a `retailer_key` and a positive integer `default_return_days`; keys unique; a duplicate key or a non-positive day count fails the cold start (added 2026-08-28, seventh review, CONF-3) |
+| `retailer_hosts` | **A literal in `app/config.py`, not the environment** | The bundled host-suffix map; empty is legal | Each entry maps a host suffix to a `retailer_key` that exists in `retailer_policies`; a suffix pointing at an undeclared key fails the cold start, which is the check that catches a policy renamed on one side only |
+| `default_return_days` | Requirements §5.3's system default | `30` | Positive integer. The value every unmatched host gets — see below |
+
+**The per-retailer policy table is configuration, so it is in the configuration table** (added
+2026-08-28, seventh review, CONF-3). §3.2 says `RetailerPolicy` "is configuration and lives in
+`app/config.py`", and until this revision the table that enumerates configuration had no row for it,
+no source, no default and no validation rule — a value called configuration that configuration did
+not contain. It is three rows rather than one because the lookup and the fallback are separately
+wrong-able: a policy table with no host map is unreachable, and a host map with no fallback is a
+silent zero.
+
+**Both are literals in `app/config.py` rather than environment variables, and that is a deliberate
+narrowing.** A per-retailer table is structured data; an environment variable holding JSON is a
+configuration surface with no schema, validated at whatever moment someone remembers to parse it,
+and Lambda's environment is not where a growing table belongs. Bundling it means it is reviewed like
+code, ships with the adapters it corresponds to, and is validated at construction with everything
+else. The cost is that changing a retailer's window needs a deploy; at this stage that is the same
+cost as adding the adapter that made the retailer reachable at all.
+
+**`IngestService` maps the page URL to a `retailer_key` through `retailer_hosts`, by host suffix,
+longest match first.** This is the server's counterpart to the extension's `AdapterRegistry.for_url`,
+and it is stated here because §3.2 assigns the resolution to a service without naming a mechanism.
+`app/config.py` exports `retailer_policy_for_url(page_url) -> RetailerPolicy`; `IngestService` calls
+it once per ingest and passes the result into `derive_window`, which stays pure because the lookup
+happened above it. Longest-suffix-first matters for the same reason it does in the extension: a
+retailer with a regional storefront under a subdomain must not be shadowed by a shorter suffix
+someone added later.
+
+**An unrecognised host yields the system default of 30, and that is intended rather than accidental.**
+It is the behaviour requirements §5.3 describes — `default_return_days` is the "assumed window when
+the page states no policy" — and it is safe in the direction that matters: a retailer nobody has
+configured still gets a window, marked inferred, rather than an undetermined result that reads in
+the popup as "we know nothing about this order." It is stated explicitly because the alternative
+reading — that an unmatched host is a configuration error — is also plausible, and the two produce
+opposite behaviour on day one, when no host is matched. Note the interaction with CONF-1's row 2: a
+page that states its own policy in days needs no entry in this table at all, so an unconfigured
+retailer whose pages are legible is not relying on 30.
+
+**`ClientTooOld` needs a threshold to compare against, and `min_client_version` is it.** The
+extension sends its version on every request (§4.1); the server parses both sides into integer
+triples and compares them **component-wise, not as strings** — `0.10.0` is above `0.9.0` and a
+lexicographic comparison gets that backwards, which would lock out every client the moment a minor
+version reached double digits. A client at or above the threshold is served; below it, 426. The
+default is deliberately the lowest version that has ever shipped, so the gate is inert until someone
+raises it on purpose: a version gate that rejects by default fails closed against every existing
+install on its first deploy. A request with an unparseable or absent version is treated as **below**
+the threshold, because the only client that omits it is one older than the field.
+
+**"Unparseable" is total, and the cases are named so the gate has no third outcome** (clarified
+2026-08-28, sixth review, CONF-3). The parse accepts exactly three dot-separated non-negative
+integers. **Any** value that is not that — `1.2.x`, `v1.2.3`, `1.2`, `1.2.3.4`, an empty string, a
+header present more than once, leading or trailing whitespace, a negative component — is treated
+**exactly as an absent header**: below the threshold, 426, before any model or carrier call. There is
+no lenient parse, no partial-match fallback and no "unrecognised, therefore allow". The reason is
+the same one that made naming the header worth a requirements amendment: every path that does not
+end in a refusal is a path on which the gate **fails open**, and a gate that fails open on malformed
+input is a gate an attacker chooses the input for. This is also why the check lives in `app/deps.py`
+(§2.1) rather than in each route — one parse, one refusal, one place to get it right.
+
+**`carrier_adapter` is the selector, and it is a field rather than an inference.** §7.1's flowchart
+branches on which adapter to construct, and until this revision nothing in `Settings` answered that
+question — leaving the branch to be read as *"whether the USPS credentials happen to be present"*.
+That inference is wrong in both directions and the failure modes are not symmetric: an SSM parameter
+that exists early — seeded during setup, left from a previous deployment — silently promotes a dev
+environment onto the live USPS API, and a credential that fails to fetch silently demotes a
+production deployment to a mock carrier handing fabricated confirmation numbers to real users. So
+the adapter is chosen by an explicit, defaulted, validated field, the credentials are *conditionally
+required by it*, and the two guards already in §7.1 hang off that field: `usps` with no credentials
+under `ENVIRONMENT=prod` fails the cold start; the same under `dev` falls back to the mock and says
+so. The field is now in requirements §5.1 as `CARRIER_ADAPTER`, which is where a deployment
+parameter belongs; this table restates its type and default, not its authority.
+
+**The function timeout is read from configuration, not hardcoded, because the application cannot
+see its own Lambda configuration.** The three upstream deadlines are validated as being below it,
+and a literal `60000` in `Settings` would be a copy of a Terraform value that nothing keeps in
+sync — someone raising the function timeout to 120 s would leave a validation rule silently
+enforcing the old ceiling, and someone *lowering* it to 30 s would leave deadlines that can never
+fire. Terraform sets `FUNCTION_TIMEOUT_MS` from the same expression it passes to the function's own
+`timeout`, so the two cannot drift. This is a plain operational number, not a secret, so the
+environment is the right place for it — the §7.1 rule that keeps credentials out of the environment
+is about what a `GetFunctionConfiguration` caller can read, and a timeout is something they can
+already read.
+
+**All three upstream deadlines are configuration rather than constants** so a deploy can tighten them
+without a code change when NFR-6.4's budgets are measured against real latencies rather than
+estimated. Validation refuses a value at or above the function's own 60-second timeout: a deadline
+longer than the invocation it lives inside cannot fire, and a field that silently never fires is
+worse than no field at all.
+
+**The two USPS credentials are the only values that come from Parameter Store rather than the
+environment, and that asymmetry is deliberate** — a Lambda environment variable is readable by
+anyone with `GetFunctionConfiguration`, so a secret placed there is a secret published to a wider
+audience than the code. They are also the only fields whose requirement is conditional, which is why
+validation runs after adapter selection rather than at `Settings` construction.
+
+**`request_id` is request-scoped state, and the middleware that sets it must clear it.** NFR-6.1
+makes it the only correlator that survives redaction, so a value that leaks between invocations
+attributes one user's log lines to another user's report — the exact failure the field exists to
+prevent, and undetectable from the logs themselves. The outermost middleware generates or accepts
+the id, binds it into a context variable, and clears that variable in a `finally` so an exception
+path cannot skip the reset. The logging filter reads it from there and attaches it to every record;
+nothing passes it down as an argument, because a correlator threaded through signatures is one
+forgotten parameter away from a log line with no id on it. Lambda reuses a warm container across
+invocations, so "the next request overwrites it anyway" is not a guarantee — an invocation that
+raises before the middleware binds would otherwise log under its predecessor's id. §8.3 asserts
+this directly: two sequential requests against one app instance must not share an id, and a request
+that raises must not leave one behind.
+
+### 7.2 Extension wiring
+
+Constructor injection, wired once in `entrypoints/background.ts`. No DI framework — the graph is a
+dozen objects and a container would obscure it.
+
+**Every configuration value is a build-time constant** (high-level design §8.4). The extension performs no
+configuration fetch, at startup or ever: a runtime fetch would reintroduce exactly the
+server-steered behaviour that bundling the adapters removed.
+
+The mechanism is WXT's define-style build-time substitution: `src/config.ts` reads from values
+injected at bundle time, so each constant is replaced by a literal in the emitted bundle and no
+lookup survives into the running extension. Every value below is fixed at build:
+
+**Three rows added 2026-08-28, and the same rule applied to them.** `CLIENT_VERSION`,
+`STORAGE_EVICTION_MARGIN_BYTES` and `RETURN_ATTEMPT_LIMIT` were each *used* by this design and
+declared by no table: the version header (§7.2) and NFR-6.2's `consent_extension_version` both read
+the first, §5.2's byte-driven eviction evicts "plus a margin" without naming the second, and
+`DriverSession.attempt_count` (§3.5) counts toward a bound that was the third. Each is now in
+requirements §5.2 first and restated here, by the rule below rather than around it. Their defaults
+are first values chosen to be adjustable, not tuned ones — which is precisely why they belong in a
+configuration table rather than inline in the code that reads them.
+
+**This table restates requirements §5.2; it does not extend it.** A low-level document that invents
+configuration is a document that has taken a product decision, and four of the rows below —
+`API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`, `DASHBOARD_ORIGIN` and `EXTENSION_KEY` — did
+exactly that before the previous revision: they were introduced here, with defaults, and appeared in
+no upstream table. Each is now in requirements §5.2, with the same names and the same defaults, and the
+reasoning for the pair of deadlines is recorded there for the same reason `MAX_INGEST_BYTES` is.
+The rule going forward: **a value that a deployment can change belongs upstream first.** If a later
+revision of this document needs a new one, the requirement is amended and cited, not shadowed —
+which is also how `CARRIER_ADAPTER` and `FUNCTION_TIMEOUT_MS` reached requirements §5.1.
+
+| Constant | `dev` | `prod` |
+|---|---|---|
+| `API_BASE_URL` | `http://localhost:8000` | The deployed Function URL origin |
+| ~~`DASHBOARD_ORIGIN`~~ | ~~Local origin~~ | **Withdrawn 2026-08-27 (plan decision D6)** — it existed only to fill `externally_connectable.matches` for FR-3.6.3. Struck from requirements §5.2 in the same revision; the extension exports no such constant |
+| `EXTENSION_KEY` | The dev keypair's public key | The published keypair's public key |
+| `MAX_INGEST_BYTES` | `262144` | `262144` |
+| `INGEST_DEBOUNCE_MS` | `800` | `800` |
+| `URGENCY_CRITICAL_DAYS` | `3` | `3` |
+| `URGENCY_WARN_DAYS` | `7` | `7` |
+| `MAX_STORED_ORDERS` | `200` | `200` |
+| `PICKUP_SETTLED_AFTER_DAYS` | `3` | `3` |
+| `BOOKING_ABANDONED_AFTER_HOURS` | `24` | `24` |
+| `MODEL_FALLBACK_TIMEOUT_MS` | `5000` | `5000` |
+| `API_REQUEST_TIMEOUT_MS` | `12000` | `12000` |
+| `API_RETRY_BUDGET_MS` | `20000` | `20000` |
+| `CLIENT_VERSION` | The manifest version | The manifest version |
+| `STORAGE_EVICTION_MARGIN_BYTES` | `65536` | `65536` |
+| `RETURN_ATTEMPT_LIMIT` | `12` | `12` |
+
+**The two API deadlines are what §6.2's retry row is bounded by, and they are separate numbers on
+purpose.** `API_REQUEST_TIMEOUT_MS` aborts a single attempt; `API_RETRY_BUDGET_MS` caps the whole
+retry sequence including its backoff, so a call cannot spend three full attempts plus jitter with a
+user watching. It sits below three times the per-attempt timeout deliberately: the budget, not the
+attempt count, is usually what ends the sequence, and a third attempt is only started if there is
+real time left for it. `API_REQUEST_TIMEOUT_MS` is set above the server's own longest upstream
+deadline — the parse budget of `BEDROCK_TIMEOUT_PARSE_MS` plus request overhead — so that the
+server gets to answer with a typed `upstream-unavailable` instead of the client giving up first
+and reporting a transport failure for something the server diagnosed precisely. `MODEL_FALLBACK_TIMEOUT_MS`
+is the exception that proves the rule: the action call site is the one place the client deliberately
+gives up *before* the server would, because a stalled step with a half-driven return is worth
+handing back sooner than an accurate error is worth waiting for.
+
+**`TabHandleFactory` is what gets wired; `TabHandle` cannot be.** The worker's graph is built once
+at startup and every other collaborator survives for the worker's life, but a handle is per-tab and
+per-return — it holds a `tab_id` that does not exist at wiring time and a `tab_url` nothing has
+visited. So `background.ts` constructs the factory, which closes over the `chrome.tabs` and
+`chrome.scripting` wrappers, and hands it to `ReturnDriver`; the driver calls `for_session` once per
+`start` and once per `resume` (§3.3). This is the one place the "wired once" rule needed an
+explicit escape hatch, and naming the escape hatch is what keeps it from becoming an ambient
+`chrome.tabs` call inside the driver — which would have taken the tab lookup out of the graph
+entirely and made §8's driver tests need a live browser.
+
+**The popup's graph is smaller than the worker's and is wired separately, in
+`entrypoints/popup/`.** A popup is a fresh document on every open, so nothing survives between
+openings and there is no shared instance to hand it: it constructs what it needs at mount and
+discards it at close. What it constructs is `src/ranking/`, which is pure and needs nothing;
+`src/permissions/`, which wraps the `chrome.permissions` API and must be called from the popup
+because that is where the user gesture lives; `src/calendar/`, for the `.ics` path only, because
+`URL.createObjectURL` is not in the worker global; and a **`ReadOnlyStore`** over the same
+repositories. That last one is the piece worth stating. ~~The popup constructs a `StorageCoordinator`
+and never calls the mutating methods.~~ **Revised 2026-08-28 (sixth review, CLASS-2): it constructs
+the `ReadOnlyStore` type §3.4 defines, so `transact`, `evict_to_fit`, `evict_if_over_cap` and
+`clear_all` are not reachable from the popup at all.** Reads still go through the repositories,
+because that is how §5.2's derived states are seen; what changed is that the single-writer rule is
+now a signature rather than a sentence. Every mutation goes to the worker through `src/messaging/`,
+which is what keeps the serialising queue meaningful — two documents writing the same key through
+two coordinators would defeat it entirely, since `chrome.storage.local` serialises individual `set`
+calls and nothing else. The popup constructs no `src/api/`, no `src/driver/` and no `src/adapters/`
+— it has no egress and drives no page. **The pre-offer eligibility check is not an exception to
+that**: the popup asks the worker over `src/messaging/` and the worker makes the call (§4.7).
+
+**The client version travels in a header named `X-Boomerang-Client-Version`, on every request**,
+not only on the endpoints that can break. It costs a few bytes, it is what the `client-too-old` gate
+reads, and it is the field you wish you had logged when a bug turns out to affect one released
+version. The version itself is the manifest's, injected as a build-time constant like everything
+else above, so there is no second place for it to disagree with what the store shows.
+
+**The name is normative and now lives upstream, at requirements §4.1 (added 2026-08-27, plan
+decision D16).** Until that amendment this paragraph described the header and no document in the
+repository spelled it — which meant `src/api/` and `app/deps.py` were each free to invent a spelling,
+and the failure mode is specific and bad: HTTP header names are case-insensitive, but a differently
+*worded* header is a different header. A server reading `X-Client-Version` from a client sending
+`X-Extension-Version` sees no header at all, and `MIN_CLIENT_VERSION`'s gate **fails open** in
+exactly the situation it exists for. A request whose version header is absent, empty, or spelled any
+other way is treated as absent and rejected by the same gate; §8.2 carries the row asserting that a
+differently-worded header does not satisfy it, and the `contracts/` payloads below carry the header
+so the two workspaces are checked against one string rather than against two independently correct
+implementations.
+
+**`MOCK_CONFIRMATION_PREFIX` is imported, not declared here.** The popup renders a "simulated — no
+carrier was contacted" marker beside any confirmation number carrying it, per requirements
+FR-3.4.5b. Two rules make that check meaningful. First, the constant is the server's and travels in
+`contracts/`; a second copy declared in `src/config.ts` would drift apart from the first and
+silently disable the marker. Second, **the detection is on the number, never on the build
+environment** — `ENVIRONMENT` and `API_BASE_URL` are both blind to a `prod` bundle pointed at a
+mock-configured server, which is precisely the case the marker exists for.
+
+**A production bundle is asserted, not trusted.** The build fails if the emitted `prod` bundle
+contains `localhost` or any `http:` origin, if it declares `externally_connectable` at all, or if
+its pinned `key` is anything other than the **prod** key — asserted by deriving the extension ID
+from the emitted manifest and comparing it against the recorded prod ID, rather than by scanning for
+the dev key's bytes. The comparison is the stronger check and it is the one that matches the failure:
+a production bundle carrying the dev key produces the *dev* extension ID, which the prod Function
+URL's single-origin CORS allowlist refuses, so every request from the shipped extension fails — and
+it fails at the network layer, where the cause is least obvious. Both IDs are recorded when the
+keypairs are generated (plan Task 1.4). This is a check over the output, run in CI. The failure it prevents is a released extension pointing at a developer's machine,
+which is undetectable by reading the source, because the source is identical in both builds and only
+the substituted literals differ. `dev` and `prod` builds differ only in
+those constants — including the pinned key, which is **one per environment**, so a developer's
+unpacked build is not the published extension's ID and does not sit inside the production CORS
+allowlist.
+
+---
+
+## 8. Testing Strategy
+
+Fakes over the network; no containers in the test loop. `pytest` with `httpx` transport mocking on
+the server, `vitest` with a fake browser API on the extension.
+
+**Both workspaces are held to the same coverage floor: 95% line *and* branch (added 2026-08-27, plan
+decision D13).** The server already had it — `fail_under = 95` with `branch = true`. The extension
+had none, and the asymmetry was not a considered position: it was the workspace that holds the state
+machine, the eviction rules and the egress scan running with no floor at all. The measured surface is
+`extension/src/`. `entrypoints/` is excluded, because it is framework-owned glue that §2.2 already
+requires to hold as little logic as it can — but it is excluded by an **explicit named list, not a
+glob**, so that a future entrypoint is a decision someone makes rather than a directory that silently
+inherits an exemption. Branch coverage is the half that matters here: the fail-closed scan, the
+quota retry and the rehydration paths are all branches whose *unhappy* side is the one the
+requirement is about, and line coverage alone will call them covered.
+
+**What excluding `entrypoints/` costs, stated rather than left to be discovered (added 2026-08-28,
+sixth review, TEST-1).** The exclusion is from the *measured floor*, not from testing: the popup's
+rows in §8.2 and its integration rows in §8.3 run like every other row, and the FR-3.4.5b marker in
+particular is asserted in both workspaces. What is given up is the ratchet — a popup branch added
+without a test does not turn the build red on coverage alone, where the same omission in `src/`
+would. That is the price of the rule that `entrypoints/` holds as little logic as it can, and it is
+acceptable only while the rule holds. So the named-list exclusion is the enforcement point: adding
+an entrypoint to it is where someone has to look at how much logic is moving outside the ratchet,
+and the alternative — inventing a `src/popup/` so the number covers a surface that is markup and
+event wiring — would raise the measurement without raising the coverage.
+
+**The pre-commit hook runs both workspaces (plan decision D14).** `.husky/pre-commit` covered the
+server only; a hook that checks one half of a two-workspace repository teaches everyone that green
+locally means nothing, which is worse than having no hook.
+
+### 8.1 What gets a test double, and what does not
+
+| Dependency | Double | Rationale |
+|---|---|---|
+| USPS | `ScriptedUspsAdapter` behind `CarrierAdapter` | A per-method queue of outcomes, strict on both ends: it raises on an unscripted call and fails at teardown on an undrained one (§3.1). **Not** `MockCarrierAdapter`, which is the runtime stub and is deliberately forgiving |
+| The wire between the two workspaces | `contracts/` — canonical request and response JSON per endpoint, one error body per §4.2 reason code | Both suites assert against the same files, so a field renamed on one side turns exactly one suite red instead of neither |
+| Bedrock | Recorded tool-call responses at the client boundary | Deterministic, and asserts the tool schema is honoured |
+| `chrome.*` | In-memory fake `storage`, `tabs`, `scripting`, `permissions` | The storage fake must reproduce **atomic per-`set` semantics**, or it will hide the race the repository exists to prevent — plus the two behaviours below, or it will hide the whole quota path |
+| Worker lifecycle | `WorkerLifecycle` double, with `terminate()` | Chrome kills a service worker after ~30 s idle and nothing in the fake browser does. Rehydration is only testable if a test can *cause* the death |
+| Retailer DOM | Static HTML fixtures, one per adapter step | The only honest way to test selectors |
+| The clock | Injected | Every eviction, abandonment and urgency rule is time-dependent |
+
+**The storage fake must be able to say no.** Two of its behaviours are load-bearing and neither
+comes free with an in-memory `Map`:
+
+- **A quota rejection on demand.** §5.2's most consequential path — `evict_to_fit`, one retry, then
+  raise — is unreachable unless a test can arm the fake to refuse the next `set` with the quota
+  error Chrome actually throws. Without it the coordinator rows in §8.2 assert a branch that never
+  runs, which is worse than no coverage because the table claims otherwise.
+- **`getBytesInUse` over the same data it is holding.** `evict_to_fit` measures candidates by
+  serialising them and then checks the truth with a single `getBytesInUse` on the orders key before
+  and after the batch (§5.2). A fake that returns a constant, or throws, turns "freed at least the
+  requested bytes" into an assertion about the fake. It does not have to match Chrome's real
+  per-entry overhead — it has to be *consistent*, so that the before/after difference means what the
+  coordinator thinks it means.
+
+**Worker termination is an injected capability, not an ambient one.** `WorkerLifecycle.terminate()`
+drops the in-memory graph and leaves only what reached `chrome.storage`, which is exactly the event
+§4.4 exists to survive: the "Worker terminated mid-flow" row in §8.3 and every persist-before-act
+assertion in §8.2 depend on being able to fire it at a chosen moment. Simulating it by constructing
+a second graph over the same fake store would test something weaker — a fresh reader, not a lost
+writer — and would silently pass for a design that kept state only in memory.
+
+**`contracts/` is a shared fixture directory, not a code artefact, and that is the point (added
+2026-08-27, plan decision D15).** The two workspaces agree on seven endpoints and a closed reason
+table, and before this revision each asserted against its own hand-written literals: the server's
+Pydantic models on one side, `src/api/`'s typed client on the other, with nothing in between. Two
+independently correct implementations of two different shapes is the failure this catches — both
+suites green, and the first evidence a broken request in a real browser, which is the most expensive
+place in this system to find a contract bug. So the canonical payloads live once, at the repository
+root, and `contracts/README.md` states plainly that **the files are the contract**: the tests read
+them and neither workspace's types are the authority. The verification is the definition — rename a
+field in one workspace and exactly one suite goes red. If neither does, the tier is decorative; if
+both do, the files are being generated from the code they are supposed to check. These payloads also
+carry `X-Boomerang-Client-Version` and `MOCK_CONFIRMATION_PREFIX`, which is what keeps §7.2's two
+cross-workspace string agreements from being two independent spellings.
+
+**The DOM fixtures double as adapter regression tests.** When a retailer changes its flow the
+fixtures go stale, and a failing fixture is a cheaper discovery channel than a user complaint —
+which matters because high-level design §8.4 puts adapter repairs on a store-review cycle of days.
+**They now have a source**: §9's first question is answered, and the fixtures are the scrubbed
+subtrees the feasibility spike captures while walking the flow by hand (plan decisions D1 and D2).
+Before that, this row named a double whose input did not exist.
+
+### 8.2 Unit tests by module
+
+| Module | Contract tests |
+|---|---|
+| `src/extract/` | Subtree selected from fixture; scripts stripped; payload capped **before** return; cap enforced on the fallback path too |
+| `src/extract/` egress scan — **FR-3.1.3** | The fail-closed scan is asserted as its own contract, positively and negatively: a payload containing a **tracking number** in each carrier format the scan claims to recognise is flagged; a payload containing a **postal address** is flagged; a payload containing neither is passed; a near-miss that is neither (an order number of similar shape, a bare postcode with no street) is passed, so the scan is not vacuously flagging everything. **A scan that throws reports flagged** — the fail-closed property, asserted by arming the matcher to raise. The scan is a pure function of a payload, so every one of these is a table-driven case with no browser in it |
+| `src/validation/` action | Each vocabulary member accepted; unknown kind rejected; `fill` over length rejected; `fill` with disallowed characters rejected; `fill` at an undeclared field rejected; rejection yields `report_stuck` |
+| `src/validation/` order | Type, length, range per field; far-future `return_by` rejected; markup in `title` never stored; a rejection surfaces, never silently discards |
+| `src/driver/` | Persist-before-act on every transition; each edge of the FR-3.3.9 machine; rehydration with a matching tab, a missing tab, a reused ID with a different URL; no unattended resume; **after a `UserPrompt` affirming the label was printed, the stored `ReturnRequest` has `label_printed` true and its `state` is still `LabelReady`** — FR-3.3.6, and after any other answer, or none, the field stays false and nothing infers it; `pause_for_user` and the FR-3.4.8 re-ask both reach `UserPrompt` and never `chrome.tabs` directly; `start(item_id)` calls `active_for_item` before creating anything; `transition` writes the session and the request in **one** `set` |
+| `src/driver/` egress abort — **FR-3.1.3** | A fallback payload the scan flags is **never handed to `src/api/`** — asserted against the api double's call log, which must be empty, not merely against the return value; the step becomes `report_stuck` and the session reaches `Stalled`; a scan that throws produces the same three outcomes. The pair with the `src/extract/` row above is the point: one module decides, the other refuses to send |
+| `src/driver/` carrier derivation — **FR-3.3.5** | `derive_label_carrier` returns the option's carrier when `carrier_by_option` has the chosen option, **without reading the page**; falls to `label_carrier_patterns` only on a miss and returns what it recognises; asks the user only when both miss; returns **nothing determinable** when the user declines or the answer is unusable. **No input produces USPS unless a source said USPS** — asserted by running every miss path against an adapter whose patterns and mapping contain USPS and confirming the undetermined result, which is the FR-3.3.5 SHALL NOT; an undetermined result offers drop-off and issues no eligibility or schedule call |
+| `src/storage/` | Upsert merge preserves `first_seen_at`; eviction order; eviction skips non-terminal returns and unsettled pickups; `Booking` past `BOOKING_ABANDONED_AFTER_HOURS` **reads as** `Abandoned`; `Confirmed` past `PICKUP_SETTLED_AFTER_DAYS` **reads as** `Collected`; clear enumerates uncancelled pickups; rebuild preserves them; rebuild on an unreadable store and on a forward `schema_version`; `find_item` returns the item with its order and misses cleanly; `active_for_item` returns the one non-terminal request for an item, returns nothing once every request on it is terminal, and **never returns two** — FR-3.3.10; `ReturnRepository.delete` removes exactly the named items' requests and leaves every other item's alone; `AddressRepository.clear` leaves a subsequent `get` returning nothing, and `clear_all` clears the address in the same `set` as the three collections |
+| `src/storage/` read-only view | **`ReadOnlyStore` exposes exactly the seven members §3.4 draws and nothing that writes** (added 2026-08-28, sixth review, CLASS-2; enumeration made concrete 2026-08-28, seventh review, CLASS-1/TEST-1): asserted structurally, by spelling out `list_orders`, `get_order`, `find_item`, `get_pickup`, `list_unsettled_pickups`, `active_return_for_item` and `address` and requiring the view's surface to equal that set — so it fails both when a mutator is added to a repository and reflexively re-exported, and when a read is quietly dropped. The popup's construction path in §7.2 yields a `ReadOnlyStore`, asserted by type at the seam rather than by convention, so §2.2's `reads only` qualifier has an enforcer |
+| `src/storage/` coordinator | `transact` commits every touched key in one `set`; two composed writes never interleave; a quota rejection calls `evict_to_fit` once, retries once, then **raises**; `evict_to_fit` frees at least the requested bytes and still honours the carve-out; a rejection with every order protected raises without an eviction loop — asserted specifically for `save_intent` and `promote`, which must never fail silently |
+| `src/storage/` cross-record invariants — **the single-`set` law** | **Every write §3.4 names as spanning more than one record is asserted to reach `chrome.storage.local` as exactly one `set`** (added 2026-08-28, seventh review, DAL-1). The law had prose and a SHALL and no test row, which made it the one structural rule in this layer with no enforcer. Asserted by call count against the Task 2.6 fake, one case per named invariant: `save_intent` writing the provisional `PICKUP` with its consent stamp; `promote` writing the promoted pickup with its `BOOKED_ADDRESS`; `transition` writing the `DriverSession` and its `ReturnRequest`; the §4.5 collected branch writing the pickup's `Collected` and the return request's `LabelPrinted`; `clear_all` clearing the three collections and the address. Each case asserts **one** call, not "at least one" — two `set`s that happen to succeed in a test are the bug, because the crash window between them is what the law forbids |
+| `src/adapters/` | Every bundled adapter declares each key its step map names; `for_url` matches its own order pages and no other host; `for_url` misses return an absent adapter rather than a default; `fillable_fields` and `irreversible_steps` are non-empty for any adapter claiming a fill or an irreversible step |
+| `src/permissions/` | Query reports a granted host as granted; the offer is made only after a successful scan — FR-3.7.2; a decline is recorded and not re-offered on the next scan; a revoked host reverts to the click path without error |
+| `src/ranking/` | Ordering by days remaining; inferred windows ranked but presented as estimates; unknown window listed, never omitted; **ordering is stable across repeated renders of unchanged data** — urgency is derived at render per FR-3.2.2, so two renders a second apart must not reorder equal-urgency orders |
+| `src/api/` | `reason` mapped to typed errors; unknown `reason` handled; no retry on the schedule call; bounded retry on read-only calls. **Every request the client builds carries `X-Boomerang-Client-Version`, spelled exactly that way** — requirements §4.1, asserted on the header name and on `/health` too, because a gate that only fires on some routes is not a gate. **Request and response shapes are asserted against `contracts/`, not against literals written here** (plan decision D15): the client's serialisation of each endpoint equals the canonical request file byte for byte after normalisation, and each canonical response file deserialises into the typed result without loss |
+| `src/messaging/` | Only enumerated messages served; no general-purpose storage read exists; a message from an unrecognised type is refused rather than defaulted. ~~`sender.origin` mismatch refused~~ — **amended 2026-08-27 (plan decision D6)**: with FR-3.6.3 out of scope there is no external sender, so `externally_connectable` is absent from the manifest and `onMessageExternal` is never registered. The origin check is not weakened, it is unreachable; §8.4's FR-3.7.1 row asserts the absence instead, which is the stronger property |
+| `entrypoints/popup/` simulated bookings — **FR-3.4.5b** (renamed 2026-08-28, sixth review, TEST-1: there is no `src/popup/`; the popup is an entrypoint, and §8.5 records what its exclusion from the measured floor costs and how this row is still run) | A confirmation number bearing `MOCK_CONFIRMATION_PREFIX` renders with the simulated marker; one without it renders without; the determination is made **from the confirmation number alone** — asserted by rendering a prefixed number in a build configured as production and confirming the marker still appears, which is the case the requirement exists for |
+| `src/calendar/` | Template URL carries only permitted fields; no order ID, price or tracking number; `.ics` generated locally; `reminder_offered_at` set on offer, never on save |
+| `app/config.py` | **The retailer policy table and its host map** (added 2026-08-28, seventh review, CONF-3): `retailer_policy_for_url` returns the configured policy for a host it knows, matches the **longest** suffix when two could match, and returns the system default of **30** for a host it does not know rather than raising — the day-one case, asserted positively so it cannot be mistaken for an oversight; a host-suffix entry naming a `retailer_key` absent from the policy table fails the cold start, as does a duplicate key or a non-positive day count. Each validated field rejects its bad values and accepts its good ones: an absent `BEDROCK_MODEL` fails startup while a prefix-less one warns and starts; a `min_client_version` that is not three dot-separated non-negative integers fails; a non-positive or non-integer timeout fails; **each of the three upstream deadlines fails when it is not below `function_timeout_ms`**, and the message names which one and both numbers. A `Settings` built from a fully populated environment matches the §7.1 table field for field — the test that catches a row added to the table and never to the class |
+| `app/models/` | **The strictness tests that justify having deleted `app/validation/`.** Unknown fields are rejected rather than ignored, on every request schema, because tolerating them would let an ingest body carry whatever the caller likes past the boundary; every string field has a declared maximum and a value one byte over it is rejected; every bounded numeric field rejects out-of-range values; a rejection produces the requirements §4.2 shape via the `RequestValidationError` handler rather than FastAPI's default body. Response schemas are asserted to serialise exactly the fields §3.5 names and no others — the check that a model gaining a field does not silently widen an API |
+| `app/carriers/mock.py` | **The runtime stub's own contract, which is not the test double's** (plan decision D21): every operation succeeds without a network call; eligibility is true for every address except the one designated unserviceable postcode, which returns a well-formed ineligible result rather than raising; confirmation numbers are derived from the request, so the same request twice yields the same number; dates come from the injected clock and never from `datetime.now`; **every confirmation number begins with `MOCK_CONFIRMATION_PREFIX`** — FR-3.4.5b's server half, asserted on the schedule and refresh paths alike |
+| `app/carriers/` selection | `CARRIER_ADAPTER=usps` constructs `UspsAdapter`; `mock` constructs `MockCarrierAdapter` and makes no SSM call; **any other value fails the cold start** rather than falling back; **no value of `CARRIER_ADAPTER` constructs `ScriptedUspsAdapter`** — asserted over the full set of accepted values, because the test double raising on an unscripted call would be a production outage rather than a test failure |
+| `app/services/window.py` | **All five rows of §3.2's precedence table, in order** (rewritten 2026-08-28, sixth review, CONSIST-1 and CONF-1; extended to five rows 2026-08-28, seventh review, CONF-1): a stated deadline wins and is **not** marked inferred; with no stated deadline but a `stated_return_days`, that count runs from `delivered_at`, or from `ordered_at` when `delivered_at` is absent, and marks inferred; with neither, `default_return_days` runs from `delivered_at`; **with `delivered_at` absent — the common case, since the high-level design says both dates are page-extracted and may be missing — it runs from `ordered_at` and marks inferred**; with neither date, the result is undetermined. Two negatives fix the precedence rather than merely exercising it: **an order with a date always derives a window, whichever date it has**, asserted against a retailer with no override so the system default of 30 is the one in play — undetermined is reachable only from a missing *date*, never from a missing *policy*; and **a page that states a policy in days never derives from `default_return_days`**, asserted with a `stated_return_days` of 60 against a configured default of 30 and a `basis` of `stated_days`, which is the assertion that fails if the two sources are folded together or ordered the wrong way round. `derive_window` is asserted as a pure function: the policy and the clock are arguments, so every case runs with no application state and no `datetime.now` |
+| `app/services/pickup.py` | Eligibility called before **every** schedule; no cache across addresses; ineligible raises `AddressNotServiceable`; **`cancel` passes the ETag it was given straight to the adapter, unmodified, and performs no refresh of its own** — asserted against the adapter's call log, which must contain exactly one call; an adapter rejecting the token raises `EtagExpired` rather than retrying; booked address used for refresh and cancel |
+| `app/carriers/usps/` | Token cached and reused; 401 invalidates and retries **once**; ETag expiry raises `EtagExpired`; `packageType RETURNS` and `nextAvailablePickup` set |
+| `app/bedrock.py` | `model` returns the per-call-site override when set and falls back to `BEDROCK_MODEL` when unset, for each call site independently; an unknown call site raises rather than silently using the shared model; `verify_config` raises when the model is absent and returns cleanly when only the regional prefix is missing; the client is constructed once and reused across calls — the cache is what keeps a warm invocation from paying for a new one |
+| `app/deps.py` | **The client version gate, which is the control §10 escalated a requirements amendment to protect** (added 2026-08-28, sixth review, CONF-2). The dependency is registered on the router, so it is asserted **route by route over the full route table read from the app** rather than over a list written here — a route added without the gate fails this test rather than shipping ungated, and `/health` is in the table like every other route. A request whose header is absent, empty, or spelled any other way is rejected as too old, asserted on the exact string `X-Boomerang-Client-Version`; the malformed values §7.1 enumerates each take the absent path; comparison is component-wise on the integer triple, so `0.10.0` passes a `0.9.0` floor. The accessors are asserted to read app state rather than to construct anything, which is what keeps a per-request dependency from re-doing cold-start work |
+| `app/prompts/` | **Each emitted tool schema's action enum equals `ActionKind`'s members exactly** — set equality, in both directions, over the schema the module actually emits (added 2026-08-28, sixth review, TEST-4). This is the anti-drift link in the hostile-input chain of FR-3.3.7 and FR-3.3.8: the closed vocabulary is only closed if the schema the model is constrained by is the same closed set, and a member added to `ActionKind` without reaching the schema — or the reverse — leaves the validator and the model disagreeing about what is proposable while every other test stays green. Also asserted: both forced-tool-choice call sites emit a schema, and each names its tool |
+| `app/errors.py` | Every subclass renders the requirements §4.2 shape with `request_id`; unhandled exception becomes `upstream-unavailable` and leaks no detail |
+| `app/logging.py` | **Order contents, titles, addresses and confirmation numbers absent at `DEBUG`**; `request_id` present on every line |
+
+### 8.3 Integration tests
+
+Extension-side, driving the fake browser end to end; server-side, driving the real ASGI app in
+process with fakes at the network edge.
+
+| Test | Sets up | Asserts |
+|---|---|---|
+| First-run scan | No host permission, an order-page fixture | Popup offers "Scan this page"; the scan works on the gesture; the standing grant is offered only afterwards |
+| Permission declined | User refuses the standing grant | Every scan stays a click; no nagging; no degraded messaging |
+| Ingest to ranked list | Two fixtures with different windows | Orders stored, ranked at render, inferred window presented as an estimate |
+| Eviction under cap | `MAX_STORED_ORDERS + 1` orders, one with a live pickup | Oldest by `first_seen_at` evicted; the pickup-bearing order survives |
+| Full return, selectors only | Adapter matching every step | No fallback call made; label choice presented with prices; confirmation at the irreversible step |
+| Return with one miss | Adapter missing a middle step | Exactly one fallback call; action confirmed before execution; telemetry carries retailer, step, steps driven |
+| Prices unreadable | Fixture with prices absent | Options shown with price unknown; nothing auto-selected |
+| Free drop-off reaches `DroppedOff` | Options including a free drop-off method, the user picks it | The return goes **`AwaitingLabelChoice` → `DroppedOff` directly**: it never reads `LabelReady`, no label page is visited, `derive_label_carrier` is never called, **no pickup record exists**, and no eligibility or schedule call is made; the session is cleared; a second return on the same item is then permitted, the terminal request kept — FR-3.3.9, FR-3.3.10 |
+| Undetermined carrier still ends at `LabelPrinted` | Printable label, an adapter with no mapping and no matching pattern, the user declines the question | `label_carrier` is unset and no pickup is offered, but the terminal reached when the printed label leaves is **`LabelPrinted`, not `DroppedOff`** — the drop-off is what was offered, not the state — FR-3.3.5, FR-3.3.9 |
+| Worker terminated mid-flow | Kill the worker at `AwaitingConfirm` | Session rehydrates; waits for the user; no unattended step |
+| Worker terminated between the choice and the label page | The user picks a printable option, then the worker is killed before the label page is reached. The adapter fixture maps that option to a carrier its `label_carrier_patterns` deliberately do **not** match | On rehydration `chosen_option` is present and `derive_label_carrier` resolves through **`carrier_by_option`** — source one survived the death rather than the flow merely completing. A fallthrough to source two is a visible failure because the patterns cannot produce the same answer — FR-3.3.5, FR-3.3.9 |
+| Tab closed mid-flow, then handed off | Close the driven tab, then the user says they will finish it themselves | First `Stalled`, with the stopping point named; on the user's answer **`Stalled` → `HandedOff`**, a terminal — the driver stops, the session is cleared, nothing is retried and no tab is reopened; the return request is not deleted and the item stays in the ranked list — FR-3.3.9 |
+| Non-USPS label | Fixture yielding a UPS label | No schedule call attempted; drop-off copy |
+| Ineligible address | Mock returns not serviceable | Presented as a normal second answer; return still valid; pointed at the retailer's page |
+| Eligible then refused | Mock: eligible, then refuses at schedule | Return stays `LabelReady`; **no pickup record retained**; label still valid for drop-off |
+| Schedule response lost | Mock drops the response | Record stays `Booking`; no retry; user told it is unconfirmed; `Abandoned` after the threshold |
+| Cancel a day later | Stored pickup, stale ETag | Refresh precedes cancel; **booked** address used, not the edited current one |
+| Pickup cancelled | Confirmed pickup, then cancel | The pickup record is deleted and the return request is **still at `LabelReady`** — it never left, so nothing moves it back; the label stays valid for drop-off and the item stays in the ranked list — FR-3.4.6 |
+| Cancel finds it collected | Stored confirmed pickup; the refresh reports `collected` | **No `DELETE` is issued**; the pickup reads `Collected` and the return request moves to **`LabelPrinted`**, its FR-3.3.9 terminal for the printed label having left; the popup says the carrier already took it and offers no drop-off; a second return on the same item is now permitted — FR-3.3.10 |
+| Cancel refused after a good refresh | Refresh succeeds, the `DELETE` is refused | The pickup record is unchanged and the return request has not moved; the popup says the pickup still stands; the retry path re-runs the refresh rather than reusing the fresh ETag |
+| Fallback timeout becomes report stuck | Fallback call scripted to hang past `MODEL_FALLBACK_TIMEOUT_MS` | The wait ends at the client budget, not at the server's; the step becomes `report_stuck` and the session reaches `Stalled` with the stopping point named; **no action is executed** — NFR-6.4 |
+| Consent recorded at the confirmation screen | A schedule accepted from the confirmation screen | `consented_at` and `consent_extension_version` are present on the `PICKUP` record **after `save_intent` and before `POST /pickups` is issued** — asserted by inspecting the store between the two; `consented_at` is the screen's instant, not storage's; the version is the running manifest's; `promote` leaves both untouched; **neither field appears in any request body** the api double received — NFR-6.2 |
+| Consent survives a lost response | Confirmation screen accepted, then the schedule response dropped | The record sits in `Booking` and still carries both consent fields — the write that created the pickup is the write that recorded consent |
+| No return begins without a naming gesture — **FR-3.3.1** | A full ingest of returnable orders, the ranking rendered, the urgency clock advanced past every threshold, and an alarm fired | **No `DriverSession` and no `ReturnRequest` exists** — the negative assertion, made against the store rather than against a spy, because a return started by ingestion, ranking or a timer is precisely the SHALL NOT. The same fixture then receives one explicit item gesture and exactly one return begins, naming that item |
+| Collection copy names a day, never a window — **FR-3.4.7** | A schedule response carrying a `scheduled_date`, rendered through the confirmation and detail views | The rendered string contains the returned date and **none of** a clock time, a time range, or a guarantee word (`guaranteed`, `by`, `between`, `window`, `AM`, `PM`) — asserted against the rendered text, so the constraint holds however the copy is later reworded; a response whose date rolled to a later day renders the rolled date, never a locally computed "tomorrow" |
+| Second return while one is live | Item with a `LabelReady` request, a second return started on the same item | The new return is refused; the user is offered the existing one, named by its state; no second driver session and no second label — FR-3.3.10 |
+| Second return after abort | Item with an `Aborted` request | A new request is created; the terminal one is kept |
+| Clear all data with a live pickup | One uncancelled pickup | Enumerated and offered for cancellation before deletion |
+| Calendar tab fails | `tabs.create` rejects | `.ics` offered; `reminder_offered_at` unset until an offer succeeds |
+| Payload over ceiling | Oversized fixture | Rejected client-side before transmission; server rejects independently |
+| Location refused, then re-asked | Mock refuses the requested package location and returns a reduced list | The user is re-asked from **that list only**; nothing is substituted on their behalf — FR-3.4.8 |
+| Server rejects the client version | Server returns `client-too-old` | Update prompt shown; the flow stops rather than degrading; no partial return is left mid-flight |
+| CORS response headers configured | Request from a foreign origin | The response carries no permissive `Access-Control-Allow-Origin`; only the pinned extension origin is echoed |
+
+**The CORS row asserts configuration, not protection**, and its name says so. CORS is enforced by
+browsers and ignored by everything else, so a passing test here means the header is set correctly —
+not that a non-browser client cannot reach the endpoint. The requirements and the high-level design
+both disclaim CORS as a security control, and a test named "foreign origin rejected" would have
+quietly asserted the guarantee they disclaim. The actual control on an unauthenticated Function URL
+is the bounded payload, the reserved concurrency and the token ceiling.
+
+**Server-side, driving the real ASGI app in process** with `httpx` transport mocking at the Bedrock
+edge and a scripted `CarrierAdapter` on application state. The table above is almost entirely
+extension-side; these rows are what give the seven endpoints their own coverage.
+
+| Test | Sets up | Asserts |
+|---|---|---|
+| Ingest, happy path | A recorded tool-call response for an order-page DOM | 200 with the parsed order; `window_inferred` set from the retailer policy when no window was stated |
+| Ingest, unusable parse | A tool call the schema rejects | `unrecognized-page` with the requirements §4.2 shape; nothing partial returned |
+| Ingest over the ceiling | A DOM above `MAX_INGEST_BYTES` | `payload-too-large`, **rejected before any Bedrock call is made** |
+| Next step, selector fallback | A DOM and a step key | Exactly one Bedrock call; the response is a member of the closed action vocabulary; illegal field combinations rejected |
+| Next step, model unavailable | Bedrock transport failure | `upstream-unavailable`; no exception detail in the body |
+| Eligibility, serviceable | Adapter scripted eligible | 200 carrying the carrier's own `next_pickup_date`; no locally computed date |
+| Eligibility, not serviceable | Adapter scripted not serviceable | **200 with an `EligibilityResult`**, `eligible` false, `reason` `address-not-serviceable`, no `next_pickup_date`; **no error shape on this route under any input** |
+| Schedule | Adapter scripted eligible then success | Eligibility is called before the schedule on **every** request, with no cache across calls; response carries the address USPS was given |
+| Schedule against an ineligible address | Adapter scripted not serviceable, schedule requested anyway | `address-not-serviceable` at **409**; the adapter's schedule is never reached |
+| Schedule, location refused | Adapter refuses the package location | `location-not-serviceable`, and the body carries `details.servable_locations` |
+| Upstream deadline exceeded | Bedrock and the carrier each scripted to hang past their configured deadline | `upstream-unavailable` in both cases, raised at the deadline rather than at the function timeout |
+| Request id isolation | Two sequential requests against one app instance, the second raising | The ids differ; the raising request's id does not survive into a third request's logs |
+| Refresh a scheduled pickup | Adapter reports the booking still scheduled | 200 with a `RefreshedPickup`: `state` scheduled, the carrier's own `scheduled_date`, a fresh `etag`; nothing about the date is computed locally |
+| Refresh a collected pickup | Adapter reports the booking already collected | 200, `state` collected, **no `etag`** — there is nothing left to cancel, and returning one would invite a `DELETE` that must fail |
+| Refresh uses the booked address | Stored booking whose address differs from the request's current one | The adapter is called with the **booked** address; the endpoint reads the address from the request body and never from a cache |
+| Cancel with a stale ETag | Adapter rejects the ETag | `etag-expired` at 409; the adapter's call log contains **exactly one call**, the cancel, carrying the ETag the request supplied **byte for byte** — the server refreshes nothing on this route and orders nothing. The refresh-then-cancel ordering is the client's and is asserted in the extension-side "Cancel a day later" row above |
+| Error shape, every reason | Each `BoomerangError` subclass raised from a route | Body is exactly `reason`, `message`, `request_id` — plus `details` for `location-not-serviceable` alone, absent on every other; status matches the §6.1 table |
+| Version gate | Client versions either side of `min_client_version`, including `0.10.0` against `0.9.0` | `client-too-old` at 426 below the threshold, before any model or carrier call; **component-wise comparison**, so the double-digit minor is served |
+| Version gate, no version | A request omitting the client version | Treated as below the threshold, not as unrestricted |
+| Schedule with a non-USPS label — **FR-3.4.4 backstop** | A schedule request whose `label_carrier` is not USPS, which is a client that got §3.3's derivation wrong or skipped it | `wrong-carrier-label` at **409** with the requirements §4.2 shape, **before eligibility and before any carrier call** — asserted against the adapter's call log, which must be empty. Added 2026-08-28 (sixth review, ERR-1): the client half is asserted thoroughly in §8.2's carrier-derivation rows and in the "non-USPS label" row above, and this is the only row that exercises the layer whose whole purpose is catching a client those rows would have passed |
+| Schedule with no printed label | A schedule request that does not assert a printed label | `label-not-printed` at 409, **before eligibility and before any carrier call** — the server-side half of FR-3.3.6 |
+| Health | No dependencies stubbed | 200 without calling Bedrock or the carrier — a health check that depends on upstreams reports their outage as its own — **for a request carrying a supported `X-Boomerang-Client-Version`; a request carrying none gets 426, like every other route** (clarified 2026-08-28, seventh review, CONF-2, because a row reading "200" with no header stated is the row the plan's dissenting tasks were reading) |
+
+### 8.4 Requirement traceability
+
+Every functional requirement maps to at least one test above. Requirements whose enforcement is a
+*structural* property rather than a runtime behaviour are marked, because they are verified by
+review and by types rather than by assertion — and pretending otherwise would be the kind of
+false coverage claim this table exists to prevent.
+
+`NFR-6.x` below is the requirements' own identifier: its section 6 headings read
+`### NFR-6.1 Privacy and data handling` and so on, amended for that purpose (§10). They previously
+read `### 6.1`, which made every `NFR-` citation in this document look fabricated to a mechanical
+sweep of defined identifiers — a false positive a reviewer hit and had to reason past. The prefix
+now sits where the sweep looks. The sections remain prose rather than individually numbered
+statements; `NFR-6.x` names the section, and the obligation each row asserts is stated in the row.
+
+| Requirement | Verified by |
+|---|---|
+| FR-3.1.1 page recognition | Ingest to ranked list; adapter registry unit tests |
+| FR-3.1.2 render-stable extraction | `src/extract/` unit tests against fixtures |
+| FR-3.1.3 payload minimisation | Two obligations, traced separately because they are of different strengths. **The byte ceiling:** payload over ceiling; extract unit tests, both paths. **The fail-closed scan:** `src/extract/` egress-scan unit rows (tracking number, postal address, negative cases, and a throwing matcher reporting flagged) plus the `src/driver/` egress-abort rows (nothing reaches `src/api/`, the step becomes `report_stuck`). **The absolute prohibition on transmitting the label page** is **structural** — no module has a path that sends it, `src/api/` is the only egress module (§2.2), and the label page is read only in the tab (§4.6) |
+| FR-3.1.4 structured extraction | Ingest to ranked list; order validator |
+| FR-3.1.5 local accumulation | Eviction under cap; storage unit tests |
+| FR-3.2.1 window derivation | `window.py` unit tests — all **five** rows of §3.2's precedence table (widened 2026-08-28, seventh review, CONF-1/TEST-2), including **the page-exposed policy in days**, which is the requirement's second source and had neither design nor test before this revision, and **the `delivered_at`-absent branch**, which is the common case rather than the exception. Two negatives: an order with any date derives a window whether or not its retailer has an override, and **a page stating a policy in days does not derive from `default_return_days`** |
+| FR-3.2.2 ranking derived at render | `src/ranking/` unit tests; **structural** — no ranking field is stored |
+| FR-3.2.3 honest presentation | Ranking unit tests; ingest to ranked list |
+| FR-3.3.1 explicit intent | Full return, selectors only — the positive; **"no return begins without a naming gesture"** — the negative that the SHALL NOT actually asks for, asserting no session and no request exists after ingestion, ranking and a fired alarm |
+| FR-3.3.2 in-context permission | First-run scan; permission declined |
+| FR-3.3.3 visible tab, supervised | Return with one miss; worker terminated mid-flow |
+| FR-3.3.4 present the label choice | Full return; prices unreadable |
+| FR-3.3.5 record the label carrier | `src/driver/` carrier-derivation unit rows — the three sources in order, a miss at each, and **no path yielding USPS unless a source said USPS**; non-USPS label, end to end; "undetermined carrier still ends at `LabelPrinted`", which asserts the miss is a complete outcome and not a different terminal; and "worker terminated between the choice and the label page", which asserts source one **survives** the window the label-page relocation opened. The derivation is invoked **at the label page** (§4.6), which is what makes source two reachable at all |
+| FR-3.3.6 print confirmation | `src/driver/` unit tests: `label_printed` is set **only** on the user's affirmation, and never inferred from reaching the label page or from a completed download. The server's `label-not-printed` rejection is a second line, not the primary check — the requirement is about what the extension refuses to conclude |
+| FR-3.3.7 selector-first driving | Full return (no fallback); return with one miss (exactly one) |
+| FR-3.3.8 closed vocabulary | Action validator unit tests |
+| FR-3.3.9 state machine | Driver unit tests per edge; worker terminated. The `LabelReady → LabelPrinted` edge is tested as **"the printed label leaves"** — the collection branch of "cancel finds it collected" — following the upstream amendment this revision cites in §4.5; the affirmation of FR-3.3.6 is tested as a field write that does **not** transition. **All four terminals are reached by an integration row**, not by unit tests alone: `LabelPrinted` by "cancel finds it collected", `DroppedOff` by "free drop-off reaches `DroppedOff`", `HandedOff` by "tab closed mid-flow, then handed off", `Aborted` by "second return after abort" |
+| FR-3.3.10 one active return per item | Second return while one is live; second return after abort; `src/storage/` unit tests on `active_for_item` |
+| FR-3.4.1 eligibility hard gate | `pickup.py` unit tests; ineligible address |
+| FR-3.4.2 graceful second answer | Ineligible address |
+| FR-3.4.3 standardized address | Full return; schedule snapshots from the response |
+| FR-3.4.4 label precondition | Non-USPS label; `pickup.py` unit tests |
+| FR-3.4.5 schedule parameters | `usps/` unit tests |
+| FR-3.4.5a eligibility is not a reservation | Eligible then refused |
+| FR-3.4.5b simulated-booking disclosure | Two unit rows, one per workspace, because the guarantee needs both halves: `app/carriers/mock.py` asserts **every** confirmation number it issues carries `MOCK_CONFIRMATION_PREFIX`, on the schedule and refresh paths alike, and `entrypoints/popup/` asserts a prefixed number renders the marker and an unprefixed one does not. **The determination is from the number, never from the build environment** — asserted by rendering a prefixed number in a build configured as production. Added 2026-08-28 (sixth review, TEST-2): the requirement was tested in both workspaces and missing from this table, which reads as uncovered to exactly the sweep §9 proposes |
+| FR-3.4.6 cancellation path | Cancel a day later; pickup cancelled; cancel finds it collected; cancel refused after a good refresh; `app/services/pickup.py` ETag pass-through |
+| FR-3.4.7 copy constraint | The "collection copy names a day, never a window" integration row — asserted against **rendered text**, for the returned `scheduled_date` and against clock times, ranges and guarantee words. **Also a review rule**, because no test catches a bad sentence in copy nobody wired into the test |
+| FR-3.4.8 package location | `servable_locations` unit tests; re-ask, never substitute |
+| FR-3.5.1 template URL | `src/calendar/` unit tests |
+| FR-3.5.2 no Google credentials | **Structural** — no OAuth dependency exists; enforced by a manifest assertion test |
+| FR-3.5.3 `.ics` fallback | Calendar tab fails |
+| FR-3.5.4 no availability reading | **Structural** — asserted by the `src/calendar/` unit row that the module has no read path and no network call, and by the §2.2 rule that only `src/calendar/` may touch calendar concerns |
+| FR-3.5.5 record the offer | Calendar unit tests; calendar tab fails |
+| FR-3.6.1 popup | First-run scan; ingest to ranked list |
+| FR-3.6.2 landing page | **Not verified by this document.** It is a `client/` surface with its own tests; this document covers the extension and the server only, per §1. Recorded here so the gap is deliberate rather than missed |
+| FR-3.6.3 dashboard | **Out of PoC scope as of 2026-08-27 (plan decision D6)** — nothing verifies it because nothing implements it. The integration row that stood here is removed rather than skipped, since a skipped test is a claim that the feature exists and is untested. Reinstating the requirement reinstates this row |
+| FR-3.7.1 minimal manifest | Manifest assertion test: no `<all_urls>`; **no `externally_connectable` key at all** (amended 2026-08-27, plan decision D6 — an absent key is a stronger assertion than one correct host, and it is what the withdrawal of FR-3.6.3 buys); CSP declared; `optional_host_permissions` carries every retailer origin and `host_permissions` carries none; and on a production bundle, the extension ID derived from the emitted manifest equals the recorded production ID (§7.2) |
+| FR-3.7.2 two-tier permissions | First-run scan; permission declined |
+| FR-3.7.3 disclosure | Fallback telemetry fields asserted; **listing copy is a review gate** |
+| NFR-6.1 privacy | **The obligation:** order contents, titles, addresses and confirmation numbers never reach a log, at any level, and exception detail never reaches a response body. `app/logging.py` unit tests at `DEBUG`; `app/errors.py`'s unhandled-exception row asserting no leaked detail; the allowlist formatter's unrecognised-field placeholder (§6.1) |
+| NFR-6.2 compliance | **The obligation:** `consented_at` and `consent_extension_version` on the `PICKUP` record, captured at the confirmation screen preceding `POST /pickups`, and **never recorded server-side**. "Consent recorded at the confirmation screen" and "consent survives a lost response" assert all three — presence before the call, the screen's own instant, and absence from every request body. The **wording** of the disclosure remains a review gate |
+| NFR-6.3 resilience | **The obligation:** no failure leaves a return in an unrecoverable or invisible state. Return with one miss; tab closed; worker terminated mid-flow; schedule response lost; cancel refused after a good refresh; the store-rebuild row of §6.2 |
+| NFR-6.4 performance and presentation | **The obligations:** each upstream call is separately bounded and the client gives up on the action call before the server does; an inferred window is never presented as stated. Fallback timeout becomes `report_stuck`; upstream deadline exceeded, both upstreams; `app/config.py` rejecting a deadline not below `function_timeout_ms`; inferred window presentation |
+| NFR-6.5 security | **The obligations:** every field crossing the boundary is validated, no origin but the pinned ones is served, and CORS is configuration rather than a control. Order validator; `app/models/` strictness rows; **the FR-3.7.1 manifest assertion that no `externally_connectable` key exists at all**; the CORS configuration row, which asserts headers only and says so. ~~`sender.origin` refusal~~ — **repointed 2026-08-28 (sixth review, TEST-3)**: §8.2 struck that assertion on 2026-08-27 under plan decision D6 and this row went on citing it, which is a traceability row reporting coverage that no longer exists. The absence assertion is the replacement §8.2 itself names as the stronger property — an origin check can be weakened by an edit, whereas a manifest with no external-messaging key has no origin to check |
+| NFR-6.6 infrastructure | **Not tested here, but no longer unowned** — the check is Terraform, and it belongs to the deployment track: plan Task I.1 declares the topology and verifies it by `terraform plan`, Task I.2 applies it and smoke-tests the deployed endpoints (plan decisions D7 and D8). See §8.5 |
+| NFR-6.7 abuse and spend | **Not tested here, but no longer unowned** — same owner: the reserved concurrency, the Bedrock `InputTokenCount` alarm and the daily budget are declared and plan-asserted in Task I.1. See §8.5 |
+
+### 8.5 What is deliberately not tested
+
+- **Live USPS and live Bedrock.** No CI credentials, and USPS access is not yet granted. A manual
+  smoke suite is worth adding once it is — **now assigned rather than merely recorded**: plan Task
+  I.3 owns it — reconciling `UspsAdapter` against the USPS sandbox once credentials arrive, which is
+  also where high-level design §11 Q11 gets its answer — while Task I.2 covers the Bedrock half by
+  smoke-testing the deployed endpoints against the real model (plan decision D12). Both run by hand
+  against a deployed environment. They are out of CI on purpose; a suite that needs credentials CI does not have is a suite that is permanently red
+  or permanently skipped.
+- **Chrome's own permission UI.** Not automatable; the fake asserts our side of the contract.
+- **Whether the user saved the calendar event.** Unknowable by design — there is no callback, which
+  is exactly why FR-3.5.5 records the offer instead.
+- **NFR-6.6 infrastructure and NFR-6.7 abuse and spend.** Both are Terraform properties — reserved
+  concurrency, the token ceiling, the function timeout, the CloudWatch alarms — and this document
+  defines no infrastructure test tier. The first draft pointed them at "Terraform plan assertions",
+  which is pointing at nothing: no such assertions exist, and naming a suite that has not been
+  written is worse than an admitted gap, because it reads as coverage in the traceability table.
+  They are real requirements and they need a real check; that check belongs to `infra/` and is not
+  in this document's scope. **Amended 2026-08-27 (plan decisions D7 and D8): the gap now has an
+  owner outside this document.** The implementation plan carries a deployment track. Task I.1
+  replaces the legacy VPC-and-EC2 scaffold with the Lambda topology and **declares all of it** — the
+  Function URL with its single CORS origin, the reserved concurrency, the SSM parameters, the log
+  group with explicit retention, Bedrock invocation logging asserted *off*, the four alarms and the
+  daily budget — and its verification is `terraform plan`, which is the "Terraform plan assertions"
+  the first draft named before anything existed to assert against. Task I.2 then applies it and
+  smoke-tests the deployed endpoints from a real browser origin, which is the half `plan` cannot
+  give: a plan proves the declaration, a deploy proves the thing. The requirements stay
+  untested *here* and are satisfied *there*, which is a different claim from the one this bullet
+  made before, and the honest one.
+
+- **The end-to-end run against a real retailer.** Every row in §8.3 drives a fixture, and a fixture
+  is a page as it was on the day it was captured. Nothing in this document, and nothing in CI, ever
+  visits a live retailer — so a flow that passes every test here can still fail on the first real
+  order, and the tests would have no way to say so. That gap is closed **once, by hand**: plan Task
+  8.6 is a manual acceptance run of a complete return on a live page, and it sits on the critical
+  path deliberately (plan decision D23). It is not automated and should not be — it needs a real
+  account, a real order and a person watching the tab, which is precisely the combination CI cannot
+  supply. What it buys is the one signal fixtures cannot give: that the fixtures are still true.
+
+**Two of the entries above are structural, and structural means someone reads it.** The gate is code
+review of any change touching `src/calendar/`, `src/messaging/` or `app/errors.py`, and the trigger
+is mechanical: those paths carry a review requirement, so the check fires on the diff rather than on
+someone's memory. A structural guarantee with no named trigger decays into a comment.
+
+---
+
+## 9. Open Questions
+
+**Three of the four questions below are now answered, and one is narrowed.** They are struck rather
+than deleted, so that the answer stays attached to the question it settles — the reasoning is worth
+more than the tidiness (revised 2026-08-27, from the implementation-plan review).
+
+1. ~~**Where does adapter fixture capture come from?**~~ **Answered (plan decisions D1 and D2).**
+   Fixtures must be captured from real retailer pages, which means someone's real order; synthetic
+   fixtures drift from reality and real ones carry personal data into the repository. The
+   recommendation stood — capture real, scrub to synthetic values before committing, treat the
+   scrubbing as part of the fixture's definition — and it now has a **when** and a **who**: the
+   feasibility spike that opens the plan walks a complete return by hand on each target retailer and
+   captures the scrubbed subtrees as it goes. The fixtures are committed, so what §8.1 calls a
+   regression tier has an input that exists before the code that reads it. The question was open
+   because nothing was scheduled to answer it, not because the answer was unknown.
+
+2. ~~**Is a manual live-credential smoke tier in scope for the PoC?**~~ **Yes, and it is assigned
+   (plan decision D12).** Plan Task I.3 owns it: a short by-hand suite run against a deployed
+   environment once USPS access is granted, deliberately outside CI (§8.5). What changed is not the
+   scope judgement but the ownership — "deferred until access is granted" is a sentence that stays
+   true forever unless something is written down to notice when the condition clears.
+
+3. ~~**The production dashboard hostname**~~ **Resolved by removal (plan decision D6).** FR-3.6.3 is
+   out of PoC scope, so there is no dashboard, no origin to name and no `externally_connectable` key
+   to fill — and therefore no naming decision blocking the manifest. This is the cleanest kind of
+   answer to an open question: the thing that needed naming stopped existing. §8.4's FR-3.7.1 row
+   now asserts the key's **absence**, which is what made the question disappear rather than merely
+   go quiet.
+
+4. **What keeps a citation in this document from naming a requirement that does not exist?** Two
+   review rounds each caught one — an entity attributed to a high-level design section that does not
+   define it, and a rule attributed to an `FR-3.3.10` that had not been written. Both were the same
+   failure: a document confidently citing an authority it never checked. A mechanical sweep of every
+   `FR-` and `NFR-` reference in this document and the high-level design against the requirements'
+   defined identifiers takes seconds and would have caught both at the moment they were written.
+   **Recommendation:** run it as a repository check rather than as a review round — a reviewer
+   finding a fabricated citation is a reviewer spending attention on something `grep` does better.
+   It is listed here rather than in §8 because it validates the documents, not the software.
+
+   **Now a task, and a wider one (amended 2026-08-27, plan decision D18).** Plan Task 10.2 runs the
+   sweep as a repository check, and its scope is extended past `FR-`/`NFR-` identifiers to
+   **configuration-parameter names**: every `MAX_`, `_TIMEOUT_MS`, `_AFTER_HOURS` and `_PREFIX`
+   constant this document cites is checked against the requirements' §5 tables and against the code
+   that reads it. That extension is not speculative — the review that produced it found three
+   constants cited here under names nothing declared, which is exactly the citation failure the
+   original question describes, in a namespace the original sweep did not look at.
+
+   **A third direction, and the one this round proves is needed (added 2026-08-28, sixth review,
+   TEST-2).** The sweep as described checks that every `FR-` cited here exists upstream, and §10
+   generalises it to check that every upstream `FR-` is cited *somewhere* here. Neither is enough:
+   FR-3.4.5b was cited here twice, in two §8.2 rows, and was the only requirement missing from §8.4
+   — so both checks pass on a document whose traceability table reports a requirement as uncovered.
+   The sweep therefore asserts a third thing: **every upstream `FR-` and `NFR-` has a row in §8.4**,
+   or an explicit excusal in it. §8.4 is the artefact anyone asking "is this requirement covered?"
+   reads, and a check that validates every citation except the one in the table that answers that
+   question is checking the wrong surface.
+
+   A later round supplied the other half of the case: the sweep also has to be able to *find* what
+   it is checking against. Requirements section 6 was headed `### 6.1` … `### 6.7`, so every `NFR-`
+   citation in this document resolved to nothing and a reviewer reported all seven as fabricated —
+   a false positive that costs exactly the attention the check exists to save. The headings now
+   carry the `NFR-` prefix (§10), which makes the identifier the sweep matches the identifier the
+   document declares. **The check and the naming convention are one control, not two**: a sweep is
+   only as good as the definitions it can see, so any future identifier scheme has to be greppable
+   from the heading that defines it.
+
+   **A fourth direction, and the only one that runs *after* a change rather than over a finished
+   document (added 2026-08-28, seventh review).** The three directions above all check a document at
+   rest. The failure they cannot catch is the one this round kept producing: a name is amended in one
+   place — a field renamed, a state struck, a signature changed, a decision reversed — and the other
+   mentions of it, in this document, in the plan and in the requirements, quietly keep the old name.
+   That is not a fabricated citation and not a missing table row; it is two true sentences that no
+   longer describe the same system, and every round so far has found some of them by reading. So the
+   sweep gains a standing rule that is discharged per amendment rather than per document:
+
+   > **After every amendment to a name — a field, a state, a type, a constant, a section number, an
+   > endpoint, a task id, a decision id — `grep` the whole of this document, the plan and the
+   > requirements for every other mention of the amended name, and update those too. The amendment is
+   > not finished until that grep is clean.**
+
+   It applies in both directions and to both halves of a rename: `grep` the **old** name to find what
+   still says it, and `grep` the **new** name to confirm every place now saying it means the same
+   thing. Where the old name legitimately survives — in an amendment log recording what it used to be,
+   or in a struck-through open question — the surviving mention says *why*, so a later sweep does not
+   read it as drift. Two of this round's findings existed only because an earlier round amended a name
+   and stopped at the section it was reading, so the rule is written here rather than remembered:
+   plan Task 10.2 owns the mechanical part it can own, and the part it cannot — judging whether a
+   surviving mention is stale or deliberate — is the author's, discharged at the moment of the
+   amendment while the reason is still in hand.
+
+**Five clarity questions from the sixth review, answered in place rather than left here (2026-08-28).**
+They are recorded because where an answer landed is itself worth knowing, and because a question a
+reader has once is a question the next reader has too. `list_unsettled` returns `list<Pickup>` and
+the repository applies the derived `Collected` and `Abandoned` states on **every** read, so no caller
+can observe a stored state that should have been derived away (§3.4). `UserPrompt.ask` records a
+pending question and returns a `PendingQuestion`; it does not block, and the answer re-enters through
+`ReturnDriver.advance` (§3.3). `derive_label_carrier` returns `None` when no source determines a
+carrier, the return still reaches `LabelPrinted`, and offering drop-off is the **popup's** rendering
+of a request that has no `label_carrier` rather than a driver branch (§4.6). `default_return_days`
+always has a value — a retailer override where one exists, the requirements §5.3 system default of
+30 otherwise — and it reaches the pure `derive_window` as a parameter that `IngestService` resolves
+(§3.2). And §10 now distinguishes settled declines from deferrals, which was the fifth.
+
+---
+
+## 10. What Review Raised and This Document Declines
+
+Seven rounds of review have run against this document — sixty-four findings against the first draft,
+thirty against the first revision, twenty-nine against the second, thirty-four against the third, a
+plan review that produced twenty-five decisions, twenty-seven against the revision that applied them,
+and twenty-two against the revision after that. Most are addressed above. These are the ones deliberately not taken, recorded here so the next
+reader does not spend the effort again.
+
+**An entry here is a settled decline unless it says otherwise (stated 2026-08-28, sixth review,
+UNCLEAR-5).** The two are not the same thing and an implementer reading this section as authority
+needs to know which one they are looking at: a *decline* is a decision that has been made and does
+not need making again, while a *deferral* is a decision that has been postponed and still has to be
+taken by someone. Every bullet below is a decline. The section carries exactly two entries that are
+not — the "accepted and left open" server-side deduplication finding at the end, which is deferred to
+whoever revisits high-level design §6.3, and round two's ingestion-debounce hole, which is a decline
+of the *restructuring* while the coverage gap itself stays recorded as a gap. Both say so where they
+sit. Nothing else here is waiting on anybody.
+
+The count barely moved between rounds two and three, and that is worth reading correctly rather
+than as a plateau: the second revision's findings are mostly *coverage* findings — a module with no
+test row, an endpoint with no integration row — where the first round's were design defects. Two of
+round three's four blockers were of that kind, and two were regressions introduced by round two's
+own fixes. The lesson taken from that is recorded in §9 rather than here.
+
+**From the plan review (2026-08-27):**
+
+The implementation-plan review is a fifth round, of a different kind: it read this document as
+something to be *built* rather than as something to be checked, and the findings it produced are
+mostly things a reader of the design alone could not see. Twenty-five decisions came out of it,
+recorded in `plan/boomerang-decisions.md` as `D1`–`D25`. Most are applied above. Two are worth
+recording as declines:
+
+- **Generating `contracts/` from the Pydantic models.** It would guarantee the server half is never
+  stale, and it would destroy the tier: a file generated from one side's types cannot detect that
+  side's types drifting. The files are hand-written on purpose, and §8.1 states the property that
+  makes them worth having — a renamed field turns exactly one suite red.
+- **Splitting `ScriptedUspsAdapter` and `MockCarrierAdapter` into one configurable class.** The two
+  want opposite behaviour on an unscripted call (§2.1). A single class with a `strict` flag would
+  ship the strict path's failure mode into production the first time someone set the flag wrong,
+  and the failure would be a raised exception on a live schedule request.
+
+**From the first round:**
+
+- **More sequence diagrams** — for ingestion failure, for permission grant, for eviction, for the
+  calendar offer, and for several others. Each was already fully specified in prose plus a §8.3 row,
+  and a diagram of a three-step flow is decoration that then has to be kept in sync. The one
+  sequence added, §4.5 cancellation, was added because refresh-before-cancel is an *ordering*
+  constraint, and ordering is the one thing prose states worse than a diagram does.
+- **Defining all eleven undeclared types.** Eleven are now defined in §3.5 — the seven this round
+  named plus the four later revisions added — because this document invents them. The rest are the
+  high-level design's entities and are defined there; restating them would create a second
+  definition, and the first field to drift would be the one that matters.
+- **Fixture capture logistics and CI cadence** — how often adapter fixtures are refreshed, who
+  captures them, whether a nightly job re-runs them against live retailer pages. That is a process
+  decision for a team that does not exist yet, and writing it down now would be inventing a
+  commitment rather than recording one. The scrubbing rule is in §9 because it has a privacy
+  consequence; the cadence does not.
+- **An import-linter to enforce the §2.2 dependency graph.** The graph is complete and the rule is
+  stated; the tool is a build-configuration choice, not a design one. It is worth adding, and it
+  will not change a single line of this document when it is.
+- **Boundary cases for urgency thresholds** — what happens at exactly three days, exactly seven,
+  and at a `return_by` in the past. These are unit assertions, and the `src/ranking/` row already
+  requires ordering by days remaining; enumerating each comparison here would put test data in a
+  design document.
+- **Restructuring §8.4 to separate structural verification from tested verification.** The table
+  already marks structural rows in bold and §8.5 now names the review gate that fires on them.
+  Splitting the table would make the coverage question ("is every requirement accounted for?")
+  require reading two places instead of one.
+
+**From the second round:**
+
+- **Moving the ingestion debounce out of `entrypoints/content.ts` into a testable module**, and the
+  render-wait assertion that would then become possible. Both are real, and both are about the same
+  thing: FR-3.1.2's "wait for the page to settle" is a timing behaviour that a static DOM fixture
+  cannot exercise, so the test would need a fake timer and a mutating fixture. That is worth
+  building; it is not worth restructuring the entrypoint boundary for before anyone has written the
+  extractor. Recorded as a known coverage hole rather than papered over with a test that asserts
+  the debounce exists without exercising it.
+- **Naming the `chrome.storage.local` keys.** Six string constants in one module, and any name this
+  document invented would be re-invented on contact with the code. The layout rule in §5.2 — one
+  key per collection, singletons for the address and the session — is the part that constrains the
+  implementation; the spellings are not.
+- **Scoping and enforcing "anything needing to survive a rollback must be ordered last."** The
+  review is right that the rule has no enforcer. It applies to one call pair, `save_intent` and
+  `promote`, and both are named in §5.2 and asserted in §8.2. A general mechanism for a rule with
+  one instance is machinery, and it would be the machinery that drifts.
+- **An adversarial-DOM fixture** — a retailer page carrying prompt-injection text aimed at the
+  parse. Worth building, and it belongs to the security-test pass rather than to the design: §3.2's
+  closed action vocabulary and the `ValidatedAction` construction rule are what make the attack
+  bounded, and those are the things a fixture would confirm. Naming the fixture here would not add
+  a constraint the design does not already carry.
+- **A mechanical assertion that the two `MAX_INGEST_BYTES` values agree.** Requirements §5.1 and
+  §5.2 both state the number and the requirements already say they SHALL agree. The check belongs
+  in whatever validates the extension build against the deployed server, which does not exist yet.
+- **A mechanical trigger for FR-3.7.3's manifest review gate.** It is a human gate on a human
+  decision — someone adding a permission. A CI check that diffs the manifest is a good idea and is
+  a repository-configuration choice, not a design one.
+- **Pinning `Answer`'s shape.** FR-3.3.6's print affirmation does turn on it, but it has one
+  producer and one consumer, and the field names are an implementation detail that this document
+  would only be guessing at. §3.5 says this explicitly rather than inventing a record.
+- **Naming which module owns order validation.** §2.2 already puts both hostile-input boundaries in
+  `src/validation/` and §4.1 now draws the worker's edge to it. The review wanted a class in a
+  §3.x diagram; the module assignment is the load-bearing part and the diagram would add a box.
+- **Popup-closes-mid-flow handling at the two popup-initiated call sites.** The worker owns every
+  flow that outlives a click — §4.4 is the whole answer to "the context went away" — and the popup
+  holds no state a close could lose. A second treatment specific to the popup would restate §4.4.
+
+**From the third round:**
+
+- **A mechanical trigger for FR-3.4.7's copy gate** — a check that fires when pickup-facing copy
+  changes. This is the same class as round two's manifest-review trigger and is declined for the
+  same reason: it is a human gate on a human judgement ("does this sentence promise a window?"),
+  and the CI check that diffs the copy strings is a repository-configuration choice. The gate is
+  named in §8.4 and §8.5 so nobody mistakes it for a test.
+- **A class diagram for the popup's own components.** §7.2 now names every object the popup
+  constructs and the rule that it never mutates through them, which is the constraint. The
+  components themselves are a UI decomposition that this document would be inventing ahead of
+  anyone building it.
+- **Interfaces for the two repositories the coordinator holds, so a fake can be substituted.** The
+  extension tests run against `chrome.storage.local` itself under a fake storage area, not against
+  substituted repositories — that is what makes the §8.2 coordinator assertions about `set` batching
+  and interleaving meaningful. Interfaces would let a test bypass the exact layer the tests exist
+  to exercise.
+- **Unit rows for `IngestService`, `ActionService` and `AddressRepository`.** All three are
+  orchestration: they call a validator, an adapter and a pure function in order, and every branch
+  they own is asserted by a §8.3 integration row against a scripted adapter. A unit test of an
+  orchestrator with all three collaborators faked asserts the ordering of calls the test itself
+  wrote down.
+- **A load or concurrency test against `reserved_concurrent_executions`.** The number is a spend
+  control, not a capacity target, and a test that confirms Lambda throttles at five confirms AWS
+  works. NFR-6.7's real question — whether five is the right number — is answered by watching a
+  deployment, not by a test.
+- **Reconciling the high-level design's UPS build-time flag with the requirements' USPS-only
+  scope.** The flag is described in both places as *off* and as a build-time constant with no UPS
+  adapter behind it; it documents where a second carrier would attach. Deleting it would remove the
+  only record of that seam, and the requirements' "USPS only for v1" is not contradicted by an
+  unimplemented switch that is off.
+- **The remainder of the third round's Consider tier** — further diagram splits, additional
+  cross-references between §5 and §6, and naming conventions for test fixtures. Each would make the
+  document longer without changing what an implementer would build.
+
+**From the seventh round: nothing.** All twenty-two findings are taken — six Must, nine Should,
+seven Consider. Nineteen of the twenty-two landed on text the previous round had just added, which is
+the number worth reading rather than the tiering: a revision that adds five hundred lines to a
+three-thousand-line document adds them faster than the propagation rule can be applied by memory, and
+the review found the seams. Two of the three findings that were *not* in new text were the same
+`PICKUP.state` vocabulary disagreement seen from two directions, which had survived six rounds
+because every document was internally consistent about it and no two agreed. That is the argument for
+the fourth sweep direction §9 now carries: consistency checking within a document cannot find a name
+that is wrong in the same way everywhere, and reading three documents side by side is exactly the work
+a `grep` after each amendment does better.
+
+**From the sixth round: nothing.** All twenty-seven findings are taken — four Must, ten Should,
+thirteen Consider. The round is worth reading for what it *withdrew* as much as for what it raised:
+seven findings from earlier rounds were retracted as mistaken, including the claim that four
+requirements were untested. That is the failure mode of a review of a document this size in the
+other direction, and it is the reason the round's substantive findings were checked against the
+repository rather than against the document's own account of itself before being taken.
+
+What the round actually found, stripped of tiering, is one pattern in two forms. Three of its four
+blockers — the eligibility call site specified three incompatible ways, three primary keys declared
+in no document, and `delivered_at` present in both upstream ERDs and absent here — are **things this
+document uses and never declares**, which is the same shape as the previous round's `label_carrier`
+gap and the round before that's. Four more findings are the other form: the propagation of plan
+decisions `D6`, `D16` and `D22` reached the sections those decisions named and stopped one section
+short of §8.4, so a struck test stayed cited and a new requirement never reached the traceability
+table. Neither form is caught by consistency checking, because an absence contradicts nothing and a
+half-applied amendment is locally coherent everywhere. §9's sweep is the structural answer to the
+first; the second is an argument for treating a decision's blast radius as a checklist rather than
+as a search.
+
+**From the fourth round: nothing.** All thirty-four findings are taken — eleven Must, thirteen
+Should, ten Consider — and this is the first round with no declines. That is not a compliment to the
+document. Three of the four rounds' Must findings have been *absences* rather than errors, and this
+round's were the starkest yet: FR-3.1.3's fail-closed egress scan and FR-3.3.5's `label_carrier`
+had no owning module, no collaborator and no test row at all, in a document whose §2.2 declares its
+own dependency graph complete. A requirement that is never mentioned cannot be contradicted, so it
+survives every consistency check a reviewer runs and every one this document runs on itself. The
+structural answer is §9's fourth question generalised: the sweep it proposes should assert not only
+that every `FR-` cited here exists upstream, but that every `FR-` upstream is cited *somewhere*
+here or explicitly excused. That check would have found both, in seconds, before a reviewer did.
+
+**This document amends upstream rather than working around it — six places three revisions ago, four
+in the next, five in the last one, and four more in this one.** The
+header rule is that upstream wins; it is not that upstream is never wrong. Where a defect was
+genuinely upstream, the requirement or the high-level design was changed and this document cites the
+change rather than quietly diverging from it:
+
+| Amendment | Why it was upstream, not here |
+|---|---|
+| Requirements FR-3.3.9: the `LabelReady → LabelPrinted` edge now reads **"the printed label leaves"** rather than "user affirms printed", with a note fixing the four terminals | The old edge conflated FR-3.3.6's *field* write with a *state* transition, which made FR-3.4.5a and FR-3.4.6 — both of which hold the return at `LabelReady` around a pickup — literally contradict it. No low-level choice could satisfy both readings |
+| Requirements FR-3.3.6: the affirmation SHALL write the field and SHALL NOT move the request | The other half of the same defect, stated where the affirmation is defined |
+| Requirements §5.1: `CARRIER_ADAPTER` and `FUNCTION_TIMEOUT_MS` added | Deployment parameters. §7.1 branches on the first and validates against the second; both were invented here, which is a low-level document taking a deployment decision |
+| Requirements §5.2: `API_REQUEST_TIMEOUT_MS`, `API_RETRY_BUDGET_MS`, ~~`DASHBOARD_ORIGIN`~~, `EXTENSION_KEY` added | The same, on the extension side — four constants §7.2 shipped with defaults that no upstream table carried. `DASHBOARD_ORIGIN` was struck again on 2026-08-27 with FR-3.6.3 (plan decision D6); the row upstream is struck rather than deleted, with a note saying what reinstating it costs |
+| High-level design §5.2 and §5.4: the cancellation narrative and its failure-path rows now say the return stays at `LabelReady`, with a new row for a cancel that finds the box collected | §5.2's prose asserted the old FR-3.3.9 reading; leaving it would have made the amendment true in one document and false in another |
+| Requirements section 6: the seven headings now read `### NFR-6.1` … `### NFR-6.7` rather than bare `### 6.1` … `### 6.7`. Text unchanged | An identifier every downstream document cites has to be declared where it is defined. Bare headings meant a mechanical sweep of `NFR-` citations — the check §9 question 4 recommends — resolved none of them, and a reviewer duly reported all seven as fabricated. Defining the prefix downstream would have been this document inventing an upstream document's naming |
+
+**From the plan review (2026-08-27), four more.** Each is the same shape as the six above: a defect
+that could have been papered over in this document and would then have been true here and false
+upstream.
+
+| Amendment | Why it was upstream, not here |
+|---|---|
+| Requirements §4.1: the client version header is named normatively — `X-Boomerang-Client-Version`, on every endpoint including `/health`, with a differently-spelled header treated as absent and rejected (plan decision D16) | Three modules have to agree on this string — the extension's api client, the server's dependency, and the `contracts/` fixtures — and no document named it. §7.2 described it; a description is not a spelling. The failure mode is silent and one-directional: a mismatch makes `MIN_CLIENT_VERSION`'s gate **fail open**, serving exactly the stale clients it exists to turn away, with nothing red anywhere |
+| Requirements FR-3.4.5b (new): a simulated booking SHALL disclose itself, by a `MOCK_CONFIRMATION_PREFIX` on the confirmation number, and the extension SHALL render a marker when it sees one (plan decision D22) | The obligation is a user-facing honesty rule, not an implementation detail, so it belongs where the other user-facing rules are. Placing it here would have made "does the user know this pickup is not real?" a question answered by a low-level document. The determination is made **from the confirmation number, not from the build environment**, which is what makes it survive a `prod` bundle pointed at a mock-configured server |
+| Requirements FR-3.6.3: prefixed with an out-of-scope block naming exactly what reinstatement requires (plan decision D6) | Scope is the requirements' to set. This document could only have stopped specifying the dashboard, which would have left an in-scope requirement with no design — the worst of the three states. Everything this document specified for that surface is struck rather than deleted, so reinstatement is unstriking rules that were reasoned about |
+| Requirements §5.1: `MOCK_CONFIRMATION_PREFIX` added, default `SIM-` | A constant two workspaces read and one requirement depends on. It sits in §5.1 with the other server parameters even though the extension also reads it, because the server is what *emits* it; the extension only recognises it |
+
+**From the sixth round (2026-08-28), five more.** Three of them close the same defect: this
+document keyed three of its four stores by identifiers that no document declared, while §3.5 defers
+entity fields upstream — so the keys were defined nowhere and §3.5 pointed at a target that did not
+contain them. That could have been closed by narrowing §3.5 to define identifiers locally, and it
+was not, for the reason the header rule gives: a key is a property of the entity, not of the code
+that reads it, and defining `item_id` here would have made this document the authority on a field
+the ERDs draw.
+
+| Amendment | Why it was upstream, not here |
+|---|---|
+| Requirements §2.2 ERD and high-level design §4.1 ERD: `ORDER_ITEM` gains `string item_id` and `RETURN_REQUEST` gains `string return_request_id`, with a paragraph in each document stating that both are opaque locally-generated strings, unique within one browser profile's store, that `item_id` is stable across a re-scan of the same order, and that neither is ever transmitted (sixth review, CLASS-3 and CONSIST-2) | The identifiers are entity keys, and both ERDs already declare `booking_intent_id` on `PICKUP` — which is exactly what the other two should have looked like, and is why the fix is a symmetry restored rather than a convention invented. `ReturnDriver.start(item_id)`, `OrderRepository.find_item`, `ReturnRepository.active_for_item` and every keyed repository method depend on them; none of the four is a shape this document invents. The stability rule is the load-bearing half: an `item_id` regenerated on re-scan would silently break FR-3.3.10's one-active-return-per-item guarantee, and no test in either workspace would notice |
+| High-level design §4.2: a paragraph stating that `booking_intent_id` is also the `PICKUP`'s store key, and that there is deliberately no second one (sixth review, CLASS-3) | The third identifier is the one that got *removed* rather than declared. `pickup_id` appeared three times here and nowhere upstream, and a record carrying both a client-generated intent id and a carrier-issued key has two identities that diverge on exactly the branch the design cares most about — the lost schedule response, where the intent exists and the booking may or may not. One key, declared where the entity is drawn, is the fix; declaring a second upstream would have made the divergence official |
+| Requirements §5.2: `CLIENT_VERSION`, `STORAGE_EVICTION_MARGIN_BYTES` and `RETURN_ATTEMPT_LIMIT` declared, with defaults (found by the plan decision `D18` configuration sweep, run early) | All three were used and none was declared. The header value and `consent_extension_version` are the same constant and NFR-6.2 depends on it; §5.2's eviction margin is stated as behaviour and had no number; `DriverSession.attempt_count` had no bound. The implementation plan had invented names for two of them in `src/config.ts` and asserted they were "normative", which is the shadowing §7.2's rule forbids — so the fix is upstream declaration, not a plan correction alone. The sweep also found the plan's `src/config.ts` exporting a `STORAGE_CAP_BYTES` that no document declares and this design deliberately does not have: the store's byte ceiling is the platform's, and eviction is driven by the rejected write's size (§5.2), so a configured cap would be a second, disagreeing answer to the same question |
+| High-level design §5.2: the flow's eligibility node is annotated with its execution context — the service worker, before the offer renders (sixth review, CONSIST-3, and the upstream half of PKG-1) | The high-level flow showed the check without saying who makes it, so it offered no authority to settle a call site that §4.3, §7.2 and §2.2 specified three incompatible ways. Correcting only this document would have left the two free to drift apart again silently, which is the failure the annotation exists to prevent. The resolution — the popup initiates over messaging, the worker owns the egress — is the one the graph and §7.2 already implied, so what changed upstream is a statement of the context, not a decision about it |
+
+**From the seventh round (2026-08-28), four more.** Three of the four are one defect seen from two
+sides: an entity whose fields this document persisted and no ERD declared, and a state vocabulary the
+two ERDs and this document each spelled differently. Both are the shape D25 exists for — the choice
+was never between "follow upstream" and "diverge", because upstream was internally inconsistent and
+following it was not available.
+
+| Amendment | Why it was upstream, not here |
+|---|---|
+| Requirements §2.2 ERD and high-level design §4.1 ERD: `DRIVER_SESSION` grows from five fields to twelve — `state`, `item_id`, `order_id`, `retailer_key`, `step_key`, `chosen_option`, `attempt_count`, `tab_id`, `tab_url`, `started_at`, `last_progress_at`, `schema_version` — with a paragraph in each stating that `chosen_option` is nullable and that `order_id` is `ORDER`'s natural key rendered as one addressable string rather than a second identity (seventh review, CLASS-2) | This document listed `DriverSession` in §3.5's *not upstream* table while persisting seven fields no ERD declared, which is the one combination §3.5 is supposed to make impossible: a table whose whole purpose is to name types this document owns was being used to excuse fields it does not. `transition`'s single-`set` law, §4.1's recovery path and `RETURN_ATTEMPT_LIMIT`'s bound all read fields of this entity, so the fields are load-bearing, not incidental. Declaring them here would have made this document the authority on an entity both ERDs draw |
+| Requirements §2.2 ERD and high-level design §4.1 ERD: `DRIVER_SESSION.adapter_step_key` is renamed **`step_key`** (seventh review, CLASS-2) | The requirements already spelled the concept `step_key` in §4.1's `/returns/next-step` row, so one document carried two names for one field — exactly the drift an ERD exists to prevent, and a rename that had to happen upstream because both names were upstream. The downstream half of the same finding went the other way on purpose: this document's `last_written_at` was renamed to the ERDs' `last_progress_at`, because there upstream was right and there was nothing to correct |
+| Requirements §2.2 and high-level design §4.2: `PICKUP.state` is now `Booking`, `Confirmed`, `Collected`, `Abandoned` — `Cancelled` is **struck** and `Abandoned` is **added** (seventh review, CONSIST-1 and CONSIST-2) | Each of the three documents named a different set, so there was no consistent upstream to defer to. The direction is settled by two pieces of upstream evidence rather than by preference: requirements FR-3.3.9's own aside already enumerates the lifecycle as `Booking`, `Confirmed`, `Collected`, `Abandoned`, and §4.5 has always specified a successful cancel as a **deletion**. A `Cancelled` row that is never written is a state that would sit in front of every `list_unsettled` read, keep pinning its order against eviction, and count in a clear action — three live behaviours answering to a record the design says should not exist. `Abandoned` is the reverse case: it is derived and reported on every read (§5.2) and was declared nowhere |
+| Requirements FR-3.1.5's eviction carve-out now reads *not collected or abandoned*, and FR-3.3.9's persistence bullet now reads *every field §2.2's ERD declares for it* (seventh review, consequential to the two rows above) | Both are propagation, and both are why the amendment rule in §9's fourth sweep direction is written down. The carve-out named a state that no longer exists, which would have left the one requirement governing eviction pinning on a condition nothing can satisfy. The persistence bullet listed a subset of the session's fields inline, which is a second, quieter authority on the same entity — it now points at the ERD instead of competing with it |
+
+**One finding this round is deliberately *not* an upstream amendment, and saying so is part of the
+record (seventh review, CONF-1).** The missing return-window precedence row for a retailer policy the
+*page itself* states — "free returns within 90 days" printed on the order page — is a **design
+correction, not an upstream one**. FR-3.2.1 already names the page as a source and requirements §5.3
+already carries the 30-day system default; nothing upstream was wrong. The gap was entirely here: the
+precedence table had four rows where the sources it draws on need five, and `stated_return_days`
+reaches `derive_window` as a **derivation input carried on `OrderSchema`, never a stored field**, so
+no ERD is owed a column either. Recording the non-amendment matters because the alternative reading —
+"a new field appeared, therefore an ERD must change" — is how an ERD accumulates fields nothing
+stores.
+
+**One upstream field finally has an owner: `label_carrier`.** High-level design §4.2's ERD has
+carried it on `RETURN_REQUEST` since the first draft and this document mentioned it nowhere — an
+alignment gap no diff would show, because an absent field disagrees with nothing. §3.3's
+`derive_label_carrier`, §3.5's `ReturnMethodOptions` and §4.6's flow are what close it, and the
+FR-3.3.5 row of §8.4 is what keeps it closed.
+
+One finding is *accepted and left open* rather than fixed: the review is right that a stateless
+server cannot deduplicate a schedule call, and that the client-side booking intent record mitigates
+the consequence without removing the cause. Removing the cause means giving the server memory, which
+is the decision high-level design §6.3 makes and this document is downstream of.

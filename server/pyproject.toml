@@ -7,4 +7,114 @@ requires-python = ">=3.13"
 dependencies = [
     "anthropic[bedrock]>=1.0.0",
     "fastapi[standard]>=0.141.1",
+    "mangum>=0.19.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pip-audit>=2.9",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "pytest-cov>=7.0",
+    "ruff>=0.14",
+]
+
+# ---------------------------------------------------------------------------
+# ruff — linter, formatter and docstring coverage in one tool
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+# dev-note: start from every rule and subtract, rather than curating an allowlist that
+# silently stops growing. A new ruff release adds its checks here by default; if one is
+# wrong for this codebase, it gets an entry below with a reason.
+select = ["ALL"]
+ignore = [
+    "COM812",  # trailing-comma rules the formatter already owns
+    "ISC001",  # implicit string concat — conflicts with the formatter
+    "D203",    # incompatible with D211 (no blank line before class docstring)
+    "D213",    # incompatible with D212 (summary on the first line)
+    "CPY001",  # no per-file copyright headers in this repo
+    "TRY003",  # this codebase deliberately raises long, actionable messages (AGENTS.md
+               # "error shape"); satisfying it would mean a custom exception class per
+               # one-off startup error, which is more indirection than it buys.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",     # assert is the point of a test
+    "D",        # tests document themselves by name
+    "ANN",      # annotating every fixture and test adds noise, not safety
+    "PLR2004",  # magic values are the fixtures
+    "INP001",   # tests/ is intentionally not a package
+    "ARG",      # unused args are how monkeypatch stubs match a signature
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+mypy-init-return = true
+
+# ---------------------------------------------------------------------------
+# mypy — static analysis, strict
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+warn_no_return = true
+disallow_any_unimported = true
+show_error_codes = true
+pretty = true
+files = ["app", "tests"]
+# dev-note: tests/ has no __init__.py. Without these two, mypy names its modules bare
+# ("conftest", "test_main") and the tests.* override below silently never matches —
+# which shows up as strict-mode errors on every test function.
+mypy_path = "."
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# Tests assert on behaviour, not types; strict annotation of every fixture buys nothing.
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_incomplete_defs = false
+
+# ---------------------------------------------------------------------------
+# pytest + coverage
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+# dev-note: the service runs as a plain module tree from server/ (`fastapi run app/main.py`),
+# not as an installed distribution, so tests resolve `app` the same way the app does.
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = ["*/__pycache__/*"]
+
+[tool.coverage.report]
+# dev-note: 95% line AND 95% branch. `fail_under` covers the combined total; the branch
+# figure is enforced because `branch = true` folds branch misses into that total.
+fail_under = 95
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
 ]

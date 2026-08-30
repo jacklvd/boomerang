@@ -9,7 +9,7 @@
     "lint": "eslint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "prepare": "cd .. && husky client/.husky"
+    "prepare": "cd .. && husky .husky"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

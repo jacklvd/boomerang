@@ -1,0 +1,799 @@
+<title>Carrier Pickup Teardown</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Literata:opsz,wght@7..72,400;7..72,500;7..72,600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+  :root {
+    --bg:        #EDF0EE;
+    --surface:   #FAFBFA;
+    --surface-2: #E4E9E6;
+    --ink:       #13191A;
+    --muted:     #57635F;
+    --faint:     #7C8783;
+    --line:      #D2D9D6;
+    --line-soft: #E2E7E5;
+    --accent:    #0E6B59;
+    --accent-ink:#0A4C3F;
+    --ok:        #0E6B59;
+    --warn:      #8C5F0E;
+    --stop:      #9E3527;
+    --usps:      #2B4C8C;
+    --ups:       #7A5230;
+    --fedex:     #6B4A8F;
+    --shadow:    0 1px 2px rgba(19,25,26,.05), 0 6px 20px -12px rgba(19,25,26,.22);
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body:    "Literata", Georgia, "Times New Roman", serif;
+    --f-mono:    "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+    --step--1: clamp(.78rem, .76rem + .1vw, .84rem);
+    --step-0:  clamp(1rem, .97rem + .14vw, 1.08rem);
+    --step-1:  clamp(1.18rem, 1.12rem + .3vw, 1.35rem);
+    --step-2:  clamp(1.45rem, 1.34rem + .55vw, 1.8rem);
+    --step-3:  clamp(1.9rem, 1.66rem + 1.2vw, 2.7rem);
+    --step-4:  clamp(2.5rem, 2rem + 2.4vw, 4rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0E1413;
+      --surface:   #151C1B;
+      --surface-2: #1D2624;
+      --ink:       #E7ECEA;
+      --muted:     #9AA6A2;
+      --faint:     #78837F;
+      --line:      #2A3532;
+      --line-soft: #212B29;
+      --accent:    #4ECFAC;
+      --accent-ink:#8FE6CC;
+      --ok:        #4ECFAC;
+      --warn:      #D9A441;
+      --stop:      #E58A7B;
+      --usps:      #86A6E2;
+      --ups:       #C89C6E;
+      --fedex:     #B396D9;
+      --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 26px -14px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:        #0E1413;
+    --surface:   #151C1B;
+    --surface-2: #1D2624;
+    --ink:       #E7ECEA;
+    --muted:     #9AA6A2;
+    --faint:     #78837F;
+    --line:      #2A3532;
+    --line-soft: #212B29;
+    --accent:    #4ECFAC;
+    --accent-ink:#8FE6CC;
+    --ok:        #4ECFAC;
+    --warn:      #D9A441;
+    --stop:      #E58A7B;
+    --usps:      #86A6E2;
+    --ups:       #C89C6E;
+    --fedex:     #B396D9;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 26px -14px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: var(--step-0);
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+    padding: 0 1.25rem 6rem;
+  }
+
+  .wrap { max-width: 62rem; margin: 0 auto; }
+  .prose { max-width: 40rem; }
+
+  h1, h2, h3, h4 { font-family: var(--f-display); font-weight: 600; text-wrap: balance; line-height: 1.15; margin: 0; }
+  p { margin: 0; }
+
+  .eyebrow {
+    font-family: var(--f-display);
+    font-size: var(--step--1);
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  code, .mono { font-family: var(--f-mono); font-size: .88em; font-variant-ligatures: none; }
+  code {
+    background: var(--surface-2);
+    border-radius: 3px;
+    padding: .1em .34em;
+    word-break: break-word;
+  }
+
+  /* ---------- masthead ---------- */
+  header.masthead {
+    padding: 5rem 0 2.5rem;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+  header.masthead h1 {
+    font-size: var(--step-4);
+    font-weight: 700;
+    letter-spacing: -.035em;
+  }
+  .deck {
+    font-size: var(--step-1);
+    color: var(--muted);
+    max-width: 34rem;
+    line-height: 1.45;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.5rem;
+    font-family: var(--f-mono);
+    font-size: var(--step--1);
+    color: var(--faint);
+  }
+
+  /* ---------- verdict ---------- */
+  .verdict {
+    margin-top: 3rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 4px;
+    padding: 2rem 2rem 2.15rem;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 1.15rem;
+  }
+  .verdict h2 { font-size: var(--step-2); letter-spacing: -.02em; }
+  .verdict-list { display: flex; flex-direction: column; gap: .85rem; }
+  .verdict-item { display: grid; grid-template-columns: 6.5rem 1fr; gap: 1rem; align-items: baseline; }
+  .verdict-item .who {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: var(--step--1);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  @media (max-width: 34rem) {
+    .verdict-item { grid-template-columns: 1fr; gap: .25rem; }
+  }
+
+  /* ---------- sections ---------- */
+  section { margin-top: 4.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+  .sec-head { display: flex; flex-direction: column; gap: .55rem; }
+  .sec-head h2 { font-size: var(--step-3); letter-spacing: -.03em; }
+  .sec-head p { color: var(--muted); max-width: 42rem; }
+
+  h3.sub { font-size: var(--step-1); letter-spacing: -.015em; margin-top: .5rem; }
+
+  /* ---------- chips ---------- */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    font-family: var(--f-display);
+    font-size: .68rem;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: .3rem .55rem;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .chip.ok    { color: var(--ok); }
+  .chip.warn  { color: var(--warn); }
+  .chip.stop  { color: var(--stop); }
+  .chip.flat  { color: var(--faint); }
+
+  /* ---------- table ---------- */
+  .table-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 46rem; }
+  th, td {
+    text-align: left;
+    padding: .85rem 1rem;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+    font-size: .92rem;
+    line-height: 1.45;
+  }
+  thead th {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: var(--step--1);
+    letter-spacing: .04em;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+  }
+  tbody th {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: .84rem;
+    color: var(--muted);
+    width: 13rem;
+    background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+  }
+  tr:last-child td, tr:last-child th { border-bottom: none; }
+  .k-usps  { border-top: 3px solid var(--usps); }
+  .k-ups   { border-top: 3px solid var(--ups); }
+  .k-fedex { border-top: 3px solid var(--fedex); }
+  td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- carrier deep dive ---------- */
+  .carrier {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.35rem;
+    box-shadow: var(--shadow);
+    position: relative;
+    overflow: hidden;
+  }
+  .carrier::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 4px;
+    background: var(--key, var(--accent));
+  }
+  .carrier.usps  { --key: var(--usps); }
+  .carrier.ups   { --key: var(--ups); }
+  .carrier.fedex { --key: var(--fedex); }
+  .carrier-head { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem 1rem; justify-content: space-between; }
+  .carrier-head h3 { font-size: var(--step-2); letter-spacing: -.025em; color: var(--key); }
+  .carrier-head .sig { font-family: var(--f-mono); font-size: var(--step--1); color: var(--faint); }
+
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1.15rem 1.75rem; }
+  .fact { display: flex; flex-direction: column; gap: .28rem; }
+  .fact dt {
+    font-family: var(--f-display);
+    font-size: .7rem;
+    font-weight: 600;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .fact dd { margin: 0; font-size: .95rem; line-height: 1.45; }
+
+  .rule { height: 1px; background: var(--line-soft); border: 0; margin: 0; }
+
+  ul.notes { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .5rem; }
+  ul.notes li { font-size: .95rem; line-height: 1.5; }
+  ul.notes li::marker { color: var(--faint); }
+
+  .callout {
+    border-left: 3px solid var(--key, var(--accent));
+    background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+    padding: .9rem 1.1rem;
+    border-radius: 0 3px 3px 0;
+    font-size: .95rem;
+    line-height: 1.5;
+  }
+  .callout strong { font-family: var(--f-display); font-weight: 600; }
+
+  pre {
+    margin: 0;
+    background: var(--surface-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 4px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-family: var(--f-mono);
+    font-size: .8rem;
+    line-height: 1.6;
+  }
+  pre .cmt { color: var(--faint); }
+  pre .hi  { color: var(--accent-ink); font-weight: 700; }
+
+  /* ---------- risks ---------- */
+  .risks { display: flex; flex-direction: column; gap: .75rem; }
+  .risk {
+    display: grid;
+    grid-template-columns: 7.5rem 1fr;
+    gap: 1rem;
+    align-items: start;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1rem 1.15rem;
+  }
+  .risk p { font-size: .95rem; line-height: 1.5; }
+  .risk .risk-t { font-family: var(--f-display); font-weight: 600; display: block; margin-bottom: .2rem; }
+  @media (max-width: 40rem) {
+    .risk { grid-template-columns: 1fr; gap: .55rem; }
+  }
+
+  /* ---------- steps ---------- */
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: flex; flex-direction: column; gap: 0; }
+  ol.steps li {
+    counter-increment: s;
+    display: grid;
+    grid-template-columns: 3rem 1fr;
+    gap: 1.25rem;
+    padding: 1.1rem 0;
+    border-bottom: 1px solid var(--line-soft);
+    align-items: start;
+  }
+  ol.steps li:last-child { border-bottom: none; }
+  ol.steps li::before {
+    content: counter(s, decimal-leading-zero);
+    font-family: var(--f-mono);
+    font-size: .8rem;
+    font-weight: 700;
+    color: var(--accent);
+    padding-top: .18rem;
+    font-variant-numeric: tabular-nums;
+  }
+  ol.steps .st { font-family: var(--f-display); font-weight: 600; display: block; margin-bottom: .25rem; }
+  ol.steps p { font-size: .95rem; line-height: 1.5; color: var(--muted); }
+
+  /* ---------- sources ---------- */
+  .sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: .55rem 2rem; }
+  .sources a {
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 1px solid var(--line);
+    font-size: .87rem;
+    line-height: 1.5;
+    padding-bottom: .3rem;
+    display: block;
+    word-break: break-word;
+  }
+  .sources a:hover, .sources a:focus-visible { color: var(--accent); border-bottom-color: var(--accent); }
+  .src-tag { font-family: var(--f-mono); font-size: .72rem; color: var(--faint); }
+
+  a { color: var(--accent); }
+  a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  footer.end {
+    margin-top: 5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    font-family: var(--f-mono);
+    font-size: var(--step--1);
+    color: var(--faint);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.5rem;
+    justify-content: space-between;
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <span class="eyebrow">Decision brief &middot; Boomerang returns agent</span>
+    <h1>Carrier Pickup Teardown</h1>
+    <p class="deck">Which carrier will let Boomerang book a porch pickup for a user who has no shipper account, no carrier login, and a return label the retailer printed?</p>
+    <div class="meta-row">
+      <span>25 Aug 2026</span>
+      <span>USPS &middot; UPS &middot; FedEx</span>
+      <span>Specs read directly: USPS Carrier Pickup 3.1.8, UPS Pickup v2409</span>
+    </div>
+  </header>
+
+  <div class="verdict">
+    <span class="eyebrow">Recommendation</span>
+    <h2>Build USPS only for v1. Everything else needs an account that your user does not have.</h2>
+    <p class="prose">USPS is the single carrier whose pickup API carries <em>no</em> account identifier in the request at all &mdash; not a shipper number, not a CRID, not a payment token. The pickup is identified by the consumer's address and contact details, authenticated by your app's own OAuth credentials. That is exactly the shape Boomerang needs, and the pickup is free.</p>
+    <div class="verdict-list">
+      <div class="verdict-item">
+        <span class="who" style="color: var(--usps)">USPS</span>
+        <span><span class="chip ok">Ship it</span> &nbsp;Free pickup, no per-user credential, free API, production-mirror sandbox. One gate: Carrier Pickup is not in the default access package, so file the access request today.</span>
+      </div>
+      <div class="verdict-item">
+        <span class="who" style="color: var(--ups)">UPS</span>
+        <span><span class="chip warn">Fast-follow</span> &nbsp;Workable via <code>PaymentMethod 04</code> &mdash; bill the pickup to the retailer's 1Z return tracking number. But you must hold a UPS account to get credentials at all, and a rejected payment leaves you owing ~$9&ndash;15.</span>
+      </div>
+      <div class="verdict-item">
+        <span class="who" style="color: var(--fedex)">FedEx</span>
+        <span><span class="chip stop">Don't integrate</span> &nbsp;<code>associatedAccountNumber</code> is required and is the account invoiced. There is no tracking-number payment path. Use the fedex.com guest flow through the headless browser you already run.</span>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Criteria</span>
+      <h2>What actually decides this</h2>
+      <p>Boomerang's user is a consumer holding a retailer-issued prepaid return label. They will never have a UPS or FedEx shipper number, and asking them for one kills the product. So the ranking is driven by one question &mdash; whose account does the carrier need &mdash; and three tiebreakers: what the pickup costs the user, how fast you can get to a working production call, and whether you can test before you are approved.</p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">&nbsp;</th>
+            <th scope="col" class="k-usps">USPS Carrier Pickup 3.0</th>
+            <th scope="col" class="k-ups">UPS Pickup v2409</th>
+            <th scope="col" class="k-fedex">FedEx Pickup Request v1</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Schedule for a user with no shipper account</th>
+            <td><strong style="color:var(--ok)">Yes</strong> &mdash; request body has no account field of any kind</td>
+            <td><strong style="color:var(--warn)">Conditionally</strong> &mdash; <code>Shipper</code> is optional if you pay by tracking number or card</td>
+            <td><strong style="color:var(--stop)">No</strong> &mdash; account number required and invoiced</td>
+          </tr>
+          <tr>
+            <th scope="row">Auth model</th>
+            <td>OAuth&nbsp;2.0 client credentials (auth-code also offered). Bearer JWT.</td>
+            <td>OAuth&nbsp;2.0 client credentials via <code>client_secret_basic</code>; auth-code + PKCE with refresh tokens for acting on a customer's own UPS login.</td>
+            <td>OAuth&nbsp;2.0 <code>client_credentials</code>, plus <code>csp_credentials</code> (Compatible provider, child key per customer) and <code>client_pc_credentials</code>.</td>
+          </tr>
+          <tr>
+            <th scope="row">Scope / token</th>
+            <td><code>carrier-pickup</code> on every operation; scheme block also names <code>pickup</code>. Token from <code>/oauth2/v3/token</code>.</td>
+            <td>No named scopes. Token from <code>/security/v1/oauth/token</code>.</td>
+            <td>No named scopes. 1-hour token, regenerate hourly.</td>
+          </tr>
+          <tr>
+            <th scope="row">Per-user credential needed</th>
+            <td>None.</td>
+            <td>None for card / tracking-number payment. Required for account billing.</td>
+            <td>Effectively yes &mdash; either your account eats every pickup, or you become a FedEx Compatible provider and mint child credentials per customer.</td>
+          </tr>
+          <tr>
+            <th scope="row">Cost to the user</th>
+            <td class="num">$0. Free on the next delivery day.</td>
+            <td class="num">$0 if paid by return tracking number; otherwise ~$9.05 future-day / ~$14.75 same-day plus residential surcharge.</td>
+            <td class="num">Ground on-call ~$4/package (capped ~$20/wk per account); Express courier charge plus residential surcharge.</td>
+          </tr>
+          <tr>
+            <th scope="row">Cost of the API</th>
+            <td>Free.</td>
+            <td>Free.</td>
+            <td>Free.</td>
+          </tr>
+          <tr>
+            <th scope="row">Sandbox</th>
+            <td><code>apis-tem.usps.com</code> &mdash; a mirror of production, same credentials.</td>
+            <td><code>wwwcie.ups.com</code> Customer Integration Environment.</td>
+            <td><code>apis-sandbox.fedex.com</code> &mdash; <em>virtualized</em>: canned responses that do not vary with your input.</td>
+          </tr>
+          <tr>
+            <th scope="row">What you must hold</th>
+            <td>USPS Business Account (BCG/CRID) + an app in the Customer Onboarding Portal. No payment account, no EPS.</td>
+            <td>A UPS account number &mdash; app registration makes you attach one to the credentials.</td>
+            <td>A FedEx account number to promote the project to production, plus API validation.</td>
+          </tr>
+          <tr>
+            <th scope="row">Returns-aware</th>
+            <td><code>packageType: RETURNS</code> is a first-class enum value.</td>
+            <td>Up to 30 return/forward tracking numbers per pickup.</td>
+            <td>Covers Express and Ground return shipments.</td>
+          </tr>
+          <tr>
+            <th scope="row">Biggest gate</th>
+            <td>Access approval latency &mdash; not in the default package.</td>
+            <td>You carry the payment risk if method 04 is refused.</td>
+            <td>Nobody's account can legitimately be billed.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Option A</span>
+      <h2>USPS Carrier Pickup 3.0</h2>
+    </div>
+
+    <div class="carrier usps">
+      <div class="carrier-head">
+        <h3>The one that works</h3>
+        <span class="sig">OpenAPI 3.0.1 &middot; v3.1.8 &middot; read from spec</span>
+      </div>
+
+      <dl class="facts">
+        <div class="fact"><dt>Base URL</dt><dd class="mono">apis.usps.com/pickup/v3</dd></div>
+        <div class="fact"><dt>Test URL</dt><dd class="mono">apis-tem.usps.com/pickup/v3</dd></div>
+        <div class="fact"><dt>Grant</dt><dd>client_credentials</dd></div>
+        <div class="fact"><dt>Pickup cost</dt><dd>Free</dd></div>
+      </dl>
+
+      <hr class="rule">
+
+      <div>
+        <span class="eyebrow">Surface</span>
+        <ul class="notes" style="margin-top:.6rem">
+          <li><code>GET /carrier-pickup/eligibility</code> &mdash; is this address serviceable? Returns the standardized address when it is.</li>
+          <li><code>POST /carrier-pickup</code> &mdash; schedule. Returns a <code>confirmationNumber</code> and an <code>ETag</code>.</li>
+          <li><code>GET | PUT | DELETE /carrier-pickup/{confirmationNumber}</code> &mdash; inspect, change, cancel. <strong>PUT and DELETE require the ETag</strong>, which is good for one hour or until it is used.</li>
+        </ul>
+      </div>
+
+      <div>
+        <span class="eyebrow">The finding</span>
+        <p style="margin-top:.6rem">The entire <code>SchedulePickupRequest</code> body is this &mdash; and there is nowhere in it to put an account:</p>
+      </div>
+
+<pre><span class="cmt">// required: pickupDate, pickupAddress, packages, estimatedWeight, pickupLocation</span>
+{
+  "pickupDate": "2026-08-26",
+  "pickupAddress": {
+    "firstName": "...", "lastName": "...",
+    "address": { "streetAddress": "...", "city": "...", "state": "..", "ZIPCode": "#####" },
+    "contact": [ { "email": "user@example.com" } ]   <span class="cmt">// or SMS; 1-2 entries</span>
+  },
+  "packages": [ { "packageType": <span class="hi">"RETURNS"</span>, "packageCount": 1 } ],
+  "estimatedWeight": 3,
+  "pickupLocation": {
+    "packageLocation": <span class="hi">"PORCH"</span>,     <span class="cmt">// FRONT_DOOR | BACK_DOOR | SIDE_DOOR | KNOCK_ON_DOOR |</span>
+    "specialInstructions": "...",   <span class="cmt">// MAIL_ROOM | OFFICE | RECEPTION | MAILBOX | OTHER</span>
+    "dogPresent": false
+  },
+  "nextAvailablePickup": true       <span class="cmt">// auto-rolls to the next serviceable day</span>
+}</pre>
+
+      <div class="callout">
+        <strong>Why this settles the question.</strong> No <code>accountNumber</code>, no CRID, no MID, no payment token, no EPS reference. The pickup is bound to the consumer's address and their own email or SMS contact; the only thing authenticated is <em>your app</em>. A third party scheduling on a user's behalf is not a workaround here &mdash; it is the ordinary shape of the API.
+      </div>
+
+      <hr class="rule">
+
+      <div>
+        <span class="eyebrow">Constraints that shape the agent</span>
+        <ul class="notes" style="margin-top:.6rem">
+          <li><strong>Carrier Pickup is not in the default access package.</strong> A new app gets &ldquo;Public Access I&rdquo; &mdash; Addresses, Prices, Locations, Service Standards, Shipping Options, Tracking, OAuth, UserInfo. Pickup requires a separate access request, and USPS itself warns of extended wait times. This is the critical-path item.</li>
+          <li><strong>Postage must already be on the box.</strong> Free Package Pickup only covers packages with prepaid online postage affixed. Boomerang's browser step must produce a real label, not just a QR code, before the pickup call is legitimate.</li>
+          <li><strong>It is a day, not a window.</strong> The carrier collects on their normal delivery round, Monday&ndash;Saturday. Same-day requests must land before 2:00&nbsp;AM CT; you can book up to a year ahead. The guaranteed two-hour window is a different product &mdash; Pickup on Demand, ~$25.</li>
+          <li>Eligibility is address-specific. Always call <code>/eligibility</code> before promising a pickup, and keep drop-off copy as the fallback.</li>
+          <li>Legacy Web Tools (the XML <code>ShippingAPI.dll</code> endpoint and <code>CarrierPickupScheduleRequest</code>) was retired 25 Jan 2026. Ignore every tutorial that uses it.</li>
+          <li>Rate limits are murky: documentation has cited a 60/hour default, while observed Public Access quotas run far higher and vary per API. Assume you will need a quota increase before launch and ask for it in the same support ticket as access.</li>
+        </ul>
+      </div>
+
+      <div class="callout">
+        <strong>Fix the promise in SKETCH.md.</strong> The mock message says &ldquo;tomorrow between 9&nbsp;AM and 12&nbsp;PM.&rdquo; Free USPS pickup cannot promise that. Say &ldquo;with tomorrow's mail delivery&rdquo; and have the box out by the time the carrier normally arrives.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Option B</span>
+      <h2>UPS Pickup v2409</h2>
+    </div>
+
+    <div class="carrier ups">
+      <div class="carrier-head">
+        <h3>Possible, on someone else's dime</h3>
+        <span class="sig">OpenAPI 3.0.3 &middot; read from spec</span>
+      </div>
+
+      <dl class="facts">
+        <div class="fact"><dt>Base URL</dt><dd class="mono">onlinetools.ups.com/api</dd></div>
+        <div class="fact"><dt>Test URL</dt><dd class="mono">wwwcie.ups.com/api</dd></div>
+        <div class="fact"><dt>Grant</dt><dd>client_credentials, or auth-code + PKCE</dd></div>
+        <div class="fact"><dt>Pickup cost</dt><dd>~$9.05 future-day, ~$14.75 same-day, or $0 via method 04</dd></div>
+      </dl>
+
+      <hr class="rule">
+
+      <div>
+        <span class="eyebrow">Surface</span>
+        <ul class="notes" style="margin-top:.6rem">
+          <li><code>POST /pickupcreation/{version}/pickup</code> &mdash; schedule. Returns an 11-character <code>PRN</code>.</li>
+          <li><code>POST /shipments/{version}/pickup/{pickuptype}</code> &mdash; price it first (<code>oncall</code> | <code>smart</code> | <code>both</code>).</li>
+          <li><code>/shipments/{version}/pickup/{CancelBy}</code> &mdash; cancel. Pending-status lookup needs an account number.</li>
+        </ul>
+      </div>
+
+      <div>
+        <span class="eyebrow">The lever</span>
+        <p style="margin-top:.6rem"><code>PaymentMethod</code> is required, and its enum is where the whole decision lives:</p>
+      </div>
+
+      <div class="table-scroll">
+        <table style="min-width:34rem">
+          <thead><tr><th scope="col">Code</th><th scope="col">Means</th><th scope="col">Usable by Boomerang?</th></tr></thead>
+          <tbody>
+            <tr><td class="num">00</td><td>No payment needed &mdash; free-pickup regions</td><td>Only where UPS pickup is free</td></tr>
+            <tr><td class="num">01</td><td>Pay by shipper account</td><td>No &mdash; requires the user's UPS account</td></tr>
+            <tr><td class="num">03</td><td>Pay by charge card</td><td>Technically yes; you would carry raw PAN + CVV. Don't.</td></tr>
+            <tr><td class="num"><strong>04</strong></td><td><strong>Pay by 1Z tracking number</strong> &mdash; &ldquo;the shipper agreed to pay for the pickup packages&rdquo;</td><td><strong style="color:var(--ok)">Yes. This is the path.</strong></td></tr>
+            <tr><td class="num">05 / 06 / 07</td><td>Check, cash, PayPal</td><td>Not automatable</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <strong>Method 04 is the retailer-pays path.</strong> Pass the return label's 1Z number in <code>TrackingData</code> &mdash; up to 30 per pickup, exactly 18 characters, and a tracking number already used to pay for a pickup cannot be reused. The <code>Shipper</code> block is genuinely optional when you are not billing an account, so no UPS number ever has to come from the user.
+      </div>
+
+      <div>
+        <span class="eyebrow">Catches</span>
+        <ul class="notes" style="margin-top:.6rem">
+          <li><strong>You still need a UPS account to get credentials.</strong> Creating an app on the developer portal makes you attach a UPS account number to the client ID &mdash; even for an integration that never bills it.</li>
+          <li>Set <code>AlternateAddressIndicator: "Y"</code>: the pickup address is the user's home, not anything on your profile.</li>
+          <li>If method 04 is refused &mdash; the retailer's label is not a UPS Returns label, or the number was already consumed &mdash; the pickup either fails or falls to a paid method. Decide in advance which, and never silently charge.</li>
+          <li>The auth-code + PKCE flow exists and does let a third party act against a customer's own UPS login, with refresh tokens. It is the right tool for merchant integrations and the wrong tool for consumers, who have no UPS login.</li>
+          <li>Handing a prepaid-labeled box to a driver already at your door is free. A <em>scheduled</em> on-call pickup is not, unless the label covers it.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Option C</span>
+      <h2>FedEx Pickup Request v1</h2>
+    </div>
+
+    <div class="carrier fedex">
+      <div class="carrier-head">
+        <h3>Blocked at the account field</h3>
+        <span class="sig">developer.fedex.com &middot; Pickup Request v1</span>
+      </div>
+
+      <dl class="facts">
+        <div class="fact"><dt>Endpoint</dt><dd class="mono">/pickup/v1/pickups</dd></div>
+        <div class="fact"><dt>Test URL</dt><dd class="mono">apis-sandbox.fedex.com</dd></div>
+        <div class="fact"><dt>Grants</dt><dd>client_credentials, csp_credentials, client_pc_credentials</dd></div>
+        <div class="fact"><dt>Token life</dt><dd>1 hour</dd></div>
+      </dl>
+
+      <hr class="rule">
+
+      <div class="callout">
+        <strong>The blocker, in FedEx's own words:</strong> Create Pickup requires the &ldquo;FedEx account number, which will be invoiced for the pickup.&rdquo; There is no tracking-number or prepaid-label payment path. Somebody's FedEx account is billed, every time.
+      </div>
+
+      <ul class="notes">
+        <li>Billing your own account for every consumer pickup is a real cost line (~$4/package Ground on-call, capped around $20/week per account and location) and an operational mess to reconcile.</li>
+        <li>The legitimate multi-tenant route is the <strong>Compatible Service Provider</strong> program: <code>csp_credentials</code> plus a child key and child secret minted per customer through the Credential Registration API. That is a contract and a certification, and it still assumes the customer has a FedEx account. Consumers don't.</li>
+        <li>The sandbox is virtualized &mdash; responses are predefined and do not vary with your input, so it validates wire format and nothing else. Production requires supplying an account number and passing validation, which for some APIs includes label review.</li>
+        <li><strong>The fallback that actually works:</strong> fedex.com offers guest pickup scheduling with no account, paid by card at the door-step of the flow. Boomerang already drives a headless browser for the retailer's return portal &mdash; extend that path rather than building against the API. Flag the fee to the user before you commit it.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Also considered</span>
+      <h2>Shipping aggregators don't rescue this</h2>
+      <p>The instinct is to let EasyPost or Shippo abstract the three carriers away. They can't, for a structural reason.</p>
+    </div>
+    <ul class="notes prose">
+      <li>Both bind a pickup to a shipment <em>you</em> created on <em>your</em> carrier account. A retailer-issued return label is neither.</li>
+      <li>EasyPost pickups attach to a shipment ID or batch ID, and explicitly cannot be scheduled against an arbitrary tracking number.</li>
+      <li>Shippo's pickup endpoint covers USPS and DHL Express only, and requires a <code>carrier_account</code> object ID.</li>
+      <li>Net effect: an aggregator adds a per-label cost and a dependency without removing the account requirement. Go direct.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Risks</span>
+      <h2>What could still go wrong</h2>
+    </div>
+    <div class="risks">
+      <div class="risk">
+        <span class="chip stop">Schedule</span>
+        <p><span class="risk-t">USPS access approval is not on your critical path &mdash; it is your critical path.</span>No amount of code moves it. The support form wants your CRID, consumer key, app name, and the URL you're calling. File it before you write the client, and ask for the quota increase in the same ticket.</p>
+      </div>
+      <div class="risk">
+        <span class="chip warn">Integration</span>
+        <p><span class="risk-t">USPS scope name is inconsistent in the spec.</span>Every operation declares <code>carrier-pickup</code>; the security scheme block declares <code>pickup</code>. Request the token without assuming, and log the granted scope on the first successful call.</p>
+      </div>
+      <div class="risk">
+        <span class="chip warn">Product</span>
+        <p><span class="risk-t">Not every address is eligible.</span>Eligibility varies by address, so a meaningful fraction of users will get a &ldquo;no.&rdquo; The agent needs a graceful second answer &mdash; nearest drop-off, or a paid UPS/FedEx pickup with the price stated &mdash; not an error.</p>
+      </div>
+      <div class="risk">
+        <span class="chip warn">Money</span>
+        <p><span class="risk-t">UPS method 04 can be refused.</span>If the retailer's label isn't a UPS Returns label or the 1Z was already spent on a pickup, you are one fallback away from silently charging someone $9&ndash;15. Make the failure explicit and never auto-escalate to a paid method.</p>
+      </div>
+      <div class="risk">
+        <span class="chip flat">Legal</span>
+        <p><span class="risk-t">On-behalf scheduling is unobjected-to, not blessed.</span>Nothing in the USPS API terms prohibits it, and USPS's own Package Pickup material frames the APIs as serving &ldquo;you and your customers.&rdquo; Still worth a written confirmation from USPS API support before you scale, and worth capturing explicit user consent per pickup either way.</p>
+      </div>
+      <div class="risk">
+        <span class="chip flat">Security</span>
+        <p><span class="risk-t">Don't take the card path.</span>UPS <code>PaymentMethod 03</code> wants a raw card number, expiry, CVV and billing address in your request body. Adopting it drags the whole backend into PCI scope for a $9 line item.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Next</span>
+      <h2>Build path</h2>
+      <p>Ordered because it genuinely is &mdash; step one gates everything after it, and it is the one thing that cannot be parallelized away.</p>
+    </div>
+    <ol class="steps">
+      <li>
+        <div>
+          <span class="st">File the USPS access request today</span>
+          <p>Create the USPS Business Account, create the app with Public Access I at <code>cop.usps.com</code>, then open a support ticket for Carrier Pickup API access plus a quota increase. Have the CRID ready &mdash; it's required on the form.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <span class="st">Build the client against the spec while you wait</span>
+          <p>The OpenAPI document is public and complete. Generate the models, write the eligibility &rarr; schedule &rarr; confirm flow, and stub the transport so it can be pointed at TEM the day access lands.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <span class="st">Smoke-test against TEM with production credentials</span>
+          <p><code>apis-tem.usps.com</code> mirrors production and takes the same client ID and secret &mdash; only the base URL changes. Verify the <code>ETag</code> round-trip for change and cancel, since that's the part most integrations get wrong.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <span class="st">Wire the agent tool with eligibility as a hard gate</span>
+          <p>Never call schedule without a successful eligibility check first. Persist <code>confirmationNumber</code> and the <code>ETag</code> together &mdash; without the ETag you cannot cancel, and the user will want to.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <span class="st">Rewrite the user-facing copy</span>
+          <p>Drop the two-hour window language. Set the calendar reminder for before the household's normal delivery time, and require the printed label &mdash; not just the QR code &mdash; to be on the box.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <span class="st">Fast-follow UPS behind a flag</span>
+          <p>Open a UPS account, register the app, and implement method 04 keyed off detecting a 1Z return tracking number in the retailer's label. Price it with the rate endpoint first so you always know what a fallback would cost before offering one.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Sources</span>
+      <h2>Where this came from</h2>
+      <p>The USPS and UPS conclusions are read directly from the carriers' published OpenAPI documents rather than from prose documentation. Pricing figures are secondary and move &mdash; re-check before quoting them to a user.</p>
+    </div>
+    <div class="sources">
+      <a href="https://developers.usps.com/sites/default/files/apidoc_specs/carrier-pickup_6.yaml"><span class="src-tag">PRIMARY</span> USPS Carrier Pickup OpenAPI spec, v3.1.8</a>
+      <a href="https://raw.githubusercontent.com/UPS-API/api-documentation/main/Pickup.yaml"><span class="src-tag">PRIMARY</span> UPS Pickup OpenAPI spec (UPS-API/api-documentation)</a>
+      <a href="https://raw.githubusercontent.com/UPS-API/api-documentation/main/OAuthAuthCode.yaml"><span class="src-tag">PRIMARY</span> UPS OAuth Authorization Code spec</a>
+      <a href="https://www.usps.com/business/web-tools-apis/onboarding-guide.pdf"><span class="src-tag">PRIMARY</span> USPS APIs Onboarding Guide v6.0 &mdash; access packages, TEM, support flow</a>
+      <a href="https://developers.usps.com/getting-started"><span class="src-tag">DOCS</span> USPS Developer Portal &mdash; Getting Started</a>
+      <a href="https://developers.usps.com/carrierpickupv3"><span class="src-tag">DOCS</span> USPS Carrier Pickup 3.0 reference</a>
+      <a href="https://developer.fedex.com/api/en-us/catalog/pickup/v1/docs.html"><span class="src-tag">DOCS</span> FedEx Pickup Request API v1</a>
+      <a href="https://developer.fedex.com/api/en-us/catalog/authorization/docs.html"><span class="src-tag">DOCS</span> FedEx API Authorization &mdash; grant types and CSP child keys</a>
+      <a href="https://developer.fedex.com/api/en-us/guides/sandboxvirtualization.html"><span class="src-tag">DOCS</span> FedEx sandbox virtualization guide</a>
+      <a href="https://developer.ups.com/get-started"><span class="src-tag">DOCS</span> UPS &mdash; Getting started with UPS APIs</a>
+      <a href="https://docs.easypost.com/docs/pickups"><span class="src-tag">DOCS</span> EasyPost Pickups API</a>
+      <a href="https://docs.goshippo.com/docs/manifests_and_pickups/pickups"><span class="src-tag">DOCS</span> Shippo Pickups API</a>
+      <a href="https://tools.usps.com/schedule-pickup-steps.htm"><span class="src-tag">POLICY</span> USPS Schedule a Pickup &mdash; eligibility and postage rules</a>
+      <a href="https://www.ups.com/us/en/business-solutions/pickup-dropoff-options/ups-on-call-pickup"><span class="src-tag">PRICING</span> UPS One-Time (On-Call) Pickup</a>
+      <a href="https://www.fedex.com/en-us/shipping/schedule-manage-pickups.html"><span class="src-tag">PRICING</span> FedEx schedule and manage pickups</a>
+      <a href="https://www.smarty.com/blog/usps-api-rate-limit"><span class="src-tag">SECONDARY</span> Observed USPS v3 rate limits after rollout</a>
+    </div>
+  </section>
+
+  <footer class="end">
+    <span>Boomerang &middot; reverse-logistics concierge</span>
+    <span>Decision brief &middot; 25 Aug 2026</span>
+  </footer>
+
+</div>
