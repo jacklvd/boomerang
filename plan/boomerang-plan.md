@@ -1612,7 +1612,7 @@ reaches storage as an entity.
 3. Unit tests: a well-formed response validates; an extra field is dropped; a missing required field
    rejects; a wrong-typed date rejects; a response containing an `etag` field is dropped without it
    ever entering an entity (rule 3, enforced at the boundary too).
-4. Reference: Low-Level Design §3.4, §5.1; requirements NFR-6.3, NFR-6.5.
+4. Reference: Low-Level Design §3.4, §5.2; requirements NFR-6.3, NFR-6.5.
 
 **Verification:**
 - `cd extension && bun run test tests/validation/order.test.ts`
@@ -1972,7 +1972,7 @@ on the first unscripted call by design. Decision D21.
 the four repository tasks that follow do not serialise behind it.
 
 **Instructions:**
-1. Create `extension/src/storage/keys.ts` with the key scheme from §5.1 — one key per entity
+1. Create `extension/src/storage/keys.ts` with the key scheme from §5.2 — one key per entity
    collection plus the singleton keys, all namespaced and versioned.
 2. Create `extension/src/storage/read.ts` with `read_defensively(key, validate)`: a value that fails
    validation is treated as absent and the corruption is recorded; a read never throws into a caller.
@@ -1999,7 +1999,7 @@ the four repository tasks that follow do not serialise behind it.
    discards orders and returns but **keeps unsettled pickups and their booked addresses**; rebuild on
    a current version is a no-op; **importing `src/storage/index.ts` type-checks** with the
    placeholders in place.
-6. Reference: Low-Level Design §5.1, §3.4; requirements FR-3.1.5, FR-3.4.5a, NFR-6.5; decision D19.
+6. Reference: Low-Level Design §5.2, §3.4; requirements FR-3.1.5, FR-3.4.5a, NFR-6.5; decision D19.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/rebuild.test.ts`
@@ -2026,6 +2026,10 @@ as **one** `chrome.storage.local.set`.
    "one composed write, one atomicity boundary" — not rollback. Naming it a transaction in a future
    refactor would invite exactly the assumption it cannot honour.
 3. A rejected `set` (quota) surfaces to the caller with the store unchanged; the queue continues.
+   **This is this task's baseline** — no evictor exists yet for `transact` to call. Task 4.12
+   upgrades this exact path once `evict_to_fit` exists: it wraps this rejection handling to retry
+   once through eviction before surfacing to the caller (Low-Level Design §5.2). The test in step 6
+   below (a rejection with nothing evictable in the fixture) stays true either side of that upgrade.
 4. `transact` must not be re-entrant — a mutation that calls `transact` deadlocks. Detect and throw
    with a clear message rather than hanging.
 5. **Declare `ReadOnlyStore` here, and have `StorageCoordinator` implement it.** It is a **flat
@@ -2047,30 +2051,27 @@ as **one** `chrome.storage.local.set`.
    exposes exactly the seven members of step 5 and no member that writes** — a type-level test that
    spells the seven names out and asserts the surface contains nothing else, so it fails both when a
    mutator is added to the view and when a read is silently dropped from it.
-7. **Give the single-`set` law one enforcement point rather than five scattered assertions (added
-   2026-08-28, seventh review, DAL-1).** Low-Level Design §3.4 states it as a SHALL — *every
-   invariant that spans more than one record is written in a single `set`* — and a SHALL with no
-   test is a comment. Add `tests/storage/single-set-law.test.ts` as the law's home, holding one row
-   per multi-record write in the design, each row driving the real call against the Task 2.6 fake
-   and asserting `set` was called **exactly once**:
-   - `PickupRepository.save_intent` — the pickup and its `ConsentStamp`;
-   - `PickupRepository.promote` — the intent and the confirmed booking;
-   - `ReturnDriver`'s `transition` — the return request and the driver session;
-   - the §4.5 already-collected branch — the pickup's `Collected` and the request's `LabelPrinted`;
-   - `clear_all` — three collections and the address.
-   Keep the rows in this one file even though four of the five behaviours are also tested in their
-   own task's suite: the point of the law is that the *next* multi-record write is correct by
-   default, and a single file named after the law is the thing a reviewer greps for and an author
-   adds a row to. Add a `// dev-note:` stating the law's mechanical test — if a worker dying between
-   the two writes leaves a store state some section of the design calls unreachable, the writes are
-   one invariant and belong here. Low-Level Design §3.4, §8.2.
-8. Reference: Low-Level Design §3.4, §4.3, §5.1, §7.2, §8.2.
+7. **The single-`set` law gets one enforcement point rather than five scattered assertions (DAL-1).**
+   Low-Level Design §3.4 states it as a SHALL — *every invariant that spans more than one record is
+   written in a single `set`* — and a SHALL with no test is a comment. That enforcement point is
+   `tests/storage/single-set-law.test.ts`, but it is **not created in this task** (corrected
+   2026-08-29, eighth review). The previous version of this step tried to create the file here with
+   all five rows passing, but none of the five can drive a real call against this task's own
+   Task-4.6-only prerequisite: `PickupRepository` and `ReturnRepository` are Tasks 4.9–4.10,
+   `clear_all` is Task 4.12, and `ReturnDriver.transition` does not exist until Task 6.6 — two
+   batches later (finding Must-1, seventh-round storage audit). Task 4.10 creates the file instead,
+   with the two rows it can actually pass (`save_intent`, `promote`) — `PickupRepository` needs only
+   this task's `transact`, so it is the earliest point in the batch a row can pass. Tasks 4.12, 6.6
+   and 7.10 each append their own row when their real call first exists, and Task 10.2 checks the
+   finished file holds all six (a sixth row, eviction's order+return delete, was added this round —
+   Should-3, seventh-round storage audit). Add nothing to the file here; see Task 4.10 step 6.
+8. Reference: Low-Level Design §3.4, §4.3, §5.2, §7.2, §8.2.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/coordinator.test.ts`
-- `cd extension && bun run test tests/storage/single-set-law.test.ts` — five rows, each asserting a
-  single `set` call.
-- Split any one of the five into two `set` calls — that row fails; revert.
+- The single-`set` law's enforcement file, `tests/storage/single-set-law.test.ts`, is not created or
+  verified here — see Task 4.10 (creation), Tasks 4.12, 6.6, 7.10 (the remaining rows), and Task 10.2
+  (the completeness check).
 
 **Requirements covered:** FR-3.1.5
 
@@ -2094,7 +2095,7 @@ as **one** `chrome.storage.local.set`.
 3. Unit tests: insert then re-upsert preserves `first_seen_at`; `find_item` locates an item across
    orders; `delete` removes the order and its items; `list` on an empty store returns empty, not
    undefined.
-4. Reference: Low-Level Design §3.4, §5.1; requirements FR-3.1.5.
+4. Reference: Low-Level Design §3.4, §5.2; requirements FR-3.1.5.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/orders.test.ts`
@@ -2122,7 +2123,7 @@ is there already a live return for this item?
    after an abort" succeed, and getting the terminal set wrong breaks exactly one of the two.
 3. Unit tests: a `Driving` return is active; each of the four terminals is not active; `update`
    through a terminal makes it inactive; two items do not see each other's returns.
-4. Reference: Low-Level Design §3.4, §5.1; requirements FR-3.3.9, FR-3.3.10.
+4. Reference: Low-Level Design §3.4, §5.2; requirements FR-3.3.9, FR-3.3.10.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/returns.test.ts`
@@ -2165,10 +2166,34 @@ time rather than storing them.
    `promote` attaches the confirmation and day; a record whose day is in the past reads as
    `Abandoned` without any write; `mark_collected` settles it; `list_unsettled` excludes settled and
    abandoned records.
-6. Reference: Low-Level Design §3.4, §5.1; requirements FR-3.4.3, FR-3.4.4, FR-3.4.5, FR-3.4.5a.
+6. **Create `tests/storage/single-set-law.test.ts` here — the single-`set` law's one home (Low-Level
+   Design §3.4, DAL-1)** (corrected 2026-08-29, eighth review). Task 4.7 originally tried to create
+   this file complete, with all five of the law's rows passing at that point — it cannot, because
+   `PickupRepository`, `ReturnRepository`, `ReturnDriver` and `clear_all` are all downstream of Task
+   4.7's own Task-4.6-only prerequisite (finding Must-1, seventh-round storage audit). This task is
+   the earliest point in the batch where a row can actually drive a real call and pass:
+   `PickupRepository` needs only `StorageCoordinator.transact` (Task 4.7), not the other three
+   repositories, so it owes nothing to the parallel {4.8 ∥ 4.9 ∥ 4.11} it runs beside.
+   - Write the file's header and a `// dev-note:` restating the law's mechanical test from Low-Level
+     Design §3.4: if a worker dying between two writes leaves a store state some section of the
+     design calls unreachable, the writes are one invariant and belong in this file as one row.
+   - Add this task's own two rows as top-level `test()` blocks against the Task 2.6 fake, each
+     driving the real call and asserting `set` was called **exactly once**:
+     - `test("PickupRepository.save_intent — pickup and consent stamp in one set", ...)`
+     - `test("PickupRepository.promote — intent and confirmation in one set", ...)`
+   - **Four more rows land later, one per owning task, each appending to this same file rather than
+     creating its own**, so the law keeps its one home instead of reopening the scattering DAL-1
+     exists to prevent: Task 4.12 appends `clear_all` and eviction's order+return delete (added this
+     round, Should-3, seventh-round storage audit); Task 6.6 appends `ReturnDriver.transition`; Task
+     7.10 appends the §4.5 already-collected branch. Task 10.2 sweeps the finished file for all six
+     names, so a task that forgets its append step is caught rather than silently shipped.
+7. Reference: Low-Level Design §3.4, §5.2; requirements FR-3.4.3, FR-3.4.4, FR-3.4.5, FR-3.4.5a.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/pickups.test.ts`
+- `cd extension && bun run test tests/storage/single-set-law.test.ts` — two of the law's eventual six
+  rows are present at this point (`save_intent`, `promote`); each asserts a single `set` call. The
+  remaining four land in Tasks 4.12, 6.6 and 7.10.
 
 **Requirements covered:** FR-3.4.5, FR-3.4.5a, FR-3.4.6
 
@@ -2192,7 +2217,7 @@ rehydrates from.
    by the carrier derivation.
 4. Unit tests: address round-trips; a corrupt address reads as absent; the session round-trips with
    `chosen_option` set and with it null; `clear` on an absent session is a no-op.
-5. Reference: Low-Level Design §3.5, §4.4, §5.1; requirements FR-3.3.5, FR-3.4.2.
+5. Reference: Low-Level Design §3.5, §4.4, §5.2; requirements FR-3.3.5, FR-3.4.2.
 
 **Verification:**
 - `cd extension && bun run test tests/storage/session.test.ts tests/storage/address.test.ts`
@@ -2237,14 +2262,40 @@ implement the clear-all that must not orphan a real-world commitment.
 5. `clear_all()` removes everything, but must first surface any unsettled pickup so the caller can
    warn the user that a booked USPS pickup will still happen (the popup does the warning in Task
    8.5).
-6. Unit tests: eviction leaves the store under cap-minus-margin; an item with an active return is
+6. **Wire `evict_to_fit` to its one sanctioned call site (corrected 2026-08-29, eighth review).**
+   Low-Level Design §5.2 states `evict_to_fit` is "callable only from the coordinator's
+   quota-rejection path... never from the worker" — it exists to rescue a `transact` whose `set`
+   `chrome.storage.local` just refused for being over quota, not to run ahead of every write. Inside
+   `transact`, on a quota-rejection error from the underlying `set`, call `evict_to_fit` with the
+   byte size of the write that was refused, then retry the `set` **exactly once**; if the retried
+   `set` still fails, the rejection surfaces to the caller unchanged, per Task 4.7 step 3's baseline.
+   This is the only call site `evict_to_fit` gets anywhere in the plan — routine ingestion uses
+   `evict_if_over_cap` instead (Task 8.2), never this method.
+7. **Append two rows to `tests/storage/single-set-law.test.ts` — do not create a new file (Low-Level
+   Design §3.4, DAL-1).** Task 4.10 created the file with its own two rows; this task adds:
+   - `test("clear_all — three collections and the address in one set", ...)`
+   - `test("evict_if_over_cap / evict_to_fit — evicting an order deletes its RETURN_REQUEST in the
+     same set", ...)` (Should-3, seventh-round storage audit): §3.4's own "unreachable state" test
+     applies to eviction as much as to ingestion — a worker dying between "delete the order" and
+     "delete its `RETURN_REQUEST`" leaves an orphaned return request pointing at nothing, which is
+     exactly the class of state the law exists to make impossible. Evicting an item that owns a
+     `RETURN_REQUEST` must delete both in the one `set` call eviction already makes; the protected-set
+     rule in step 3 above means this only fires for an item whose return is not active, so it never
+     conflicts with "an item with an active return is never evicted."
+   Four of the law's six rows exist after this task; Tasks 6.6 and 7.10 append the remaining two.
+8. Unit tests: eviction leaves the store under cap-minus-margin; an item with an active return is
    never evicted; an unsettled pickup and its booked address are never evicted; eviction is measured
    with `getBytesInUse` not estimated; eviction inside a `transact` does not deadlock; `clear_all`
-   reports the unsettled pickups it is about to drop.
-7. Reference: Low-Level Design §4.3, §5.2; requirements FR-3.1.5, NFR-6.1, NFR-6.5.
+   reports the unsettled pickups it is about to drop; a quota-rejected `set` retries exactly once
+   through `evict_to_fit` and then either succeeds or surfaces the original rejection — it never
+   loops.
+9. Reference: Low-Level Design §4.3, §5.2; requirements FR-3.1.5, NFR-6.1, NFR-6.5.
 
 **Verification:**
 - `cd extension && bun run test tests/storage`
+- `cd extension && bun run test tests/storage/single-set-law.test.ts` — four of the law's eventual
+  six rows are present at this point (`save_intent`, `promote`, `clear_all`, eviction's order+return
+  delete). The remaining two land in Tasks 6.6 and 7.10.
 
 **Requirements covered:** FR-3.1.5, NFR-6.1, NFR-6.5
 
@@ -2313,6 +2364,9 @@ After all tracks complete:
       a scriptable carrier double for integration tests.
 - [ ] The extension has its whole persistence layer, including eviction that protects live returns and
       unsettled pickups, and a server client that refuses to retry a booking.
+- [ ] `tests/storage/single-set-law.test.ts` holds its first four rows (`PickupRepository.save_intent`,
+      `.promote`, `clear_all`, eviction's order+return delete) — created in Task 4.10, completed by
+      Task 4.12. The remaining two land in Batches 6 and 7.
 
 ---
 
@@ -2718,7 +2772,7 @@ into the one documented body shape.
 
 #### Task 6.6: `ReturnDriver` — construction, `transition`, and `start`
 
-**Prerequisites:** Task 4.9, Task 4.11, Task 5.4, Task 5.5
+**Prerequisites:** Task 4.9, Task 4.10, Task 4.11, Task 5.4, Task 5.5
 **Conflicts with:** Tasks 6.7, 6.8 (all in `src/driver/driver.ts`)
 **Parallel with:** Tasks 6.1–6.5 (server)
 **Package:** `extension/src/driver`
@@ -2740,10 +2794,17 @@ refuses to open a second live return for the same item.
 5. Unit tests: `transition` issues exactly one `set` for session plus return; a failure in the write
    leaves the prior state intact and does not act; `start` on an item with a `Driving` return refuses;
    `start` after an `Aborted` return succeeds; the attempt limit produces `Stalled`.
-6. Reference: Low-Level Design §3.4, §4.3, §4.4; requirements FR-3.3.9, FR-3.3.10.
+6. **Append the fifth row to `tests/storage/single-set-law.test.ts` — do not create a new file
+   (Low-Level Design §3.4, DAL-1).** `test("ReturnDriver.transition — session and return request in
+   one set", ...)`, driving step 2's real `transition` call against the Task 2.6 fake and asserting
+   `set` was called exactly once. Five of the law's six rows exist after this task; Task 7.10 appends
+   the last.
+7. Reference: Low-Level Design §3.4, §4.3, §4.4; requirements FR-3.3.9, FR-3.3.10.
 
 **Verification:**
 - `cd extension && bun run test tests/driver/driver.test.ts`
+- `cd extension && bun run test tests/storage/single-set-law.test.ts` — five of the law's eventual
+  six rows are present at this point. The last lands in Task 7.10.
 
 **Requirements covered:** FR-3.3.1, FR-3.3.9, FR-3.3.10
 
@@ -2829,6 +2890,8 @@ After all tracks complete:
 - [ ] All seven endpoints are served, version-gated, and render one error shape.
 - [ ] The driver drives a return with selectors, falls back to the model only when it must, and
       survives a worker death by rehydrating from storage.
+- [ ] `tests/storage/single-set-law.test.ts` holds its fifth row (`ReturnDriver.transition`, Task
+      6.6). The last lands in Batch 7.
 
 ---
 
@@ -3306,10 +3369,21 @@ collected and refused outcomes as distinct results.
    collected pickup whose return still shows a live label);
    a refusal leaves the record unsettled; the extension sends no ETag on any path; a cancel is not
    retried automatically.
-5. Reference: Low-Level Design §4.5; requirements FR-3.4.6, FR-3.4.7; repo `AGENTS.md` rule 3.
+5. **Append the sixth and final row to `tests/storage/single-set-law.test.ts` — do not create a new
+   file (Low-Level Design §3.4, DAL-1).** `test("cancel_pickup already-collected — mark_collected and
+   LabelPrinted in one set", ...)`, driving step 2's already-collected branch against the Task 2.6
+   fake and asserting `set` was called exactly once — this is the same fact step 4's own unit test
+   already checks in this task's suite; this row is what makes it part of the law's one enforcement
+   point rather than a fact only `cancel.test.ts` knows about. All six of the law's rows exist after
+   this task: `PickupRepository.save_intent` and `.promote` (Task 4.10), `clear_all` and eviction's
+   order+return delete (Task 4.12), `ReturnDriver.transition` (Task 6.6), and this one.
+6. Reference: Low-Level Design §4.5; requirements FR-3.4.6, FR-3.4.7; repo `AGENTS.md` rule 3.
 
 **Verification:**
 - `cd extension && bun run test tests/driver/cancel.test.ts`
+- `cd extension && bun run test tests/storage/single-set-law.test.ts` — all six rows are present and
+  each asserts exactly one `set` call. Split any one of the six into two `set` calls — that row
+  fails; revert.
 
 **Requirements covered:** FR-3.4.6, FR-3.4.7
 
@@ -3323,6 +3397,8 @@ After all tracks complete:
 - [ ] **The server is functionally complete** — every §8.3 server row is green.
 - [ ] The extension's return flow is complete from scan to printed label to booked pickup to
       cancellation, all unit-tested against the fake browser.
+- [ ] `tests/storage/single-set-law.test.ts` is complete: all six rows present (Tasks 4.10, 4.12,
+      6.6, 7.10), each asserting its write is exactly one `set` call.
 
 ---
 
@@ -3379,18 +3455,36 @@ listeners, and implement the ingestion flow of §4.1.
    constantly; nothing in the graph may do I/O at construction time. `// dev-note:` it.
 3. Register `on_internal` / `on_external` handlers from `src/messaging/`, `chrome.tabs.onRemoved` (so
    a closed tab reaches the driver), and the permission listeners from Task 3.17.
-4. Implement §4.1 ingestion: receive the extracted payload → `POST /orders/ingest` → validate →
-   `evict_to_fit` then `OrderRepository.upsert` inside one `transact` → notify the popup.
+4. **Implement §4.1 ingestion: receive the extracted payload → `POST /orders/ingest` → validate →
+   `OrderRepository.upsert` then `evict_if_over_cap()`, both inside one `transact` → notify the
+   popup** (corrected 2026-08-29, eighth review). This task previously called `evict_to_fit`
+   unconditionally before every `upsert` — backwards on two counts (finding Must-2, seventh-round
+   storage audit). First, Low-Level Design §5.2 restricts `evict_to_fit` to "the coordinator's
+   quota-rejection path... never from the worker" — it is wired into `transact`'s own retry-once
+   handling in Task 4.12 step 6, not called directly here. Second, §4.1 describes routine ingestion
+   as "persist, then evict if over cap" — count-based, via `evict_if_over_cap()`, which runs
+   **after** every `upsert` regardless of size. `evict_to_fit` only ever runs if that `upsert`'s `set`
+   is itself quota-rejected, in which case Task 4.12's retry-once handling inside `transact` takes
+   over transparently; this task does not call it and does not know it happened.
 5. On worker start, call `ReturnDriver.resume()` — if a session was persisted, the new worker picks
    the flow back up.
 6. **No `chrome.permissions.request` here** (Task 3.17's guard throws) — the worker has no gesture.
-7. Unit tests: construction performs no storage or network call; an ingest message stores validated
-   orders; an oversize ingest evicts before storing and stays under cap; worker start with a live
-   session calls `resume`; worker start with no session does not; a closed tab reaches the driver.
-8. Reference: Low-Level Design §7.2, §4.1, §4.4; requirements FR-3.1.4, FR-3.1.5, NFR-6.3.
+7. **Unit tests: construction performs no storage or network call; an ingest message stores validated
+   orders, then evicts if the store is now over `MAX_STORED_ORDERS`, and the evicted order is gone
+   afterward; ingesting past the cap repeatedly never leaves the store above it — assert the count
+   end-to-end after a run of ingests that individually and cumulatively exceed the cap; a quota-
+   rejected `upsert` still lands via Task 4.12's retry-once `evict_to_fit` path, exercised here only
+   as an integration point, not reimplemented; worker start with a live session calls `resume`; worker
+   start with no session does not; a closed tab reaches the driver.** This is the plan's only
+   end-to-end assertion that `MAX_STORED_ORDERS` is actually enforced at runtime — before this
+   correction, `evict_if_over_cap` had no call site anywhere in the plan.
+8. Reference: Low-Level Design §7.2, §4.1, §4.4, §5.2; requirements FR-3.1.4, FR-3.1.5, NFR-6.3.
 
 **Verification:**
 - `cd extension && bun run test tests/entrypoints/background.test.ts`
+- The same suite asserts the order cap end-to-end: ingesting more orders than `MAX_STORED_ORDERS`
+  leaves the stored count at or under the cap, via `evict_if_over_cap` (Task 8.2, this step) —
+  closing the gap where the evictor existed (Task 4.12) but nothing called it.
 
 **Requirements covered:** FR-3.1.4, FR-3.1.5, NFR-6.3
 
@@ -3597,6 +3691,8 @@ After all tracks complete:
 - [ ] A mock-backed booking renders as simulated, in the browser, observed by a person.
 - [ ] Nothing injects on page load; the first scan is a gesture and the standing permission is offered
       after it.
+- [ ] The order cap is enforced end-to-end: ingesting past `MAX_STORED_ORDERS` evicts down to the cap
+      via `evict_if_over_cap()` (Task 8.2), the only call site routine ingestion has for it.
 
 ---
 
@@ -3791,7 +3887,7 @@ opposite of what is true.
    stops the flow rather than retrying; **a message arriving from outside the extension is rejected
    without dispatch**; clear-all with a live pickup warns and, on confirmation, clears while telling
    the user the pickup still stands.
-2. Reference: Low-Level Design §8.3, §5.1, §7.2; requirements FR-3.5.1, FR-3.5.2, FR-3.5.4, FR-3.5.5,
+2. Reference: Low-Level Design §8.3, §5.2, §7.2; requirements FR-3.5.1, FR-3.5.2, FR-3.5.4, FR-3.5.5,
    FR-3.6.1; decision D6.
 
 **Verification:**
@@ -3892,7 +3988,22 @@ the requirements actually define.
    the same check as step 1: FR-3.4.5b was cited twice in §8.2 and had no §8.4 row, so both of step
    1's directions passed on a document whose traceability table reported a requirement as uncovered.
    §8.4 is the artefact anyone asking "is this requirement covered?" actually reads.
-4. **Sweep for stale mentions after an amendment, as a named-name search rather than an id search
+4. **Sweep `tests/storage/single-set-law.test.ts` for completeness (added 2026-08-29, eighth
+   review).** The single-`set` law (Low-Level Design §3.4, DAL-1) has exactly one enforcement point
+   by design (finding Must-1, seventh-round storage audit), which means nothing else re-checks that
+   every owning task actually appended its row — a task that forgets its append step ships silently
+   otherwise. Add a check that the file contains all six canonical `test()` names, one per
+   multi-record write the design declares:
+   - `PickupRepository.save_intent` (Task 4.10)
+   - `PickupRepository.promote` (Task 4.10)
+   - `clear_all` (Task 4.12)
+   - eviction's order+return delete (Task 4.12, Should-3)
+   - `ReturnDriver.transition` (Task 6.6)
+   - the §4.5 already-collected branch (Task 7.10)
+   Fail with the missing names listed if any is absent. This is a fixed list, not a swept id space —
+   the law's rows are enumerated in the design, not discovered — so it lives as its own check
+   alongside the four above rather than folded into the `--renamed` machinery.
+5. **Sweep for stale mentions after an amendment, as a named-name search rather than an id search
    (added 2026-08-28, seventh review).** When any document amends a name — a field, a state, a type,
    a constant, a section number, an endpoint, a task id, a decision id — the same name almost always
    appears in the other two documents, and the failure mode is not a fabricated citation but two true
@@ -3904,29 +4015,31 @@ the requirements actually define.
    question — the two places an old name legitimately remains, and where it must say why. Low-level
    design §9's fourth sweep direction states the standing rule this implements; run it as the last
    step of any amendment, not as a review round.
-5. Report the lists separately — an uncited requirement, an invented citation, an invented constant,
-   an unused parameter, an untraced requirement and a surviving old name are six different problems
-   with six different fixes.
-6. **Two known, deliberate exemptions**, both in an explicit allowlist with the reason inline:
+6. Report the lists separately — an uncited requirement, an invented citation, an invented constant,
+   an unused parameter, an untraced requirement, an incomplete single-set-law file and a surviving old
+   name are seven different problems with seven different fixes.
+7. **Two known, deliberate exemptions**, both in an explicit allowlist with the reason inline:
    - **FR-3.6.2** — the phase-2 dashboard is out of this plan's scope per low-level design §1.
    - **FR-3.6.3** — dashboard-to-extension messaging is cut from PoC scope (decision D6): the
      dashboard origin it requires does not exist and high-level design §11 Q1 leaves the hostname
      undecided.
    Both are unplanned rather than satisfied, and the allowlist is what keeps them visible instead of
    quietly absent.
-7. Wire the script into the `.github/workflows/ci.yml` repo job that Task 1.3 created with a
+8. Wire the script into the `.github/workflows/ci.yml` repo job that Task 1.3 created with a
    conditional skip; that skip can now be removed. The `--renamed` mode is author-invoked and does
-   not run in CI — CI has no way to know what was renamed — so wire only steps 1 through 3.
-8. Reference: Low-Level Design §8.4, §9 Q4; requirements §5.1, §5.2; decisions D6, D17, D18.
+   not run in CI — CI has no way to know what was renamed — so wire steps 1 through 4.
+9. Reference: Low-Level Design §3.4, §8.4, §9 Q4; requirements §5.1, §5.2; decisions D6, D17, D18.
 
 **Verification:**
 - `bash scripts/citation-sweep.sh` — exits zero with FR-3.6.2 and FR-3.6.3 listed as exemptions and
   nothing else uncited.
 - Introduce a constant named after nothing in §5.1 — the sweep fails; revert.
 - Delete one §8.4 row — the sweep reports that requirement as untraced; restore it.
+- Delete one `test()` block from `tests/storage/single-set-law.test.ts` — the sweep reports that row
+  missing by name; restore it.
 - `bash scripts/citation-sweep.sh --renamed adapter_step_key=step_key` — exits zero, since that
   rename was completed on 2026-08-28 and only the amendment logs still name the old field.
-- CI runs steps 1 through 3 unconditionally.
+- CI runs steps 1 through 4 unconditionally.
 
 **Requirements covered:** — (this task verifies every other task's citations; FR-3.6.2 and FR-3.6.3 are the two allowlisted exemptions)
 
@@ -4048,7 +4161,7 @@ named file.
 | 6.3 | `app/routes/returns.py` — `POST /returns/next-step` | 5.2, 3.8, 6.2 | 6.1, 6.2, 6.4 (`app/routes/__init__.py`) | [ ] |
 | 6.4 | `app/routes/pickups.py` — the four pickup endpoints | 5.3, 3.8, 6.3 | 6.1–6.3 (`app/routes/__init__.py`) | [ ] |
 | 6.5 | `app/main.py` — lifespan, handlers, CORS, adapter selection, Mangum | 6.1, 6.2, 6.3, 6.4, 3.6, 4.4, 4.14, 4.2, 2.2 | None | [ ] |
-| 6.6 | `ReturnDriver` — construction, `transition`, and `start` | 4.9, 4.11, 5.4, 5.5 | 6.7, 6.8 (all in `src/driver/driver.ts`) | [ ] |
+| 6.6 | `ReturnDriver` — construction, `transition`, and `start` | 4.9, 4.10, 4.11, 5.4, 5.5 | 6.7, 6.8 (all in `src/driver/driver.ts`) | [ ] |
 | 6.7 | State machine edges and rehydration | 6.6 | 6.6, 6.8 (`src/driver/driver.ts`) | [ ] |
 | 6.8 | Selector-first step loop and the model fallback | 6.7, 3.10, 4.13, 5.5 | 6.6, 6.7 (`src/driver/driver.ts`) | [ ] |
 | I.1 | Replace the Terraform with the Lambda topology | 6.5, 1.4 | None | [ ] |
