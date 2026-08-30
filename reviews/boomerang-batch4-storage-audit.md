@@ -3,7 +3,9 @@
 Scope: `design/boomerang-low-level-design.md` §3.4 and §5.2, and `plan/boomerang-plan.md` Batch 4
 Task 4.6–4.14, cross-checked against `design/boomerang-requirements.md` and
 `design/boomerang-high-level-design.md` where they touch these. Audit only — nothing else in the
-repository was modified. This document is the only file written.
+repository was modified while writing it; this document was the only file the auditor wrote. The
+`plan/boomerang-plan.md` changes present in this same commit were made afterward, separately, by a
+different agent fixing these findings — not by this audit.
 
 ## Headline
 
