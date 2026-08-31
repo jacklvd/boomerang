@@ -233,6 +233,7 @@ flowchart TD
     DRIVER -- "egress scan on the fallback payload" --> EXTRACT
     MSG --> STORE
     API --> VALID
+    VALID -- "RetailerAdapter type only, as validate's adapter argument" --> ADAPT
     STORE --> TYPES["src types"]
     RANK --> TYPES
 ```
@@ -252,6 +253,17 @@ that is only prose is a rule the linter cannot see. The two edges *between* entr
 `CS -- "scan result" --> BG` and `BG -- "injects for a one shot scan" --> CS`, are neither: they are
 **runtime deliveries over `chrome.runtime` messaging**, and no import crosses them in either
 direction. That distinction is why §4.7's popup-to-worker hop is not a missing edge — see §4.7.
+
+**`src/validation/` names the `RetailerAdapter` type, and the edge carrying that was missing (added
+2026-08-31, from a plan-versus-design audit).** §3.3 gives the validator
+`validate(proposed, adapter, step)` — the adapter is what lets it bound a `fill` by the retailer's
+declared `fillable_fields` rather than by arbitrary selector — and §3.5 places `RetailerAdapter` and
+its `ReturnMethodOptions` in `src/adapters/`, so `src/validation/` depends on a type another `src/`
+module owns, and by the rule above every such edge is a static import. The dependency is
+**type-only, not a value import**: the driver is the module holding `AdapterRegistry` and it passes
+the adapter it already resolved (§3.3, §4.2), so `src/validation/` constructs no adapter and queries
+no registry — which is why the edge was missed by a reading that followed values. `src/adapters/` is
+the source of no edge in the block, so the addition introduces no cycle.
 
 **The worker is the only egress point, and the popup makes no network call at all (stated
 2026-08-28, from the sixth review).** There is no `POPUP --> API` edge and no `MSG --> API` edge, so

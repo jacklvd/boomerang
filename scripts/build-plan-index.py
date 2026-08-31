@@ -12,6 +12,20 @@ idempotent and re-runnable). Three things are DERIVED from task frontmatter:
   * the Requirements Traceability matrix
   * the per-track task lists under each Track heading
   * a small derived-facts table in the Parallelization Summary
+  * the Critical Path's ``### The dependency floor`` chain and its length
+
+The Critical Path's ``### The makespan the barrier actually buys`` table is
+NOT derived and is carried through verbatim: its rows order tasks that only
+CONFLICT with one another, and choosing that order is authored judgment. It is
+CROSS-CHECKED instead -- see ``plan_lib.check_makespan_table``. The authored
+server-chain sentence under ``### Three things about the shape of this chain``
+is carried through and cross-checked the same way -- see
+``plan_lib.check_server_chain_sentence``.
+
+The derived numbers are also RESTATED in authored argument outside that section
+-- the document header and the "Theoretical speedup" paragraph. Those sentences
+stay authored and are cross-checked against what the corpus derives; see
+``plan_lib.check_restated_quantities``.
 
 Every derived table is cross-checked against the hand-written table in the
 baseline commit; disagreements are reported, never silently resolved.
@@ -33,18 +47,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from plan_lib import (  # noqa: E402
+    ARROW,
     BASELINE_REF,
+    CRITICAL_PATH_HEADING,
     DECLARED_GAPS,
     DECLARED_TRACK_COUNT_DIVERGENCES,
+    FLOOR_HEADING,
     PLAN_PATH,
     TASKS_DIR,
     TASK_HEADING_RE,
     batch_label,
     batch_order,
+    check_batch_overview,
+    check_conflict_annotations,
+    check_makespan_table,
+    check_restated_quantities,
+    check_server_chain_sentence,
     classify_track_count_divergences,
     find_block,
     heading_blocks,
+    id_key,
     load_tasks_from_files,
+    longest_chain,
     parse_id_list,
     parse_table,
     read_source,
@@ -67,14 +91,6 @@ EN = "–"  # en dash, as used by the original tables
 # --------------------------------------------------------------------------
 # Formatting helpers
 # --------------------------------------------------------------------------
-
-def id_key(task_id: str) -> tuple:
-    if task_id.startswith("I."):
-        return (98, int(task_id.split(".")[1]), "")
-    major, minor = task_id.split(".")
-    m = re.match(r"^([0-9]+)([a-z]*)$", minor)
-    return (int(major), int(m.group(1)), m.group(2))
-
 
 def compress_ids(ids: list[str]) -> str:
     """['3.1'..'3.10','3.12'..'3.17'] -> '3.1-3.10, 3.12-3.17' (en dashes)."""
@@ -274,6 +290,93 @@ def build_derived_facts_table(records) -> list[str]:
         pair_cell = ", ".join(f"{a} ↔ {b}" for a, b in sorted(pairs, key=lambda p: (id_key(p[0]), id_key(p[1])))) or "None"
         out.append(f"| {label} | {len(rows)} | {len(tracks)} ({letters}) | {pair_cell} |")
     return out
+
+
+# --------------------------------------------------------------------------
+# The Critical Path's dependency floor
+# --------------------------------------------------------------------------
+
+def build_dependency_floor(records, heading: str) -> list[str]:
+    """``### The dependency floor``: the longest prerequisite chain, rendered.
+
+    Every part of the block is derived. The short label is the task's ``title``
+    and the annotation is its ``package``, both verbatim from frontmatter --
+    the hand-written block carried ABBREVIATIONS of both (``8.6 ... [browser]``
+    for a task whose package is ``docs/``; ``[repo]`` for ``repository root``;
+    ``src/types and the WXT scaffold`` for a task titled ``WXT project scaffold
+    and MV3 manifest``). Those abbreviations are not reconstructible from the
+    corpus, so they are not reproduced: a derived block that quietly kept
+    hand-written text would be the duplication this exercise removes.
+
+    Columns are padded to the widest entry, so the block is a pure function of
+    the chain -- no width is baked in, and adding a longer title just widens
+    the column.
+    """
+    by = {r["fm"]["id"]: r["fm"] for r in records}
+    result = longest_chain(records)
+    width_id = max(len(t) for t in result.chain)
+    width_title = max(len(by[t]["title"]) for t in result.chain)
+
+    out = [heading, "", "```"]
+    for n, tid in enumerate(result.chain):
+        # The first row has no arrow; the rest are indented to the same id
+        # column so the chain reads as one ladder.
+        lead = " " * (len(ARROW) + 2) if n == 0 else f" {ARROW} "
+        title = by[tid]["title"].ljust(width_title)
+        package = by[tid]["package"] or "—"
+        out.append(f"{lead}{tid:>{width_id}}  {title}  [{package}]")
+    out.append("```")
+    out.append("")
+    out.append(f"**Critical path length:** {result.length} tasks.")
+    out.append("")
+
+    # THE MAXIMAL CHAIN IS NOT UNIQUE, and a block that shows one chain without
+    # saying so reads as if it were. The count and the tie-break are stated in
+    # the document for the same reason they are stated in the code: a reader
+    # comparing this chain against their own walk needs to know which of the
+    # equally-long ones they are looking at.
+    if result.count == 1:
+        tie = "It is the only chain of that length."
+    else:
+        tie = (
+            f"{result.count} distinct chains share that length; the one shown starts at "
+            f"the lowest-numbered\ndeepest task and walks back by the lowest-numbered "
+            f"prerequisite still on a maximal chain."
+        )
+    out.append(
+        "**Derived from the task files.** The chain is the longest path through the "
+        "`prerequisites`\ngraph; `conflicts_with` is an undirected mutex, not an edge, "
+        "so it orders nothing here.\n" + tie
+    )
+    out.append("")
+    return "\n".join(out).split("\n")
+
+
+def render_critical_path(records, prose_lines: list[str], blocks) -> list[str]:
+    """The Critical Path section: authored prose verbatim, the floor rebuilt.
+
+    Only the ``### The dependency floor`` sub-block is regenerated. The intro
+    paragraph, the makespan table and its conclusion, and ``### Three things
+    about the shape of this chain`` are AUTHORED ANALYSIS and are carried
+    through untouched -- including the server's own longest chain, which the
+    derived walk disagrees with and which is therefore the user's to settle,
+    not this renderer's to overwrite.
+    """
+    h = find_block(blocks, CRITICAL_PATH_HEADING)
+    section = prose_lines[h["i"]: h["end"]]
+    try:
+        floor = find_block(heading_blocks(section), FLOOR_HEADING)
+    except KeyError:
+        raise SystemExit(
+            f"{CRITICAL_PATH_HEADING}: no '{FLOOR_HEADING}' sub-heading in the prose "
+            f"source. The chain is generated into that block; without it there is "
+            f"nowhere to put it."
+        )
+    return (
+        section[: floor["i"]]
+        + build_dependency_floor(records, section[floor["i"]])
+        + section[floor["end"]:]
+    )
 
 
 # --------------------------------------------------------------------------
@@ -684,7 +787,7 @@ def build_index(records, prose_lines: list[str],
     ]
     out.extend(after)
 
-    verbatim(find_block(blocks, "## Critical Path"))
+    out.extend(render_critical_path(records, prose_lines, blocks))
 
     # ---- Parallelization Summary ---------------------------------------
     h = find_block(blocks, "## Parallelization Summary")
@@ -756,6 +859,99 @@ def main() -> int:
         print(f"[SYNTHESIZED TRACK] {label}: '### {heading}' is named by task "
               f"frontmatter but absent from the prose source ({args.prose_source}); "
               f"the heading was generated and placed among that batch's tracks.")
+
+    # The makespan table is AUTHORED and stays authored; this is the
+    # informational half of its cross-check. ``split-plan.py --verify`` runs
+    # the same function as a hard gate, the same split as the track counts.
+    print()
+    print("=" * 72)
+    print("MAKESPAN TABLE CHECK (authored analysis, cross-checked not regenerated)")
+    print("=" * 72)
+    findings, info = check_makespan_table(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every id named exists; every → edge is a prerequisite edge or a "
+              "declared\n       conflict serialisation; no row claims fewer slots than "
+              "the DAG floor;\n       the stated total matches the column")
+    print("=" * 72)
+
+    # The server-chain sentence is AUTHORED prose about the corpus, so it can
+    # go stale the way a hand-written table can. Same informational/gate split.
+    print()
+    print("=" * 72)
+    print("SERVER CHAIN SENTENCE CHECK (authored prose, cross-checked not regenerated)")
+    print("=" * 72)
+    findings, info = check_server_chain_sentence(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every id it names exists; every → is a prerequisite edge; every "
+              "task on it\n       is track_scope: server; its length is the derived "
+              "server-only maximum and\n       the count the sentence states agrees "
+              "with it")
+    print("=" * 72)
+
+    # The derived numbers are restated in authored argument outside the
+    # Critical Path section; that prose stays authored, so it is cross-checked
+    # rather than regenerated. Same informational/gate split as the two above.
+    print()
+    print("=" * 72)
+    print("RESTATED QUANTITY CHECK (authored prose, cross-checked not regenerated)")
+    print("=" * 72)
+    findings, info = check_restated_quantities(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every declared restatement site is locatable; every number it "
+              "states is a\n       correct rounding of the derived value at the "
+              "precision the prose states;\n       no known-shape restatement sits "
+              "outside a declared site")
+    print("=" * 72)
+
+    # The Batch Execution Overview is AUTHORED and is carried through this
+    # renderer VERBATIM -- it interleaves derived schedule facts with judgment
+    # that exists nowhere in frontmatter, so generating it would delete the
+    # judgment. Same informational/gate split as the tables above.
+    print()
+    print("=" * 72)
+    print("BATCH EXECUTION OVERVIEW CHECK (authored schedule, carried through verbatim)")
+    print("=" * 72)
+    findings, info = check_batch_overview(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every id it names exists; every task sits under the batch and "
+              "track letter\n       its frontmatter gives it and none is missing; every "
+              "-> is a prerequisite\n       edge or a declared conflict serialisation; "
+              "every 'after' claim is a real edge")
+    print("=" * 72)
+
+    # Conflict annotations are authored prose on a machine-read field. The
+    # field says two tasks are mutually exclusive; only the prose says what
+    # over. Same informational/gate split.
+    print()
+    print("=" * 72)
+    print("CONFLICT ANNOTATION CHECK (an undirected mutex has to name its collision)")
+    print("=" * 72)
+    findings, info = check_conflict_annotations(records)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every task declaring a conflict names a path in backticks, or is "
+              "declared\n       unreviewable with a reason and a way to resolve it; the "
+              "body's\n       '**Conflicts with:**' line and conflicts_with_raw agree")
+    print("=" * 72)
 
     if args.check_only:
         # The index is GENERATED. A hand-edit to any derived table -- the

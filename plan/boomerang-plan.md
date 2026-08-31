@@ -74,95 +74,22 @@ not also the last thing that happens. See decisions D7–D9.
 
 ## Package Dependency Graph
 
-### Server — `server/app/`
+**The graphs live in the design, and only there.**
+[`design/boomerang-low-level-design.md`](../design/boomerang-low-level-design.md) §2.1 draws the
+server's module graph and §2.2 draws the extension's. Those two are authoritative and this plan
+keeps no copy of either. A copy drifts, and the extension graph is the kind that drifts silently:
+most of what it says lives in the qualifiers on its edges — `POPUP -- "reads only" --> STORE` *is*
+the single-writer rule — and in a completeness claim that only holds if every edge and both
+platform nodes are actually drawn. A paraphrase that keeps the boxes and drops the labels still
+looks right while permitting what the design forbids. Task 10.3 encodes both graphs as lint
+contracts and is told to read §2.1 and §2.2 directly, for the same reason.
 
-```mermaid
-graph TD
-    ROUTES["routes"]
-    SERVICES["services"]
-    MODELS["models"]
-    CARRIERS["carriers"]
-    BEDROCK["bedrock"]
-    PROMPTS["prompts"]
-    ERRORS["errors"]
-    CONFIG["config"]
-    LOGGING["logging"]
-    MIDDLEWARE["middleware"]
-    DEPS["deps"]
-    MAIN["main"]
-
-    ROUTES --> SERVICES
-    ROUTES --> MODELS
-    ROUTES --> ERRORS
-    ROUTES --> DEPS
-    SERVICES --> CARRIERS
-    SERVICES --> BEDROCK
-    SERVICES --> MODELS
-    SERVICES --> PROMPTS
-    SERVICES --> ERRORS
-    CARRIERS --> ERRORS
-    CARRIERS --> MODELS
-    BEDROCK --> CONFIG
-    DEPS --> CONFIG
-    DEPS --> ERRORS
-    MIDDLEWARE --> LOGGING
-    MAIN --> ROUTES
-    MAIN --> MIDDLEWARE
-    MAIN --> CARRIERS
-    MAIN --> CONFIG
-```
-
-Layering rule from §2.1: **routes never call `carriers` or `bedrock` directly, and services never
-import `fastapi`.** `middleware` is around the app rather than above routes, which is why nothing
-calls into it.
-
-### Extension — `extension/src/`
-
-```mermaid
-graph TD
-    TYPES["src types"]
-    CONFIG["src config"]
-    EXTRACT["src extract"]
-    ADAPTERS["src adapters"]
-    VALIDATION["src validation"]
-    STORAGE["src storage"]
-    API["src api"]
-    RANKING["src ranking"]
-    CALENDAR["src calendar"]
-    PERMISSIONS["src permissions"]
-    MESSAGING["src messaging"]
-    DRIVER["src driver"]
-    CONTENT["entrypoints content"]
-    BACKGROUND["entrypoints background"]
-    POPUP["entrypoints popup"]
-
-    STORAGE --> TYPES
-    RANKING --> TYPES
-    VALIDATION --> ADAPTERS
-    API --> VALIDATION
-    DRIVER --> VALIDATION
-    DRIVER --> ADAPTERS
-    DRIVER --> API
-    DRIVER --> STORAGE
-    DRIVER --> CALENDAR
-    DRIVER --> EXTRACT
-    MESSAGING --> STORAGE
-    CONTENT --> EXTRACT
-    BACKGROUND --> DRIVER
-    BACKGROUND --> MESSAGING
-    BACKGROUND --> API
-    BACKGROUND --> VALIDATION
-    BACKGROUND --> STORAGE
-    BACKGROUND --> PERMISSIONS
-    POPUP --> MESSAGING
-    POPUP --> STORAGE
-    POPUP --> PERMISSIONS
-    POPUP --> RANKING
-    POPUP --> CALENDAR
-```
-
-`src/types/` and `src/config.ts` are leaves that every module may import — §2.2's exemption. The
-graph is otherwise **complete and prohibitive**: an edge not drawn is not permitted.
+**The two graphs are not the same kind of document, and the difference is load-bearing.** §2.1
+draws the server's *layering rule* rather than every edge — `main` and `prompts` sit outside the
+layering and are omitted because of that, not because importing them is forbidden. §2.2 is
+**complete and prohibitive**: an edge that is not drawn is not permitted, an edge carrying a
+qualifier is permitted only for what the qualifier says, and `src/types/` and `src/config.ts` are
+the two named exemptions. Read §2.1 for the invariant; read §2.2 for the whole permitted set.
 
 ---
 
@@ -503,8 +430,8 @@ After all tracks complete:
 
 ### Track A: Server model boundary [server]
 
-- [Task 4.2: `app/bedrock.py` — settings-driven client and per-call-site models](tasks/batch-04/4.02-app-bedrock-py-settings-driven-client-and-per.md) — prerequisites: 2.2 · conflicts: 4.1
-- [Task 4.1: `app/prompts/` — tool schemas generated from the enums](tasks/batch-04/4.01-app-prompts-tool-schemas-generated-from-the-enums.md) — prerequisites: 3.2, 3.3, 4.2 · conflicts: 4.2
+- [Task 4.2: `app/bedrock.py` — settings-driven client and per-call-site models](tasks/batch-04/4.02-app-bedrock-py-settings-driven-client-and-per.md) — prerequisites: 2.2 · conflicts: none
+- [Task 4.1: `app/prompts/` — tool schemas generated from the enums](tasks/batch-04/4.01-app-prompts-tool-schemas-generated-from-the-enums.md) — prerequisites: 3.2, 3.3, 4.2 · conflicts: none
 
 ---
 
@@ -839,8 +766,8 @@ named file.
 | [3.16](tasks/batch-03/3.16-src-validation-the-order-response-validator.md) | `src/validation/` — the order response validator | 2.4 | 3.15 | 3.1–3.12, 3.17 | [ ] |
 | [3.17](tasks/batch-03/3.17-src-permissions-two-tier-permission-state.md) | `src/permissions/` — two-tier permission state | 2.4, 2.7 | None | 3.1–3.16 | [ ] |
 | [3.18](tasks/batch-03/3.18-contracts-golden-payloads-both-sides-assert.md) | `contracts/` — golden payloads both sides assert against | 3.4, 3.16 | None | 3.6–3.17 | [ ] |
-| [4.1](tasks/batch-04/4.01-app-prompts-tool-schemas-generated-from-the-enums.md) | `app/prompts/` — tool schemas generated from the enums | 3.2, 3.3, 4.2 | 4.2 | 4.3–4.13 | [ ] |
-| [4.2](tasks/batch-04/4.02-app-bedrock-py-settings-driven-client-and-per.md) | `app/bedrock.py` — settings-driven client and per-call-site models | 2.2 | 4.1 | 4.3–4.13 | [ ] |
+| [4.1](tasks/batch-04/4.01-app-prompts-tool-schemas-generated-from-the-enums.md) | `app/prompts/` — tool schemas generated from the enums | 3.2, 3.3, 4.2 | None | 4.3–4.13 | [ ] |
+| [4.2](tasks/batch-04/4.02-app-bedrock-py-settings-driven-client-and-per.md) | `app/bedrock.py` — settings-driven client and per-call-site models | 2.2 | None | 4.3–4.13 | [ ] |
 | [4.3](tasks/batch-04/4.03-app-carriers-usps-token-py-oauth-token-provider.md) | `app/carriers/usps/token.py` — OAuth token provider | 2.1, 2.2 | 4.4, 4.5 | 4.1, 4.2, 4.6–4.13 | [ ] |
 | [4.4](tasks/batch-04/4.04-app-carriers-usps-adapter-py-uspsadapter.md) | `app/carriers/usps/adapter.py` — `UspsAdapter` | 3.4, 3.5, 4.3 | 4.3, 4.5 | 4.1, 4.2, 4.6–4.13 | [ ] |
 | [4.5](tasks/batch-04/4.05-app-carriers-usps-scripted-py-scripteduspsadapter.md) | `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter` (test double) | 3.4, 3.5 | 4.3, 4.4 | 4.1, 4.2, 4.6–4.14 | [ ] |
@@ -921,29 +848,34 @@ but it is not free, and the plan should say what it costs.
 ### The dependency floor
 
 ```
-1.2  src/types and the WXT scaffold          [extension]
- →  2.4  entities, session, state enums       [extension/src/types]
- →  4.6  storage keys, rebuild, and barrel    [extension/src/storage]
- →  4.7  StorageCoordinator.transact          [extension/src/storage]
- →  4.9  ReturnRepository                     [extension/src/storage]
- →  6.6  ReturnDriver, transition, start      [extension/src/driver]
- →  6.7  state machine edges and rehydration  [extension/src/driver]
- →  6.8  selector-first loop, model fallback  [extension/src/driver]
- →  7.7  the return-method choice flow        [extension/src/driver]
- →  7.8  derive_label_carrier                 [extension/src/driver]
- →  7.9  print affirmation, pickup, consent   [extension/src/driver]
- →  7.10 cancellation orchestration           [extension/src/driver]
- →  8.2  background worker wiring graph       [extension/entrypoints]
- →  8.3  popup shell and ranked list          [extension/entrypoints/popup]
- →  8.4  popup return surfaces                [extension/entrypoints/popup]
- →  8.5  popup pickup, calendar, clear-all    [extension/entrypoints/popup]
- →  8.6  manual acceptance run                [browser]
- →  9.1  end-to-end extension harness         [extension/tests]
- →  9.7  platform rows                        [extension/tests]
- → 10.2  requirement and config sweep         [repo]
+    1.2  WXT project scaffold and MV3 manifest                                 [extension]
+ →  2.4  `src/types/` — entities, session, and the state enums                 [extension/src/types]
+ →  4.6  `src/storage/` — key layout, defensive read, rebuild, and the barrel  [extension/src/storage]
+ →  4.7  `StorageCoordinator.transact` — the serialising queue                 [extension/src/storage]
+ →  4.9  `ReturnRepository`                                                    [extension/src/storage]
+ →  6.6  `ReturnDriver` — construction, `transition`, and `start`              [extension/src/driver]
+ →  6.7  State machine edges and rehydration                                   [extension/src/driver]
+ →  6.8  Selector-first step loop and the model fallback                       [extension/src/driver]
+ →  7.7  The return-method choice flow                                         [extension/src/driver]
+ →  7.8  `derive_label_carrier` — three sources, in order                      [extension/src/driver]
+ →  7.9  Print affirmation, pickup offer, and consent                          [extension/src/driver]
+ → 7.10  Cancellation orchestration                                            [extension/src/driver]
+ →  8.2  `entrypoints/background.ts` — the worker wiring graph                 [extension/entrypoints]
+ →  8.3  Popup shell, ranked list, scan gesture, permission offer              [extension/entrypoints/popup]
+ →  8.4  Popup return surfaces — choice, affirmation, stuck                    [extension/entrypoints/popup]
+ →  8.5  Popup pickup, calendar, clear-all, and the simulated-booking marker   [extension/entrypoints/popup]
+ →  8.6  Walk the whole product by hand in a real browser                      [docs/]
+ →  9.1  End-to-end extension test harness                                     [extension/tests/integration]
+ →  9.7  Platform rows                                                         [extension/tests/integration]
+ → 10.2  Requirement and configuration citation sweep                          [repository root]
 ```
 
 **Critical path length:** 20 tasks.
+
+**Derived from the task files.** The chain is the longest path through the `prerequisites`
+graph; `conflicts_with` is an undirected mutex, not an edge, so it orders nothing here.
+8 distinct chains share that length; the one shown starts at the lowest-numbered
+deepest task and walks back by the lowest-numbered prerequisite still on a maximal chain.
 
 ### The makespan the barrier actually buys
 
@@ -973,10 +905,11 @@ and it should not be discovered halfway through.
 
 ### Three things about the shape of this chain
 
-**It runs entirely through the extension.** The server's own longest chain — 1.1 → 2.2 → 4.2 → 4.1 →
-5.1 → 6.2 → 6.3 → 6.4 → 6.5 → 7.1 → 7.6 → 10.2 — is twelve tasks. The server finishes early and
-waits. If only one agent is available, start it on the extension; if two, the server track is the
-one that can afford to be interrupted.
+**It runs entirely through the extension.** The server's own longest chain is twelve tasks — fifteen
+distinct chains tie at that length, and the tie-break used for the floor above picks 1.1 → 2.1 →
+3.1 → 3.2 → 3.7 → 5.1 → 6.2 → 6.3 → 6.4 → 6.5 → 7.1 → 7.2. The server finishes early and waits. If
+only one agent is available, start it on the extension; if two, the server track is the one that can
+afford to be interrupted.
 
 **Driver and popup are a genuinely serial spine; storage is not.** Tasks 6.6–6.8 and 7.7–7.10 all
 edit `src/driver/driver.ts`, and tasks 8.3–8.5 share the popup shell and its route table. Splitting
@@ -1005,7 +938,7 @@ parallel with Batch 1; do not let it queue behind scaffolding.
 | 1 | A, B | A ∥ B | 1.2 ↔ 1.4 (`wxt.config.ts`) | 1.1, 1.2, 1.3 are all roots; 1.4 and 1.5 follow 1.2 |
 | 2 | A, B, C, D + 3 extension tracks | server ∥ extension throughout | 2.6 ↔ 2.7 (`tests/fakes/chrome.ts`) | Serialise 2.6 → 2.7; everything else free |
 | 3 | 11 tracks | server ∥ extension; most tracks mutually free | 3.1–3.4 (`app/models/__init__.py`); 3.9 ↔ 3.10 (`src/extract/index.ts`); 3.13 ↔ 3.14 (`src/adapters/index.ts`); 3.15 ↔ 3.16 (`src/validation/index.ts`) | Widest batch in the plan — 11 agents can work at once; 3.18 lands last because it needs 3.4 and 3.16 |
-| 4 | A, B, C, C', D, E | server ∥ extension | 4.3–4.5 (`app/carriers/usps/__init__.py`); 4.1 ↔ 4.2 (model boundary); 4.6 → 4.7 → **{4.8 ∥ 4.9 ∥ 4.10 ∥ 4.11}** → 4.12 | The storage chain is still the batch's long pole, but four slots instead of seven |
+| 4 | A, B, C, C', D, E | server ∥ extension | 4.3–4.5 (`app/carriers/usps/__init__.py`); 4.6 → 4.7 → **{4.8 ∥ 4.9 ∥ 4.10 ∥ 4.11}** → 4.12 | The storage chain is still the batch's long pole, but four slots instead of seven |
 | 5 | A, B, C, D, E | server ∥ extension | 5.4 ↔ 5.5 (`src/driver/index.ts`) | Server services are mutually independent |
 | 6 | A, B | server ∥ extension | 6.1–6.4 (`app/routes/__init__.py`); **6.6 → 6.7 → 6.8 serial** (`src/driver/driver.ts`); 6.5 needs all four routes and 4.14 | Last batch where the two workspaces are still independent |
 | — | Deployment | I.1 → I.2, I.3 ∥ I.2 | None — `infra/` is untouched by every other task | Opens after 6.5; runs concurrently with Batches 7–9 and gates nothing in them |
@@ -1024,7 +957,7 @@ if either changes.
 | 1 | 5 | 4 (A, B, C, D) | 1.2 ↔ 1.4 |
 | 2 | 8 | 7 (A, B, C, D, E, F, G) | 2.6 ↔ 2.7 |
 | 3 | 18 | 11 (A, B, C, I, D, E, F, G, J, H, K) | 3.1 ↔ 3.2, 3.1 ↔ 3.3, 3.1 ↔ 3.4, 3.2 ↔ 3.3, 3.2 ↔ 3.4, 3.3 ↔ 3.4, 3.9 ↔ 3.10, 3.13 ↔ 3.14, 3.15 ↔ 3.16 |
-| 4 | 14 | 5 (A, B, E, C, D) | 4.1 ↔ 4.2, 4.3 ↔ 4.4, 4.3 ↔ 4.5, 4.4 ↔ 4.5, 4.6 ↔ 4.7, 4.7 ↔ 4.12 |
+| 4 | 14 | 5 (A, B, E, C, D) | 4.3 ↔ 4.4, 4.3 ↔ 4.5, 4.4 ↔ 4.5, 4.6 ↔ 4.7, 4.7 ↔ 4.12 |
 | 5 | 6 | 5 (A, B, C, D, E) | 5.4 ↔ 5.5 |
 | 6 | 8 | 2 (A, B) | 6.1 ↔ 6.2, 6.1 ↔ 6.3, 6.1 ↔ 6.4, 6.2 ↔ 6.3, 6.2 ↔ 6.4, 6.3 ↔ 6.4, 6.6 ↔ 6.7, 6.6 ↔ 6.8, 6.7 ↔ 6.8 |
 | Deployment | 3 | 0 (—) | None |
