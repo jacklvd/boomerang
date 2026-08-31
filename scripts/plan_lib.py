@@ -23,6 +23,7 @@ import subprocess
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLAN_PATH = REPO_ROOT / "plan" / "boomerang-plan.md"
@@ -39,6 +40,32 @@ BASELINE_REF = "cf7e210"
 DECLARED_GAPS = {
     "FR-3.6.2": "**— (deliberate gap)**",
     "FR-3.6.3": "**— (deliberate gap, out of PoC scope)**",
+}
+
+
+class DeclaredDivergence(NamedTuple):
+    """A sanctioned disagreement, with the two numbers it is reconciled against."""
+    baseline: int   # the count the baseline's hand-written Plan Summary claims
+    corpus: int     # the count the task corpus actually has
+    reason: str     # why the two are allowed to differ
+
+
+# AUTHORED, NOT DERIVED. The Plan Summary rows whose hand-written track count
+# the corpus deliberately does NOT match. Each has been investigated; none is a
+# defect. This is the ONLY sanctioned way for a summary track count to disagree
+# with the corpus: ``split-plan.py --verify`` fails on any other divergence,
+# and ``build-plan-index.py`` reports every divergence with the reason below.
+#
+# The entry records BOTH counts, not just the batch, so this stays an assertion
+# rather than a skip-list: if either number moves, the reconciliation no longer
+# holds and the reason has to be revisited, so verification fails rather than
+# swallowing the new number. An entry whose divergence has gone away is stale
+# and fails too -- the same set-equality spirit as INTENDED_BODY_CHANGES in
+# ``split-plan.py``. Adding an entry here is a deliberate, reviewable act.
+DECLARED_TRACK_COUNT_DIVERGENCES = {
+    "1": DeclaredDivergence(2, 4, "stale authored undercount: 866d9a5 added Tracks C and D to Batch 1 without updating the summary"),
+    "4": DeclaredDivergence(6, 5, "lane count A, B, C, C', D, E -- C' is the D19 storage-barrel fan-out inside Track C, not a sixth `###` heading"),
+    "deployment": DeclaredDivergence(1, 0, "the deployment tasks carry track_heading: null by design; they render as `### Task I.x` headings, which are not tracks"),
 }
 
 # Requirement ids are declared by their own heading in the requirements doc.
@@ -506,3 +533,140 @@ def load_tasks_from_files(tasks_dir: Path = TASKS_DIR) -> list[dict]:
         out.append({"path": path, "fm": fm, "body": body})
     out.sort(key=lambda r: r["fm"]["order"])
     return out
+
+
+# --------------------------------------------------------------------------
+# Document tables
+# --------------------------------------------------------------------------
+# Shared with the renderer so that the table ``build-plan-index.py`` rewrites
+# and the table ``split-plan.py --verify`` asserts against are read by exactly
+# the same code.
+
+def heading_blocks(lines: list[str]) -> list[dict]:
+    """Every heading with the line range of the block it owns."""
+    idx = []
+    for i, line in enumerate(lines):
+        m = HEADING_RE.match(line)
+        if m:
+            idx.append({"i": i, "level": len(m.group(1)), "text": line})
+    for n, h in enumerate(idx):
+        end = len(lines)
+        for later in idx[n + 1 :]:
+            if later["level"] <= h["level"]:
+                end = later["i"]
+                break
+        h["end"] = end
+        h["inner_end"] = idx[n + 1]["i"] if n + 1 < len(idx) else len(lines)
+    return idx
+
+
+def find_block(blocks, prefix):
+    for h in blocks:
+        if h["text"].startswith(prefix):
+            return h
+    raise KeyError(prefix)
+
+
+def split_table(body: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Split a section body into (prose_before, table, prose_after)."""
+    start = next((i for i, l in enumerate(body) if l.startswith("|")), None)
+    if start is None:
+        return body, [], []
+    end = start
+    while end < len(body) and body[end].startswith("|"):
+        end += 1
+    return body[:start], body[start:end], body[end:]
+
+
+def parse_table(rows: list[str]) -> list[list[str]]:
+    """Parse a markdown table into cell lists, dropping the separator row."""
+    out = []
+    for row in rows:
+        if re.match(r"^\|[\s:|-]+\|$", row):
+            continue
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        out.append(cells)
+    return out
+
+
+def batch_order(records) -> list[str]:
+    """Batch keys in document order (0..6, deployment, 7..10)."""
+    seen = []
+    for r in records:  # records are already in document order
+        key = str(r["fm"]["batch"])
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
+# --------------------------------------------------------------------------
+# Plan Summary track counts
+# --------------------------------------------------------------------------
+
+def plan_summary_track_counts(records, baseline_text: str) -> dict[str, tuple[int, int]]:
+    """``batch key -> (count the summary claims, count the corpus has)``.
+
+    The corpus count is the number of distinct ``track_heading`` values the
+    batch's tasks carry -- the same definition ``build-plan-index.py`` renders
+    into the Tracks column, so the renderer, the cross-check and the verifier
+    cannot disagree about what a track is. Rows whose label is not a batch the
+    corpus knows about (``Total``) take no part.
+    """
+    lines = baseline_text.split("\n")
+    h = find_block(heading_blocks(lines), "## Plan Summary")
+    _, table, _ = split_table(lines[h["i"] + 1 : h["end"]])
+    known = set(batch_order(records))
+    out: dict[str, tuple[int, int]] = {}
+    for cells in parse_table(table)[1:]:  # drop header
+        if len(cells) < 3:
+            continue
+        label = cells[0].strip("*` ")
+        key = "deployment" if label == "—" else label
+        if key not in known:
+            continue
+        rows_b = [r for r in records if str(r["fm"]["batch"]) == key]
+        tracks = {r["fm"]["track_heading"] for r in rows_b if r["fm"]["track_heading"]}
+        out[key] = (int(cells[2].strip("*` ")), len(tracks))
+    return out
+
+
+def track_count_divergences(records, baseline_text: str) -> dict[str, tuple[int, int]]:
+    """The batch rows where the summary's track count and the corpus disagree."""
+    return {
+        key: counts
+        for key, counts in plan_summary_track_counts(records, baseline_text).items()
+        if counts[0] != counts[1]
+    }
+
+
+def classify_track_count_divergences(records, baseline_text: str):
+    """Observed track-count divergences against ``DECLARED_TRACK_COUNT_DIVERGENCES``.
+
+    Returns ``(observed, undeclared, mismatched, stale)``:
+
+    * ``observed``   -- every divergence found, ``key -> (summary, corpus)``
+    * ``undeclared`` -- found but not on the allowlist: a NEW divergence, the
+      case that matters most, because a lost track looks exactly like this
+    * ``mismatched`` -- on the allowlist, but one of the two counts has moved,
+      so the recorded reconciliation no longer describes what is there
+    * ``stale``      -- on the allowlist but no longer diverging: the entry is
+      dead and should be deleted
+
+    Set equality between declared and observed, not one-way filtering: the same
+    shape as the ``INTENDED_BODY_CHANGES`` check, which fails on drift AND on a
+    silently reverted declaration.
+    """
+    observed = track_count_divergences(records, baseline_text)
+    declared = DECLARED_TRACK_COUNT_DIVERGENCES
+    undeclared = [k for k in observed if k not in declared]
+    mismatched = [
+        k for k in observed
+        if k in declared and (declared[k].baseline, declared[k].corpus) != observed[k]
+    ]
+    stale = [k for k in declared if k not in observed]
+    return observed, undeclared, mismatched, stale
+
+
+def batch_label(key: str) -> str:
+    """``"deployment"`` -> ``"Deployment"``; a numeric key -> ``"Batch N"``."""
+    return "Deployment" if key == "deployment" else f"Batch {key}"

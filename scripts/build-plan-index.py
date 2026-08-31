@@ -35,73 +35,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plan_lib import (  # noqa: E402
     BASELINE_REF,
     DECLARED_GAPS,
+    DECLARED_TRACK_COUNT_DIVERGENCES,
     PLAN_PATH,
     TASKS_DIR,
-    HEADING_RE,
     TASK_HEADING_RE,
+    batch_label,
+    batch_order,
+    classify_track_count_divergences,
+    find_block,
+    heading_blocks,
     load_tasks_from_files,
     parse_id_list,
+    parse_table,
     read_source,
     requirement_ids_from_doc,
+    split_table,
     track_letter,
 )
 
 # ``DECLARED_GAPS`` -- the requirements the plan declares as deliberate gaps --
 # lives in ``plan_lib`` so this renderer and the coverage assertion in
 # ``split-plan.py --verify`` cannot disagree about which gaps are sanctioned.
+# ``DECLARED_TRACK_COUNT_DIVERGENCES`` -- the Plan Summary track counts the
+# corpus is allowed to disagree with -- lives there for the same reason: this
+# cross-check reports them with their stated reason, ``--verify`` asserts the
+# declared set is exactly the observed one.
 
 EN = "–"  # en dash, as used by the original tables
-
-
-# --------------------------------------------------------------------------
-# Document structure
-# --------------------------------------------------------------------------
-
-def heading_blocks(lines: list[str]) -> list[dict]:
-    """Every heading with the line range of the block it owns."""
-    idx = []
-    for i, line in enumerate(lines):
-        m = HEADING_RE.match(line)
-        if m:
-            idx.append({"i": i, "level": len(m.group(1)), "text": line})
-    for n, h in enumerate(idx):
-        end = len(lines)
-        for later in idx[n + 1 :]:
-            if later["level"] <= h["level"]:
-                end = later["i"]
-                break
-        h["end"] = end
-        h["inner_end"] = idx[n + 1]["i"] if n + 1 < len(idx) else len(lines)
-    return idx
-
-
-def find_block(blocks, prefix):
-    for h in blocks:
-        if h["text"].startswith(prefix):
-            return h
-    raise KeyError(prefix)
-
-
-def split_table(body: list[str]) -> tuple[list[str], list[str], list[str]]:
-    """Split a section body into (prose_before, table, prose_after)."""
-    start = next((i for i, l in enumerate(body) if l.startswith("|")), None)
-    if start is None:
-        return body, [], []
-    end = start
-    while end < len(body) and body[end].startswith("|"):
-        end += 1
-    return body[:start], body[start:end], body[end:]
-
-
-def parse_table(rows: list[str]) -> list[list[str]]:
-    """Parse a markdown table into cell lists, dropping the separator row."""
-    out = []
-    for row in rows:
-        if re.match(r"^\|[\s:|-]+\|$", row):
-            continue
-        cells = [c.strip() for c in row.strip().strip("|").split("|")]
-        out.append(cells)
-    return out
 
 
 # --------------------------------------------------------------------------
@@ -152,16 +112,6 @@ def plain_ids(ids: list[str]) -> str:
 # --------------------------------------------------------------------------
 # Derived tables
 # --------------------------------------------------------------------------
-
-def batch_order(records) -> list[str]:
-    """Batch keys in document order (0..6, deployment, 7..10)."""
-    seen = []
-    for r in records:  # records are already in document order
-        key = str(r["fm"]["batch"])
-        if key not in seen:
-            seen.append(key)
-    return seen
-
 
 def tracker_rows(records) -> list[dict]:
     """Tracker order: batch in document order, then numeric task id."""
@@ -445,7 +395,15 @@ def cross_check(records, baseline_text: str) -> list[str]:
     h = find_block(blocks, "## Plan Summary")
     _, table, _ = split_table(lines[h["i"] + 1 : h["end"]])
     order = batch_order(records)
+    # Track-count divergences are classified against the declared allowlist in
+    # ``plan_lib``, so a sanctioned one is reported WITH ITS REASON and an
+    # unsanctioned one stands out. ``split-plan.py --verify`` runs the same
+    # classification as a hard gate; this is the informational half.
+    observed, undeclared, mismatched, stale = classify_track_count_divergences(
+        records, baseline_text
+    )
     n_ok = 0
+    n_declared = 0
     total_rows = 0
     for cells in parse_table(table)[1:]:
         label = cells[0].strip("*` ")
@@ -468,15 +426,52 @@ def cross_check(records, baseline_text: str) -> list[str]:
         if c_tasks != len(rows_b):
             findings.append(f"- **Batch {label} task count**: summary says {c_tasks}, corpus has {len(rows_b)}")
             row_ok = False
-        if c_tracks != len(tracks):
-            findings.append(
-                f"- **Batch {label} track count**: summary says {c_tracks}, "
+        if key in observed:
+            entry = DECLARED_TRACK_COUNT_DIVERGENCES.get(key)
+            head = (
+                f"- **{batch_label(key)} track count**: summary says {c_tracks}, "
                 f"document has {len(tracks)} `###` track heading(s): "
                 f"{sorted(tracks) if tracks else '(none)'}"
             )
-            row_ok = False
+            if entry is None:
+                findings.append(
+                    head + "\n    - **UNDECLARED DIVERGENCE** — not in "
+                    "plan_lib.DECLARED_TRACK_COUNT_DIVERGENCES. A lost track looks "
+                    "exactly like this; investigate, then declare it with a reason."
+                )
+                row_ok = False
+            elif key in mismatched:
+                findings.append(
+                    head + f"\n    - **DECLARED ENTRY NO LONGER MATCHES** — the "
+                    f"allowlist reconciles {entry.baseline} against {entry.corpus}, "
+                    f"not {c_tracks} against {len(tracks)}. The stated reason no "
+                    f"longer describes what is here and must be revisited.\n"
+                    f"    - declared reason: {entry.reason}"
+                )
+                row_ok = False
+            else:
+                findings.append(
+                    head + f"\n    - DECLARED, reconciled {entry.baseline} against "
+                    f"{entry.corpus}: {entry.reason}"
+                )
+                n_declared += 1
         n_ok += row_ok
-    findings.append(f"- {n_ok}/{total_rows} Plan Summary rows agree with the corpus")
+    for key in stale:
+        entry = DECLARED_TRACK_COUNT_DIVERGENCES[key]
+        findings.append(
+            f"- **{batch_label(key)} track count**: **STALE DECLARATION** — the "
+            f"allowlist reconciles {entry.baseline} against {entry.corpus} "
+            f"({entry.reason}), but the summary and the corpus now agree. Delete "
+            f"the entry."
+        )
+    findings.append(
+        f"- {n_ok}/{total_rows} Plan Summary rows agree with the corpus or are "
+        f"reconciled by a declared divergence"
+        + (f" ({n_declared} declared)" if n_declared else "")
+        + (f"; {len(undeclared)} UNDECLARED" if undeclared else "")
+        + (f"; {len(mismatched)} declared entry/entries NO LONGER MATCHING" if mismatched else "")
+        + (f"; {len(stale)} STALE declaration(s)" if stale else "")
+    )
     return findings
 
 

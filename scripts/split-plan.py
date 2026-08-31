@@ -11,7 +11,9 @@ requirement in the design document covered by some task, every track_heading
 actually rendered in the index and each batch's track letters gapless from
 A -- and then compares
 against the pre-split baseline, requiring that exactly the declared set of task
-bodies (INTENDED_BODY_CHANGES) differs from it.
+bodies (INTENDED_BODY_CHANGES) differs from it and that exactly the declared set
+of Plan Summary track counts (DECLARED_TRACK_COUNT_DIVERGENCES) disagrees with
+the corpus.
 
 The split is lossless by construction: each task file is a YAML frontmatter
 block followed by the task body copied VERBATIM out of the plan -- heading line
@@ -36,11 +38,14 @@ from plan_lib import (  # noqa: E402
     BASELINE_REF,
     BATCH_HEADING_RE,
     DECLARED_GAPS,
+    DECLARED_TRACK_COUNT_DIVERGENCES,
     METADATA_FIELDS,
     PLAN_PATH,
     TASKS_DIR,
     track_letter,
+    batch_label,
     canonical_sort_key,
+    classify_track_count_divergences,
     load_tasks_from_files,
     pad_id,
     parse_id_list,
@@ -410,6 +415,49 @@ def cmd_verify(baseline: str, tasks_dir: Path) -> int:
     for tid in sorted(intended, key=lambda x: (x.startswith("I."), pad_id(x))):
         mark = "changed" if tid in changed else "MISSING"
         print(f"       {mark:8s} {tid:5s} {INTENDED_BODY_CHANGES[tid]}")
+
+    # --- baseline: declared Plan Summary track-count divergences ----------
+    # Same shape as the check above, over a different axis. The baseline's
+    # hand-written Plan Summary claims a track count per batch; the corpus
+    # counts distinct ``###`` track headings. Three rows disagree for reasons
+    # that have been investigated and are recorded in
+    # ``plan_lib.DECLARED_TRACK_COUNT_DIVERGENCES`` with BOTH numbers, so this
+    # is set equality between declared and observed, not a skip-list: a new
+    # divergence (a lost track looks exactly like one), a declared divergence
+    # whose numbers have moved, and a declared divergence that has gone away
+    # all fail here.
+    observed, undeclared, mismatched, stale = classify_track_count_divergences(
+        records, text
+    )
+    detail = [
+        f"{batch_label(k)}: summary says {observed[k][0]}, corpus has {observed[k][1]} "
+        f"`###` track heading(s) -- not declared in DECLARED_TRACK_COUNT_DIVERGENCES"
+        for k in undeclared
+    ]
+    detail += [
+        f"{batch_label(k)}: summary says {observed[k][0]}, corpus has {observed[k][1]}, "
+        f"but the allowlist reconciles {DECLARED_TRACK_COUNT_DIVERGENCES[k].baseline} "
+        f"against {DECLARED_TRACK_COUNT_DIVERGENCES[k].corpus} "
+        f"({DECLARED_TRACK_COUNT_DIVERGENCES[k].reason}) -- the reason needs revisiting"
+        for k in mismatched
+    ]
+    detail += [
+        f"{batch_label(k)}: declared as diverging "
+        f"({DECLARED_TRACK_COUNT_DIVERGENCES[k].baseline} vs "
+        f"{DECLARED_TRACK_COUNT_DIVERGENCES[k].corpus}), but the summary and the "
+        f"corpus now agree -- the entry is stale, delete it"
+        for k in stale
+    ]
+    report(not detail,
+           f"{len(observed)} Plan Summary track count(s) diverge from the corpus; "
+           f"{len(DECLARED_TRACK_COUNT_DIVERGENCES)} declared divergences; sets match",
+           detail)
+    for key in sorted(DECLARED_TRACK_COUNT_DIVERGENCES,
+                      key=lambda k: (k == "deployment", k.zfill(3))):
+        entry = DECLARED_TRACK_COUNT_DIVERGENCES[key]
+        mark = "diverges" if key in observed else "MISSING"
+        print(f"       {mark:8s} {batch_label(key):11s} {entry.baseline} vs "
+              f"{entry.corpus}  {entry.reason}")
 
     # --- round trip over the UNCHANGED tasks ------------------------------
     # Ordering and per-task exactness are still asserted byte-for-byte; the
