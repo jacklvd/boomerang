@@ -7,7 +7,9 @@
 --verify is the gate. It asserts the corpus is structurally sound -- 91 tasks,
 every metadata field present, frontmatter agreeing with the body line it was
 parsed from, no dangling or self references, conflicts reciprocal, every
-requirement in the design document covered by some task -- and then compares
+requirement in the design document covered by some task, every track_heading
+actually rendered in the index and each batch's track letters gapless from
+A -- and then compares
 against the pre-split baseline, requiring that exactly the declared set of task
 bodies (INTENDED_BODY_CHANGES) differs from it.
 
@@ -32,9 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from plan_lib import (  # noqa: E402
     BASELINE_REF,
+    BATCH_HEADING_RE,
     DECLARED_GAPS,
     METADATA_FIELDS,
+    PLAN_PATH,
     TASKS_DIR,
+    track_letter,
     canonical_sort_key,
     load_tasks_from_files,
     pad_id,
@@ -128,6 +133,28 @@ def _diff(expected: str, actual: str, label: str) -> list[str]:
             n=1,
         )
     )
+
+
+def tracks_by_batch(plan_text: str) -> dict[str, list[str]]:
+    """Every ``###`` heading the plan renders, keyed by the batch owning it.
+
+    Headings are returned as the text AFTER ``### ``, which is the same form
+    ``track_heading`` frontmatter carries, so the two compare directly.
+    """
+    out: dict[str, list[str]] = {}
+    batch: str | None = None
+    for line in plan_text.split("\n"):
+        if bm := BATCH_HEADING_RE.match(line):
+            batch = bm.group(1)
+            out.setdefault(batch, [])
+        elif line.startswith("## Deployment Track"):
+            batch = "deployment"
+            out.setdefault(batch, [])
+        elif line.startswith("## "):
+            batch = None
+        elif line.startswith("### ") and batch is not None:
+            out[batch].append(line[4:])
+    return out
 
 
 def cmd_verify(baseline: str, tasks_dir: Path) -> int:
@@ -318,6 +345,51 @@ def cmd_verify(baseline: str, tasks_dir: Path) -> int:
             if not (r["path"].parent / target).resolve().exists():
                 broken.append(f"{r['fm']['id']}: {target} does not resolve from {r['path'].parent}")
     report(not broken, "every relative link in a task body resolves to a file that exists", broken)
+
+    # --- track headings: no orphans -----------------------------------------
+    # Task 0.2 was parked under Track A because the Track B heading it belonged
+    # to had been lost from the document, and nothing asserted the two agreed.
+    # A track_heading in frontmatter that the generated index does not render
+    # means the reader and the corpus disagree about where a task lives.
+    rendered_tracks = tracks_by_batch(PLAN_PATH.read_text() if PLAN_PATH.exists() else "")
+    orphans = [
+        f"{r['fm']['id']}: track_heading {r['fm']['track_heading']!r} is not a `###` "
+        f"heading under Batch {r['fm']['batch']} in {PLAN_PATH.name}"
+        for r in records
+        if r["fm"]["track_heading"]
+        and r["fm"]["track_heading"] not in rendered_tracks.get(str(r["fm"]["batch"]), [])
+    ]
+    n_tracked = sum(1 for r in records if r["fm"]["track_heading"])
+    report(not orphans,
+           f"every task's track_heading is rendered in {PLAN_PATH.name} "
+           f"({n_tracked - len(orphans)}/{n_tracked} tracked tasks)",
+           orphans)
+
+    # --- track letters are gapless from A -----------------------------------
+    # The Track B heading going missing left Batch 0 running A, C. A gap is the
+    # visible symptom of a lost track, so it is the thing worth asserting: the
+    # letters a batch's tasks name must be A..X with nothing skipped. Headings
+    # with no letter (`Gate: Manual acceptance [extension]`) are not tracks and
+    # take no part in the sequence.
+    letters_by_batch = defaultdict(set)
+    for r in records:
+        th = r["fm"]["track_heading"]
+        if th and (letter := track_letter(th)):
+            letters_by_batch[str(r["fm"]["batch"])].add(letter)
+    gaps = []
+    for key in sorted(letters_by_batch, key=lambda k: (k == "deployment", k.zfill(3))):
+        letters = sorted(letters_by_batch[key])
+        expected = [chr(ord("A") + i) for i in range(len(letters))]
+        if letters != expected:
+            gaps.append(
+                f"batch {key}: track letters {', '.join(letters)} -- expected a gapless "
+                f"A{'..' + expected[-1] if len(expected) > 1 else ''}; "
+                f"missing {', '.join(l for l in expected if l not in letters)}"
+            )
+    report(not gaps,
+           f"track letters in each batch are gapless from A "
+           f"({len(letters_by_batch) - len(gaps)}/{len(letters_by_batch)} batches)",
+           gaps)
 
     print()
     print("=" * 72)

@@ -15,6 +15,11 @@ idempotent and re-runnable). Three things are DERIVED from task frontmatter:
 
 Every derived table is cross-checked against the hand-written table in the
 baseline commit; disagreements are reported, never silently resolved.
+
+A track heading that task frontmatter names but the prose source does not have
+is SYNTHESIZED (heading plus derived bullets, no invented intro prose) and
+announced on stdout, so a new track can originate in a task file rather than in
+a hand edit to the generated index.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from plan_lib import (  # noqa: E402
     parse_id_list,
     read_source,
     requirement_ids_from_doc,
+    track_letter,
 )
 
 # ``DECLARED_GAPS`` -- the requirements the plan declares as deliberate gaps --
@@ -503,7 +509,52 @@ def drop_generated(lines: list[str]) -> list[str]:
     return lines
 
 
-def build_index(records, prose_lines: list[str]) -> str:
+def item_letter(kind: str, item) -> str | None:
+    """Track letter of a render item, whichever form it is in."""
+    return track_letter(item if kind == "synth" else item["text"][4:])
+
+
+def placement_index(items: list[tuple[str, object]], heading: str) -> int:
+    """Where a synthesized track heading belongs among a batch's `###` blocks.
+
+    ORDERING IS NOT PURELY ALPHABETICAL IN THIS DOCUMENT. Batch 3 runs
+    A B C I D E F G J H K and Batch 4 runs A B E C D -- later-added tracks were
+    filed with their scope siblings (server tracks, then extension, then repo)
+    rather than by letter. So "insert before the first track whose letter is
+    greater" would misfile: a new Batch 3 track E would land before Track I,
+    splitting it from D and F.
+
+    The rule used instead is: anchor on the LAST lettered track that sorts
+    before the new letter, and go immediately after it. On a letter-ordered
+    batch the two rules agree; on Batches 3 and 4 this one keeps the new track
+    beside its alphabetical predecessor wherever that predecessor actually sits.
+
+    Only lettered tracks are candidate anchors. ``Batch N Commit Checkpoint``,
+    ``Gate: Manual acceptance [extension]`` and ``Task I.x`` headings have no
+    letter, so a synthesized track can never be placed after one: the anchor is
+    always a track, and the position is always immediately after a track block.
+    A heading with no letter of its own falls to the end of the track run,
+    which is still before any checkpoint or gate.
+    """
+    letter = track_letter(heading)
+    lettered = [
+        (k, lt)
+        for k, (kind, item) in enumerate(items)
+        if (lt := item_letter(kind, item)) is not None
+    ]
+    if not lettered:
+        # No tracks to sit among: the head of the section, right after the
+        # authored intro prose, is where the first track would have gone.
+        return 0
+    before = [k for k, lt in lettered if letter is None or lt < letter]
+    if before:
+        return before[-1] + 1
+    # Sorts before every existing track: immediately ahead of the first one.
+    return lettered[0][0]
+
+
+def build_index(records, prose_lines: list[str],
+                synthesized: list[tuple[str, str]] | None = None) -> str:
     blocks = heading_blocks(prose_lines)
     out: list[str] = []
 
@@ -540,27 +591,62 @@ def build_index(records, prose_lines: list[str]) -> str:
         emitted: set[str] = set()
         inner = [b for b in blocks if b["level"] == 3 and h["i"] < b["i"] < h["end"]]
 
+        # A track heading named by task frontmatter that the prose source does
+        # not already carry is SYNTHESIZED rather than treated as an orphan --
+        # otherwise a brand-new track could only be introduced by hand-editing
+        # the generated file, which is exactly what the task files being the
+        # source of truth is supposed to rule out.
+        #
+        # A synthesized track is the heading plus its derived bullets and
+        # nothing else. Track intro prose is authored, and inventing filler for
+        # it would be worse than leaving it absent.
+        #
+        # Rendering is deliberately routed through ONE code path for both
+        # forms. On the next build the heading is in the prose source (it is in
+        # the generated file now) and arrives as a "block" instead of a
+        # "synth", but the emitted lines are built from the heading text and
+        # the members either way -- so the first build and every build after it
+        # are byte-identical, and --check-only stays stable.
+        rendered = {b["text"][4:] for b in inner}
+        items: list[tuple[str, object]] = [("block", b) for b in inner]
+        missing: list[str] = []
+        for r in rows:
+            th = r["fm"]["track_heading"]
+            if th and th not in rendered and th not in missing:
+                missing.append(th)
+        for th in sorted(missing, key=lambda t: (track_letter(t) or "￿", t)):
+            items.insert(placement_index(items, th), ("synth", th))
+            if synthesized is not None:
+                synthesized.append((key, th))
+
         # Tasks that are their own `### Task I.x` heading (the deployment
         # track) belong to no Track heading. Render them as one bullet list at
         # the position of the first such heading, never as verbatim bodies.
         untracked = [r for r in rows if r["fm"]["track_heading"] is None]
         untracked_done = False
 
-        for b in inner:
-            heading_text = b["text"][4:]
-            if TASK_HEADING_RE.match(b["text"]):
-                if not untracked_done:
-                    for r in untracked:
-                        out.append(task_bullet(r["fm"], r["path"]))
-                        emitted.add(r["fm"]["id"])
-                    out.append("")
-                    out.append("---")
-                    out.append("")
-                    untracked_done = True
-                continue
+        for kind, item in items:
+            if kind == "block":
+                b = item
+                if TASK_HEADING_RE.match(b["text"]):
+                    if not untracked_done:
+                        for r in untracked:
+                            out.append(task_bullet(r["fm"], r["path"]))
+                            emitted.add(r["fm"]["id"])
+                        out.append("")
+                        out.append("---")
+                        out.append("")
+                        untracked_done = True
+                    continue
+                heading_text = b["text"][4:]
+            else:
+                b, heading_text = None, item
             members = [r for r in rows if r["fm"]["track_heading"] == heading_text]
             if members:
-                out.append(b["text"])
+                # `"### " + heading_text` reconstructs `b["text"]` exactly for a
+                # carried-through heading, which is what makes the two paths
+                # produce identical bytes.
+                out.append(f"### {heading_text}")
                 out.append("")
                 for r in members:
                     out.append(task_bullet(r["fm"], r["path"]))
@@ -568,7 +654,7 @@ def build_index(records, prose_lines: list[str]) -> str:
                 out.append("")
                 out.append("---")
                 out.append("")
-            else:
+            elif b is not None:
                 # A gate or commit checkpoint that owns no task: verbatim.
                 out.extend(prose_lines[b["i"] : b["end"]])
 
@@ -664,7 +750,17 @@ def main() -> int:
     print("=" * 72)
 
     prose = read_source(args.prose_source).split("\n")
-    text = build_index(records, prose)
+    synthesized: list[tuple[str, str]] = []
+    text = build_index(records, prose, synthesized)
+
+    # Never synthesize silently. A missing heading means the DOCUMENT'S
+    # STRUCTURE changed, not just its content, and that deserves a human's eye
+    # in a way a re-derived bullet list does not.
+    for key, heading in synthesized:
+        label = "the Deployment Track" if key == "deployment" else f"Batch {key}"
+        print(f"[SYNTHESIZED TRACK] {label}: '### {heading}' is named by task "
+              f"frontmatter but absent from the prose source ({args.prose_source}); "
+              f"the heading was generated and placed among that batch's tracks.")
 
     if args.check_only:
         # The index is GENERATED. A hand-edit to any derived table -- the

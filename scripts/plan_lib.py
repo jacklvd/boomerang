@@ -80,6 +80,20 @@ TASK_HEADING_RE = re.compile(r"^#{3,4} Task ([0-9]+\.[0-9]+[a-z]?|I\.[0-9]+): (.
 TRACK_HEADING_RE = re.compile(r"^### (?:Track ([A-Z]): )?(.*?)(?: \[([a-z]+)\])?$")
 BATCH_HEADING_RE = re.compile(r"^## Batch ([0-9]+)(?::.*)?$")
 
+# ``Track B: USPS access [external]`` -> ``"B"``. Applied to the heading text
+# AFTER the ``### ``. A ``###`` heading that is not a lettered track -- ``Batch
+# 4 Commit Checkpoint``, ``Gate: Manual acceptance [extension]``, ``Task I.1:
+# ...`` -- yields None. Shared so the renderer (which places a synthesized
+# track by letter) and ``split-plan.py --verify`` (which asserts the letters
+# are gapless) cannot disagree about what counts as a lettered track.
+TRACK_LETTER_RE = re.compile(r"^Track ([A-Z]): ")
+
+
+def track_letter(heading_text: str) -> str | None:
+    """The letter of a track heading, given the text after ``### ``."""
+    m = TRACK_LETTER_RE.match(heading_text)
+    return m.group(1) if m else None
+
 TASK_ID_RE = r"(?:I\.[0-9]+|[0-9]+\.[0-9]+[a-z]?)"
 REQ_RE = re.compile(r"^(?:FR-[0-9]+\.[0-9]+\.[0-9]+[a-z]?|NFR-[0-9]+\.[0-9]+)$")
 SECTION_RE = re.compile(r"^§[0-9]+\.[0-9]+$")

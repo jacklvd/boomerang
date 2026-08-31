@@ -289,6 +289,11 @@ workspaces trades a risk reduction for a schedule loss.
 ### Track A: Retailer flow spike [spike]
 
 - [Task 0.1: Walk the retailer return flow by hand and record what is there](tasks/batch-00/0.01-walk-the-retailer-return-flow-by-hand-and-record.md) — prerequisites: none · conflicts: none
+
+---
+
+### Track B: USPS access [external]
+
 - [Task 0.2: File the USPS API access request](tasks/batch-00/0.02-file-the-usps-api-access-request.md) — prerequisites: none · conflicts: none
 
 ---
@@ -1015,7 +1020,7 @@ if either changes.
 
 | Batch | Tasks | Track headings | Conflict pairs |
 |-------|-------|----------------|----------------|
-| 0 | 3 | 2 (A, C) | None |
+| 0 | 3 | 3 (A, B, C) | None |
 | 1 | 5 | 4 (A, B, C, D) | 1.2 ↔ 1.4 |
 | 2 | 8 | 7 (A, B, C, D, E, F, G) | 2.6 ↔ 2.7 |
 | 3 | 18 | 11 (A, B, C, I, D, E, F, G, J, H, K) | 3.1 ↔ 3.2, 3.1 ↔ 3.3, 3.1 ↔ 3.4, 3.2 ↔ 3.3, 3.2 ↔ 3.4, 3.3 ↔ 3.4, 3.9 ↔ 3.10, 3.13 ↔ 3.14, 3.15 ↔ 3.16 |
@@ -1132,7 +1137,7 @@ FR ones.
 
 | Batch | Tasks | Tracks | Theme |
 |-------|-------|--------|-------|
-| 0 | 3 | 2 | De-risking — the retailer flow, USPS access, and Bedrock latency, before anything is built on them |
+| 0 | 3 | 3 | De-risking — the retailer flow, USPS access, and Bedrock latency, before anything is built on them |
 | 1 | 5 | 4 | Scaffolding — both workspaces exist, CI runs, the extension IDs are pinned, coverage is enforced |
 | 2 | 8 | 7 | Foundations — errors, config, logging, shared types, and the test fakes |
 | 3 | 18 | 11 | Leaf modules — wire models, carrier protocol, extraction, ranking, validation, and the frozen contracts |
