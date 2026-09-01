@@ -5,35 +5,21 @@
     scripts/build-plan-index.py --check-only    # cross-check tables, write nothing
 
 Authored prose is carried through VERBATIM from a prose source (by default the
-current index, which retains every preserved section, so the build is
-idempotent and re-runnable). Three things are DERIVED from task frontmatter:
+current index, so the build is idempotent). DERIVED from task frontmatter: the
+Task Status Tracker, the Requirements Traceability matrix, the per-track task
+lists, the Parallelization Summary's derived-facts table, and the Critical
+Path's ``### The dependency floor`` chain.
 
-  * the Task Status Tracker table
-  * the Requirements Traceability matrix
-  * the per-track task lists under each Track heading
-  * a small derived-facts table in the Parallelization Summary
-  * the Critical Path's ``### The dependency floor`` chain and its length
-
-The Critical Path's ``### The makespan the barrier actually buys`` table is
-NOT derived and is carried through verbatim: its rows order tasks that only
-CONFLICT with one another, and choosing that order is authored judgment. It is
-CROSS-CHECKED instead -- see ``plan_lib.check_makespan_table``. The authored
-server-chain sentence under ``### Three things about the shape of this chain``
-is carried through and cross-checked the same way -- see
-``plan_lib.check_server_chain_sentence``.
-
-The derived numbers are also RESTATED in authored argument outside that section
--- the document header and the "Theoretical speedup" paragraph. Those sentences
-stay authored and are cross-checked against what the corpus derives; see
-``plan_lib.check_restated_quantities``.
-
-Every derived table is cross-checked against the hand-written table in the
+Everything else that talks about the corpus stays AUTHORED and is CROSS-CHECKED
+rather than regenerated -- the makespan table, the server-chain sentence, the
+restated quantities, the Batch Execution Overview, the conflict annotations --
+because each interleaves derived fact with judgment a generator would delete.
+Derived tables are also cross-checked against the hand-written tables in the
 baseline commit; disagreements are reported, never silently resolved.
 
-A track heading that task frontmatter names but the prose source does not have
-is SYNTHESIZED (heading plus derived bullets, no invented intro prose) and
-announced on stdout, so a new track can originate in a task file rather than in
-a hand edit to the generated index.
+A track heading that task frontmatter names but the prose source lacks is
+SYNTHESIZED and announced on stdout, so a new track can originate in a task
+file rather than in a hand edit to the generated index.
 """
 
 from __future__ import annotations
@@ -54,6 +40,7 @@ from plan_lib import (  # noqa: E402
     DECLARED_TRACK_COUNT_DIVERGENCES,
     FLOOR_HEADING,
     PLAN_PATH,
+    SORT_LAST,
     TASKS_DIR,
     TASK_HEADING_RE,
     batch_label,
@@ -76,14 +63,6 @@ from plan_lib import (  # noqa: E402
     split_table,
     track_letter,
 )
-
-# ``DECLARED_GAPS`` -- the requirements the plan declares as deliberate gaps --
-# lives in ``plan_lib`` so this renderer and the coverage assertion in
-# ``split-plan.py --verify`` cannot disagree about which gaps are sanctioned.
-# ``DECLARED_TRACK_COUNT_DIVERGENCES`` -- the Plan Summary track counts the
-# corpus is allowed to disagree with -- lives there for the same reason: this
-# cross-check reports them with their stated reason, ``--verify`` asserts the
-# declared set is exactly the observed one.
 
 EN = "–"  # en dash, as used by the original tables
 
@@ -299,18 +278,10 @@ def build_derived_facts_table(records) -> list[str]:
 def build_dependency_floor(records, heading: str) -> list[str]:
     """``### The dependency floor``: the longest prerequisite chain, rendered.
 
-    Every part of the block is derived. The short label is the task's ``title``
-    and the annotation is its ``package``, both verbatim from frontmatter --
-    the hand-written block carried ABBREVIATIONS of both (``8.6 ... [browser]``
-    for a task whose package is ``docs/``; ``[repo]`` for ``repository root``;
-    ``src/types and the WXT scaffold`` for a task titled ``WXT project scaffold
-    and MV3 manifest``). Those abbreviations are not reconstructible from the
-    corpus, so they are not reproduced: a derived block that quietly kept
-    hand-written text would be the duplication this exercise removes.
-
-    Columns are padded to the widest entry, so the block is a pure function of
-    the chain -- no width is baked in, and adding a longer title just widens
-    the column.
+    Labels and annotations are ``title`` and ``package`` verbatim, not the
+    baseline's hand-written abbreviations of them, which are not reconstructible
+    from the corpus. Columns pad to the widest entry, so the block is a pure
+    function of the chain and no width is baked in.
     """
     by = {r["fm"]["id"]: r["fm"] for r in records}
     result = longest_chain(records)
@@ -330,11 +301,9 @@ def build_dependency_floor(records, heading: str) -> list[str]:
     out.append(f"**Critical path length:** {result.length} tasks.")
     out.append("")
 
-    # THE MAXIMAL CHAIN IS NOT UNIQUE, and a block that shows one chain without
-    # saying so reads as if it were. The count and the tie-break are stated in
-    # the document for the same reason they are stated in the code: a reader
-    # comparing this chain against their own walk needs to know which of the
-    # equally-long ones they are looking at.
+    # The maximal chain is not unique, so the count and the tie-break are stated
+    # in the document: a reader comparing it against their own walk has to know
+    # which of the equally-long chains this one is.
     if result.count == 1:
         tie = "It is the only chain of that length."
     else:
@@ -615,24 +584,12 @@ def item_letter(kind: str, item) -> str | None:
 def placement_index(items: list[tuple[str, object]], heading: str) -> int:
     """Where a synthesized track heading belongs among a batch's `###` blocks.
 
-    ORDERING IS NOT PURELY ALPHABETICAL IN THIS DOCUMENT. Batch 3 runs
-    A B C I D E F G J H K and Batch 4 runs A B E C D -- later-added tracks were
-    filed with their scope siblings (server tracks, then extension, then repo)
-    rather than by letter. So "insert before the first track whose letter is
-    greater" would misfile: a new Batch 3 track E would land before Track I,
-    splitting it from D and F.
-
-    The rule used instead is: anchor on the LAST lettered track that sorts
-    before the new letter, and go immediately after it. On a letter-ordered
-    batch the two rules agree; on Batches 3 and 4 this one keeps the new track
-    beside its alphabetical predecessor wherever that predecessor actually sits.
-
-    Only lettered tracks are candidate anchors. ``Batch N Commit Checkpoint``,
-    ``Gate: Manual acceptance [extension]`` and ``Task I.x`` headings have no
-    letter, so a synthesized track can never be placed after one: the anchor is
-    always a track, and the position is always immediately after a track block.
-    A heading with no letter of its own falls to the end of the track run,
-    which is still before any checkpoint or gate.
+    Track order is NOT alphabetical here (Batch 3 runs A B C I D E F G J H K),
+    so "insert before the first greater letter" would misfile. The rule is:
+    go immediately after the LAST lettered track that sorts before the new one,
+    which keeps it beside its alphabetical predecessor wherever that sits. Only
+    lettered tracks are candidate anchors, so a synthesized track never lands
+    after a checkpoint, a gate or a ``Task I.x`` heading.
     """
     letter = track_letter(heading)
     lettered = [
@@ -689,22 +646,12 @@ def build_index(records, prose_lines: list[str],
         emitted: set[str] = set()
         inner = [b for b in blocks if b["level"] == 3 and h["i"] < b["i"] < h["end"]]
 
-        # A track heading named by task frontmatter that the prose source does
-        # not already carry is SYNTHESIZED rather than treated as an orphan --
-        # otherwise a brand-new track could only be introduced by hand-editing
-        # the generated file, which is exactly what the task files being the
-        # source of truth is supposed to rule out.
-        #
-        # A synthesized track is the heading plus its derived bullets and
-        # nothing else. Track intro prose is authored, and inventing filler for
-        # it would be worse than leaving it absent.
-        #
-        # Rendering is deliberately routed through ONE code path for both
-        # forms. On the next build the heading is in the prose source (it is in
-        # the generated file now) and arrives as a "block" instead of a
-        # "synth", but the emitted lines are built from the heading text and
-        # the members either way -- so the first build and every build after it
-        # are byte-identical, and --check-only stays stable.
+        # A track heading the frontmatter names but the prose source lacks is
+        # SYNTHESIZED (heading plus derived bullets, no invented intro prose),
+        # so a new track can originate in a task file. Both forms render through
+        # one code path: on the next build the heading arrives as a "block"
+        # rather than a "synth" and must emit identical lines, or --check-only
+        # would never settle.
         rendered = {b["text"][4:] for b in inner}
         items: list[tuple[str, object]] = [("block", b) for b in inner]
         missing: list[str] = []
@@ -712,7 +659,7 @@ def build_index(records, prose_lines: list[str],
             th = r["fm"]["track_heading"]
             if th and th not in rendered and th not in missing:
                 missing.append(th)
-        for th in sorted(missing, key=lambda t: (track_letter(t) or "￿", t)):
+        for th in sorted(missing, key=lambda t: (track_letter(t) or SORT_LAST, t)):
             items.insert(placement_index(items, th), ("synth", th))
             if synthesized is not None:
                 synthesized.append((key, th))
@@ -851,18 +798,16 @@ def main() -> int:
     synthesized: list[tuple[str, str]] = []
     text = build_index(records, prose, synthesized)
 
-    # Never synthesize silently. A missing heading means the DOCUMENT'S
-    # STRUCTURE changed, not just its content, and that deserves a human's eye
-    # in a way a re-derived bullet list does not.
+    # Never synthesize silently: a missing heading is a change in the document's
+    # STRUCTURE, which deserves a human's eye in a way a bullet list does not.
     for key, heading in synthesized:
         label = "the Deployment Track" if key == "deployment" else f"Batch {key}"
         print(f"[SYNTHESIZED TRACK] {label}: '### {heading}' is named by task "
               f"frontmatter but absent from the prose source ({args.prose_source}); "
               f"the heading was generated and placed among that batch's tracks.")
 
-    # The makespan table is AUTHORED and stays authored; this is the
-    # informational half of its cross-check. ``split-plan.py --verify`` runs
-    # the same function as a hard gate, the same split as the track counts.
+    # The five checks below print findings but do not fail the build; the same
+    # functions run as hard gates in ``split-plan.py --verify``.
     print()
     print("=" * 72)
     print("MAKESPAN TABLE CHECK (authored analysis, cross-checked not regenerated)")
@@ -878,8 +823,6 @@ def main() -> int:
               "the DAG floor;\n       the stated total matches the column")
     print("=" * 72)
 
-    # The server-chain sentence is AUTHORED prose about the corpus, so it can
-    # go stale the way a hand-written table can. Same informational/gate split.
     print()
     print("=" * 72)
     print("SERVER CHAIN SENTENCE CHECK (authored prose, cross-checked not regenerated)")
@@ -896,9 +839,6 @@ def main() -> int:
               "with it")
     print("=" * 72)
 
-    # The derived numbers are restated in authored argument outside the
-    # Critical Path section; that prose stays authored, so it is cross-checked
-    # rather than regenerated. Same informational/gate split as the two above.
     print()
     print("=" * 72)
     print("RESTATED QUANTITY CHECK (authored prose, cross-checked not regenerated)")
@@ -915,10 +855,6 @@ def main() -> int:
               "outside a declared site")
     print("=" * 72)
 
-    # The Batch Execution Overview is AUTHORED and is carried through this
-    # renderer VERBATIM -- it interleaves derived schedule facts with judgment
-    # that exists nowhere in frontmatter, so generating it would delete the
-    # judgment. Same informational/gate split as the tables above.
     print()
     print("=" * 72)
     print("BATCH EXECUTION OVERVIEW CHECK (authored schedule, carried through verbatim)")
@@ -935,9 +871,6 @@ def main() -> int:
               "every 'after' claim is a real edge")
     print("=" * 72)
 
-    # Conflict annotations are authored prose on a machine-read field. The
-    # field says two tasks are mutually exclusive; only the prose says what
-    # over. Same informational/gate split.
     print()
     print("=" * 72)
     print("CONFLICT ANNOTATION CHECK (an undirected mutex has to name its collision)")
@@ -954,11 +887,9 @@ def main() -> int:
     print("=" * 72)
 
     if args.check_only:
-        # The index is GENERATED. A hand-edit to any derived table -- the
-        # tracker, the traceability matrix, the per-track bullet lists, the
-        # Plan Summary counts -- is erased by the next rebuild, so it is a
-        # silent divergence between what a reader sees and what the corpus
-        # says. Rebuilding into memory and comparing catches that.
+        # A hand-edit to any derived table is erased by the next rebuild, so it
+        # is a silent divergence between what a reader sees and what the corpus
+        # says. Rebuilding into memory and diffing catches it.
         current = Path(args.out).read_text() if Path(args.out).exists() else ""
         stale = current != text
         print()
