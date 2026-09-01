@@ -119,6 +119,12 @@ compromised into the other's capabilities.
 Order ingestion comes from a content script reading retailer "Your Orders" pages. Gmail is out of
 scope in every form, API and scraping alike.
 
+The first reason survives every other one: **Gmail is the wrong page to read even if it were
+free.** A receipt email tells you an order happened, not whether it can still be returned. The
+order page carries authoritative status, return eligibility, and the entry point into the return
+flow — the three things the agent acts on. There is shipped Chrome Web Store precedent for the
+technique.
+
 Every Gmail scope that reads content or metadata is *restricted* — including `gmail.metadata`
 (downgrading from `gmail.readonly` buys a narrower footprint and an easier story, not a cheaper
 process). That means app verification, then a CASA security assessment: ~$540–$1,800/yr in
@@ -129,13 +135,22 @@ user data from or through a server" needs the annual third-party assessment. Our
 forwarding content to Bedrock lands squarely inside it, and "we don't persist anything" doesn't
 help.
 
-Order pages are also better on the merits — authoritative status, return eligibility, and the
-entry point to the return flow, none of which a receipt email has. There is shipped Chrome Web
-Store precedent for the technique.
+Scraping `mail.google.com` needs no scope, and skipping the API is not escaping policy. Chrome Web
+Store **Limited Use** governs every byte of user data the extension handles, not only data
+obtained through a Google API, and tightened on 1 August 2026: collection must be strictly
+necessary to the single disclosed purpose, cross-purpose reuse prohibited, prominent disclosure
+for every collection. "Strictly necessary to a returns tool" is arguable for an orders page and a
+far harder case for a user's entire inbox.
+
+Web Store review is the only distribution gate — there is no second channel — and the Bedrock
+hop is already the hardest question in ours, since comparable order-scraping extensions advertise
+that they run locally and send nothing anywhere. A `mail.google.com` host permission combines that
+with the broad-host-permission flag that draws in-depth review, on a DOM with the same obfuscated
+virtualized character D3 refuses in Calendar.
 
 *Costs us:* no ambient inbox awareness. We learn about an order when the user visits the order page.
-*Reopens if:* unattended background monitoring becomes non-negotiable, or per-retailer parser
-maintenance outgrows the annual fee.
+*Reopens if:* unattended background monitoring becomes non-negotiable — ambient awareness is the
+one thing an order page structurally cannot provide, and no parser improves it into existence.
 
 ## D2 — Write calendar events through a prefilled URL
 
