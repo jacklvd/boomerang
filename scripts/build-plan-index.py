@@ -5,16 +5,21 @@
     scripts/build-plan-index.py --check-only    # cross-check tables, write nothing
 
 Authored prose is carried through VERBATIM from a prose source (by default the
-current index, which retains every preserved section, so the build is
-idempotent and re-runnable). Three things are DERIVED from task frontmatter:
+current index, so the build is idempotent). DERIVED from task frontmatter: the
+Task Status Tracker, the Requirements Traceability matrix, the per-track task
+lists, the Parallelization Summary's derived-facts table, and the Critical
+Path's ``### The dependency floor`` chain.
 
-  * the Task Status Tracker table
-  * the Requirements Traceability matrix
-  * the per-track task lists under each Track heading
-  * a small derived-facts table in the Parallelization Summary
-
-Every derived table is cross-checked against the hand-written table in the
+Everything else that talks about the corpus stays AUTHORED and is CROSS-CHECKED
+rather than regenerated -- the makespan table, the server-chain sentence, the
+restated quantities, the Batch Execution Overview, the conflict annotations --
+because each interleaves derived fact with judgment a generator would delete.
+Derived tables are also cross-checked against the hand-written tables in the
 baseline commit; disagreements are reported, never silently resolved.
+
+A track heading that task frontmatter names but the prose source lacks is
+SYNTHESIZED and announced on stdout, so a new track can originate in a task
+file rather than in a hand edit to the generated index.
 """
 
 from __future__ import annotations
@@ -28,87 +33,43 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from plan_lib import (  # noqa: E402
+    ARROW,
     BASELINE_REF,
+    CRITICAL_PATH_HEADING,
     DECLARED_GAPS,
+    DECLARED_TRACK_COUNT_DIVERGENCES,
+    FLOOR_HEADING,
     PLAN_PATH,
+    SORT_LAST,
     TASKS_DIR,
-    HEADING_RE,
     TASK_HEADING_RE,
+    batch_label,
+    batch_order,
+    check_batch_overview,
+    check_conflict_annotations,
+    check_makespan_table,
+    check_restated_quantities,
+    check_server_chain_sentence,
+    classify_track_count_divergences,
+    find_block,
+    heading_blocks,
+    id_key,
     load_tasks_from_files,
+    longest_chain,
     parse_id_list,
+    parse_table,
     read_source,
     requirement_ids_from_doc,
+    split_table,
+    track_letter,
 )
-
-# ``DECLARED_GAPS`` -- the requirements the plan declares as deliberate gaps --
-# lives in ``plan_lib`` so this renderer and the coverage assertion in
-# ``split-plan.py --verify`` cannot disagree about which gaps are sanctioned.
 
 EN = "–"  # en dash, as used by the original tables
 
 
 # --------------------------------------------------------------------------
-# Document structure
-# --------------------------------------------------------------------------
-
-def heading_blocks(lines: list[str]) -> list[dict]:
-    """Every heading with the line range of the block it owns."""
-    idx = []
-    for i, line in enumerate(lines):
-        m = HEADING_RE.match(line)
-        if m:
-            idx.append({"i": i, "level": len(m.group(1)), "text": line})
-    for n, h in enumerate(idx):
-        end = len(lines)
-        for later in idx[n + 1 :]:
-            if later["level"] <= h["level"]:
-                end = later["i"]
-                break
-        h["end"] = end
-        h["inner_end"] = idx[n + 1]["i"] if n + 1 < len(idx) else len(lines)
-    return idx
-
-
-def find_block(blocks, prefix):
-    for h in blocks:
-        if h["text"].startswith(prefix):
-            return h
-    raise KeyError(prefix)
-
-
-def split_table(body: list[str]) -> tuple[list[str], list[str], list[str]]:
-    """Split a section body into (prose_before, table, prose_after)."""
-    start = next((i for i, l in enumerate(body) if l.startswith("|")), None)
-    if start is None:
-        return body, [], []
-    end = start
-    while end < len(body) and body[end].startswith("|"):
-        end += 1
-    return body[:start], body[start:end], body[end:]
-
-
-def parse_table(rows: list[str]) -> list[list[str]]:
-    """Parse a markdown table into cell lists, dropping the separator row."""
-    out = []
-    for row in rows:
-        if re.match(r"^\|[\s:|-]+\|$", row):
-            continue
-        cells = [c.strip() for c in row.strip().strip("|").split("|")]
-        out.append(cells)
-    return out
-
-
-# --------------------------------------------------------------------------
 # Formatting helpers
 # --------------------------------------------------------------------------
-
-def id_key(task_id: str) -> tuple:
-    if task_id.startswith("I."):
-        return (98, int(task_id.split(".")[1]), "")
-    major, minor = task_id.split(".")
-    m = re.match(r"^([0-9]+)([a-z]*)$", minor)
-    return (int(major), int(m.group(1)), m.group(2))
-
 
 def compress_ids(ids: list[str]) -> str:
     """['3.1'..'3.10','3.12'..'3.17'] -> '3.1-3.10, 3.12-3.17' (en dashes)."""
@@ -146,16 +107,6 @@ def plain_ids(ids: list[str]) -> str:
 # --------------------------------------------------------------------------
 # Derived tables
 # --------------------------------------------------------------------------
-
-def batch_order(records) -> list[str]:
-    """Batch keys in document order (0..6, deployment, 7..10)."""
-    seen = []
-    for r in records:  # records are already in document order
-        key = str(r["fm"]["batch"])
-        if key not in seen:
-            seen.append(key)
-    return seen
-
 
 def tracker_rows(records) -> list[dict]:
     """Tracker order: batch in document order, then numeric task id."""
@@ -321,6 +272,83 @@ def build_derived_facts_table(records) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# The Critical Path's dependency floor
+# --------------------------------------------------------------------------
+
+def build_dependency_floor(records, heading: str) -> list[str]:
+    """``### The dependency floor``: the longest prerequisite chain, rendered.
+
+    Labels and annotations are ``title`` and ``package`` verbatim, not the
+    baseline's hand-written abbreviations of them, which are not reconstructible
+    from the corpus. Columns pad to the widest entry, so the block is a pure
+    function of the chain and no width is baked in.
+    """
+    by = {r["fm"]["id"]: r["fm"] for r in records}
+    result = longest_chain(records)
+    width_id = max(len(t) for t in result.chain)
+    width_title = max(len(by[t]["title"]) for t in result.chain)
+
+    out = [heading, "", "```"]
+    for n, tid in enumerate(result.chain):
+        # The first row has no arrow; the rest are indented to the same id
+        # column so the chain reads as one ladder.
+        lead = " " * (len(ARROW) + 2) if n == 0 else f" {ARROW} "
+        title = by[tid]["title"].ljust(width_title)
+        package = by[tid]["package"] or "—"
+        out.append(f"{lead}{tid:>{width_id}}  {title}  [{package}]")
+    out.append("```")
+    out.append("")
+    out.append(f"**Critical path length:** {result.length} tasks.")
+    out.append("")
+
+    # The maximal chain is not unique, so the count and the tie-break are stated
+    # in the document: a reader comparing it against their own walk has to know
+    # which of the equally-long chains this one is.
+    if result.count == 1:
+        tie = "It is the only chain of that length."
+    else:
+        tie = (
+            f"{result.count} distinct chains share that length; the one shown starts at "
+            f"the lowest-numbered\ndeepest task and walks back by the lowest-numbered "
+            f"prerequisite still on a maximal chain."
+        )
+    out.append(
+        "**Derived from the task files.** The chain is the longest path through the "
+        "`prerequisites`\ngraph; `conflicts_with` is an undirected mutex, not an edge, "
+        "so it orders nothing here.\n" + tie
+    )
+    out.append("")
+    return "\n".join(out).split("\n")
+
+
+def render_critical_path(records, prose_lines: list[str], blocks) -> list[str]:
+    """The Critical Path section: authored prose verbatim, the floor rebuilt.
+
+    Only the ``### The dependency floor`` sub-block is regenerated. The intro
+    paragraph, the makespan table and its conclusion, and ``### Three things
+    about the shape of this chain`` are AUTHORED ANALYSIS and are carried
+    through untouched -- including the server's own longest chain, which the
+    derived walk disagrees with and which is therefore the user's to settle,
+    not this renderer's to overwrite.
+    """
+    h = find_block(blocks, CRITICAL_PATH_HEADING)
+    section = prose_lines[h["i"]: h["end"]]
+    try:
+        floor = find_block(heading_blocks(section), FLOOR_HEADING)
+    except KeyError:
+        raise SystemExit(
+            f"{CRITICAL_PATH_HEADING}: no '{FLOOR_HEADING}' sub-heading in the prose "
+            f"source. The chain is generated into that block; without it there is "
+            f"nowhere to put it."
+        )
+    return (
+        section[: floor["i"]]
+        + build_dependency_floor(records, section[floor["i"]])
+        + section[floor["end"]:]
+    )
+
+
+# --------------------------------------------------------------------------
 # Cross-check against the hand-written baseline tables
 # --------------------------------------------------------------------------
 
@@ -439,7 +467,15 @@ def cross_check(records, baseline_text: str) -> list[str]:
     h = find_block(blocks, "## Plan Summary")
     _, table, _ = split_table(lines[h["i"] + 1 : h["end"]])
     order = batch_order(records)
+    # Track-count divergences are classified against the declared allowlist in
+    # ``plan_lib``, so a sanctioned one is reported WITH ITS REASON and an
+    # unsanctioned one stands out. ``split-plan.py --verify`` runs the same
+    # classification as a hard gate; this is the informational half.
+    observed, undeclared, mismatched, stale = classify_track_count_divergences(
+        records, baseline_text
+    )
     n_ok = 0
+    n_declared = 0
     total_rows = 0
     for cells in parse_table(table)[1:]:
         label = cells[0].strip("*` ")
@@ -462,15 +498,52 @@ def cross_check(records, baseline_text: str) -> list[str]:
         if c_tasks != len(rows_b):
             findings.append(f"- **Batch {label} task count**: summary says {c_tasks}, corpus has {len(rows_b)}")
             row_ok = False
-        if c_tracks != len(tracks):
-            findings.append(
-                f"- **Batch {label} track count**: summary says {c_tracks}, "
+        if key in observed:
+            entry = DECLARED_TRACK_COUNT_DIVERGENCES.get(key)
+            head = (
+                f"- **{batch_label(key)} track count**: summary says {c_tracks}, "
                 f"document has {len(tracks)} `###` track heading(s): "
                 f"{sorted(tracks) if tracks else '(none)'}"
             )
-            row_ok = False
+            if entry is None:
+                findings.append(
+                    head + "\n    - **UNDECLARED DIVERGENCE** — not in "
+                    "plan_lib.DECLARED_TRACK_COUNT_DIVERGENCES. A lost track looks "
+                    "exactly like this; investigate, then declare it with a reason."
+                )
+                row_ok = False
+            elif key in mismatched:
+                findings.append(
+                    head + f"\n    - **DECLARED ENTRY NO LONGER MATCHES** — the "
+                    f"allowlist reconciles {entry.baseline} against {entry.corpus}, "
+                    f"not {c_tracks} against {len(tracks)}. The stated reason no "
+                    f"longer describes what is here and must be revisited.\n"
+                    f"    - declared reason: {entry.reason}"
+                )
+                row_ok = False
+            else:
+                findings.append(
+                    head + f"\n    - DECLARED, reconciled {entry.baseline} against "
+                    f"{entry.corpus}: {entry.reason}"
+                )
+                n_declared += 1
         n_ok += row_ok
-    findings.append(f"- {n_ok}/{total_rows} Plan Summary rows agree with the corpus")
+    for key in stale:
+        entry = DECLARED_TRACK_COUNT_DIVERGENCES[key]
+        findings.append(
+            f"- **{batch_label(key)} track count**: **STALE DECLARATION** — the "
+            f"allowlist reconciles {entry.baseline} against {entry.corpus} "
+            f"({entry.reason}), but the summary and the corpus now agree. Delete "
+            f"the entry."
+        )
+    findings.append(
+        f"- {n_ok}/{total_rows} Plan Summary rows agree with the corpus or are "
+        f"reconciled by a declared divergence"
+        + (f" ({n_declared} declared)" if n_declared else "")
+        + (f"; {len(undeclared)} UNDECLARED" if undeclared else "")
+        + (f"; {len(mismatched)} declared entry/entries NO LONGER MATCHING" if mismatched else "")
+        + (f"; {len(stale)} STALE declaration(s)" if stale else "")
+    )
     return findings
 
 
@@ -503,7 +576,40 @@ def drop_generated(lines: list[str]) -> list[str]:
     return lines
 
 
-def build_index(records, prose_lines: list[str]) -> str:
+def item_letter(kind: str, item) -> str | None:
+    """Track letter of a render item, whichever form it is in."""
+    return track_letter(item if kind == "synth" else item["text"][4:])
+
+
+def placement_index(items: list[tuple[str, object]], heading: str) -> int:
+    """Where a synthesized track heading belongs among a batch's `###` blocks.
+
+    Track order is NOT alphabetical here (Batch 3 runs A B C I D E F G J H K),
+    so "insert before the first greater letter" would misfile. The rule is:
+    go immediately after the LAST lettered track that sorts before the new one,
+    which keeps it beside its alphabetical predecessor wherever that sits. Only
+    lettered tracks are candidate anchors, so a synthesized track never lands
+    after a checkpoint, a gate or a ``Task I.x`` heading.
+    """
+    letter = track_letter(heading)
+    lettered = [
+        (k, lt)
+        for k, (kind, item) in enumerate(items)
+        if (lt := item_letter(kind, item)) is not None
+    ]
+    if not lettered:
+        # No tracks to sit among: the head of the section, right after the
+        # authored intro prose, is where the first track would have gone.
+        return 0
+    before = [k for k, lt in lettered if letter is None or lt < letter]
+    if before:
+        return before[-1] + 1
+    # Sorts before every existing track: immediately ahead of the first one.
+    return lettered[0][0]
+
+
+def build_index(records, prose_lines: list[str],
+                synthesized: list[tuple[str, str]] | None = None) -> str:
     blocks = heading_blocks(prose_lines)
     out: list[str] = []
 
@@ -540,27 +646,52 @@ def build_index(records, prose_lines: list[str]) -> str:
         emitted: set[str] = set()
         inner = [b for b in blocks if b["level"] == 3 and h["i"] < b["i"] < h["end"]]
 
+        # A track heading the frontmatter names but the prose source lacks is
+        # SYNTHESIZED (heading plus derived bullets, no invented intro prose),
+        # so a new track can originate in a task file. Both forms render through
+        # one code path: on the next build the heading arrives as a "block"
+        # rather than a "synth" and must emit identical lines, or --check-only
+        # would never settle.
+        rendered = {b["text"][4:] for b in inner}
+        items: list[tuple[str, object]] = [("block", b) for b in inner]
+        missing: list[str] = []
+        for r in rows:
+            th = r["fm"]["track_heading"]
+            if th and th not in rendered and th not in missing:
+                missing.append(th)
+        for th in sorted(missing, key=lambda t: (track_letter(t) or SORT_LAST, t)):
+            items.insert(placement_index(items, th), ("synth", th))
+            if synthesized is not None:
+                synthesized.append((key, th))
+
         # Tasks that are their own `### Task I.x` heading (the deployment
         # track) belong to no Track heading. Render them as one bullet list at
         # the position of the first such heading, never as verbatim bodies.
         untracked = [r for r in rows if r["fm"]["track_heading"] is None]
         untracked_done = False
 
-        for b in inner:
-            heading_text = b["text"][4:]
-            if TASK_HEADING_RE.match(b["text"]):
-                if not untracked_done:
-                    for r in untracked:
-                        out.append(task_bullet(r["fm"], r["path"]))
-                        emitted.add(r["fm"]["id"])
-                    out.append("")
-                    out.append("---")
-                    out.append("")
-                    untracked_done = True
-                continue
+        for kind, item in items:
+            if kind == "block":
+                b = item
+                if TASK_HEADING_RE.match(b["text"]):
+                    if not untracked_done:
+                        for r in untracked:
+                            out.append(task_bullet(r["fm"], r["path"]))
+                            emitted.add(r["fm"]["id"])
+                        out.append("")
+                        out.append("---")
+                        out.append("")
+                        untracked_done = True
+                    continue
+                heading_text = b["text"][4:]
+            else:
+                b, heading_text = None, item
             members = [r for r in rows if r["fm"]["track_heading"] == heading_text]
             if members:
-                out.append(b["text"])
+                # `"### " + heading_text` reconstructs `b["text"]` exactly for a
+                # carried-through heading, which is what makes the two paths
+                # produce identical bytes.
+                out.append(f"### {heading_text}")
                 out.append("")
                 for r in members:
                     out.append(task_bullet(r["fm"], r["path"]))
@@ -568,7 +699,7 @@ def build_index(records, prose_lines: list[str]) -> str:
                 out.append("")
                 out.append("---")
                 out.append("")
-            else:
+            elif b is not None:
                 # A gate or commit checkpoint that owns no task: verbatim.
                 out.extend(prose_lines[b["i"] : b["end"]])
 
@@ -603,7 +734,7 @@ def build_index(records, prose_lines: list[str]) -> str:
     ]
     out.extend(after)
 
-    verbatim(find_block(blocks, "## Critical Path"))
+    out.extend(render_critical_path(records, prose_lines, blocks))
 
     # ---- Parallelization Summary ---------------------------------------
     h = find_block(blocks, "## Parallelization Summary")
@@ -664,14 +795,101 @@ def main() -> int:
     print("=" * 72)
 
     prose = read_source(args.prose_source).split("\n")
-    text = build_index(records, prose)
+    synthesized: list[tuple[str, str]] = []
+    text = build_index(records, prose, synthesized)
+
+    # Never synthesize silently: a missing heading is a change in the document's
+    # STRUCTURE, which deserves a human's eye in a way a bullet list does not.
+    for key, heading in synthesized:
+        label = "the Deployment Track" if key == "deployment" else f"Batch {key}"
+        print(f"[SYNTHESIZED TRACK] {label}: '### {heading}' is named by task "
+              f"frontmatter but absent from the prose source ({args.prose_source}); "
+              f"the heading was generated and placed among that batch's tracks.")
+
+    # The five checks below print findings but do not fail the build; the same
+    # functions run as hard gates in ``split-plan.py --verify``.
+    print()
+    print("=" * 72)
+    print("MAKESPAN TABLE CHECK (authored analysis, cross-checked not regenerated)")
+    print("=" * 72)
+    findings, info = check_makespan_table(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every id named exists; every → edge is a prerequisite edge or a "
+              "declared\n       conflict serialisation; no row claims fewer slots than "
+              "the DAG floor;\n       the stated total matches the column")
+    print("=" * 72)
+
+    print()
+    print("=" * 72)
+    print("SERVER CHAIN SENTENCE CHECK (authored prose, cross-checked not regenerated)")
+    print("=" * 72)
+    findings, info = check_server_chain_sentence(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every id it names exists; every → is a prerequisite edge; every "
+              "task on it\n       is track_scope: server; its length is the derived "
+              "server-only maximum and\n       the count the sentence states agrees "
+              "with it")
+    print("=" * 72)
+
+    print()
+    print("=" * 72)
+    print("RESTATED QUANTITY CHECK (authored prose, cross-checked not regenerated)")
+    print("=" * 72)
+    findings, info = check_restated_quantities(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every declared restatement site is locatable; every number it "
+              "states is a\n       correct rounding of the derived value at the "
+              "precision the prose states;\n       no known-shape restatement sits "
+              "outside a declared site")
+    print("=" * 72)
+
+    print()
+    print("=" * 72)
+    print("BATCH EXECUTION OVERVIEW CHECK (authored schedule, carried through verbatim)")
+    print("=" * 72)
+    findings, info = check_batch_overview(records, text)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every id it names exists; every task sits under the batch and "
+              "track letter\n       its frontmatter gives it and none is missing; every "
+              "-> is a prerequisite\n       edge or a declared conflict serialisation; "
+              "every 'after' claim is a real edge")
+    print("=" * 72)
+
+    print()
+    print("=" * 72)
+    print("CONFLICT ANNOTATION CHECK (an undirected mutex has to name its collision)")
+    print("=" * 72)
+    findings, info = check_conflict_annotations(records)
+    for line in info:
+        print(f"[INFO] {line}")
+    for line in findings:
+        print(f"[FAIL] {line}")
+    if not findings:
+        print("[PASS] every task declaring a conflict names a path in backticks, or is "
+              "declared\n       unreviewable with a reason and a way to resolve it; the "
+              "body's\n       '**Conflicts with:**' line and conflicts_with_raw agree")
+    print("=" * 72)
 
     if args.check_only:
-        # The index is GENERATED. A hand-edit to any derived table -- the
-        # tracker, the traceability matrix, the per-track bullet lists, the
-        # Plan Summary counts -- is erased by the next rebuild, so it is a
-        # silent divergence between what a reader sees and what the corpus
-        # says. Rebuilding into memory and comparing catches that.
+        # A hand-edit to any derived table is erased by the next rebuild, so it
+        # is a silent divergence between what a reader sees and what the corpus
+        # says. Rebuilding into memory and diffing catches it.
         current = Path(args.out).read_text() if Path(args.out).exists() else ""
         stale = current != text
         print()

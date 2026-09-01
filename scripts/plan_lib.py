@@ -1,119 +1,175 @@
-"""Shared parsing for the Boomerang implementation plan.
+"""The task corpus: parse the plan into Tasks, and read them back from disk.
 
 Used by ``split-plan.py`` (plan -> per-task files) and ``build-plan-index.py``
 (per-task files -> regenerated ``plan/boomerang-plan.md``).
 
-Design notes that matter for correctness:
+Two invariants make that round trip exact: a task body is copied VERBATIM into
+its task file, so the only difference is the additive YAML frontmatter; and
+frontmatter scalars are emitted via ``json.dumps``, so the block is valid YAML
+that ``json.loads`` reads back without a YAML dependency.
 
-* A task body is copied VERBATIM into its task file. Nothing is lifted *out* of
-  the body -- the YAML frontmatter is purely additive. That makes the round-trip
-  diff exact modulo the frontmatter block alone, and it means prose attached to
-  a metadata line (``Conflicts with: Task 4.7 (both touch src/storage/index.ts)``)
-  can never be lost.
-* Frontmatter scalars are emitted via ``json.dumps``. YAML 1.2 is a JSON
-  superset, so the output is valid YAML *and* can be read back with
-  ``json.loads`` without a YAML dependency.
+This module is also the IMPORT SURFACE both scripts use. The pieces live next
+door -- ``config`` (paths, tokens, patterns), ``models`` (Task and the record
+types), ``declared`` (the authored allowlists), ``document`` (headings, tables,
+named blocks), ``graph`` (the prerequisite DAG) and ``checks`` (the five
+cross-checks) -- and everything either script needs is re-exported here, so a
+consumer keeps one import and the split stays an implementation detail.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
-import unicodedata
-from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PLAN_PATH = REPO_ROOT / "plan" / "boomerang-plan.md"
-TASKS_DIR = REPO_ROOT / "plan" / "tasks"
-REQUIREMENTS_DOC = REPO_ROOT / "design" / "boomerang-requirements.md"
-BASELINE_REF = "cf7e210"
-
-# AUTHORED, NOT DERIVED. The requirements the plan declares as deliberate gaps,
-# with the annotation the hand-written traceability table carried. This is the
-# ONLY sanctioned way for a requirement to have no covering task: the coverage
-# check in ``split-plan.py --verify`` fails on any other uncovered id, and
-# ``build-plan-index.py`` renders any other uncovered id as a loud cell.
-# Adding an entry here is a deliberate, reviewable act.
-DECLARED_GAPS = {
-    "FR-3.6.2": "**— (deliberate gap)**",
-    "FR-3.6.3": "**— (deliberate gap, out of PoC scope)**",
-}
-
-# Requirement ids are declared by their own heading in the requirements doc.
-REQ_HEADING_RE = re.compile(r"^#{2,4} ((?:FR|NFR)-[0-9.]+[a-z]?)\b")
-
-# The eight bold metadata fields every task carries, in document order.
-METADATA_FIELDS = [
-    "Prerequisites",
-    "Conflicts with",
-    "Parallel with",
-    "Package",
-    "Objective",
-    "Instructions",
-    "Verification",
-    "Requirements covered",
-]
-
-# Tasks that the plan's own traceability prose classifies as integration tests /
-# CI assertions rather than implementation work: "Tasks 7.2-7.6 drive the
-# assembled FastAPI app, Tasks 9.2-9.7 drive the assembled extension, and Tasks
-# 10.1 and 10.3 are CI assertions about the shipped bundle and the module
-# graph", plus I.2 (the live smoke test) which the NFR-6.5/6.6/6.7 rows list in
-# the integration column. This is the one classification that is not derivable
-# from a task body; it decides only WHICH COLUMN a task lands in, never whether
-# it appears at all.
-INTEGRATION_TASK_IDS = {
-    "7.2", "7.3", "7.4", "7.5", "7.6",
-    "9.2", "9.3", "9.4", "9.5", "9.6", "9.7",
-    "10.1", "10.3",
-    "I.2",
-}
-
-# Tasks that are human gates, not automated evidence. The plan states Task 8.6
-# is deliberately absent from the traceability table.
-GATE_TASK_IDS = {"8.6"}
-
-HEADING_RE = re.compile(r"^(#{1,6}) (.*)$")
-TASK_HEADING_RE = re.compile(r"^#{3,4} Task ([0-9]+\.[0-9]+[a-z]?|I\.[0-9]+): (.*)$")
-TRACK_HEADING_RE = re.compile(r"^### (?:Track ([A-Z]): )?(.*?)(?: \[([a-z]+)\])?$")
-BATCH_HEADING_RE = re.compile(r"^## Batch ([0-9]+)(?::.*)?$")
-
-TASK_ID_RE = r"(?:I\.[0-9]+|[0-9]+\.[0-9]+[a-z]?)"
-REQ_RE = re.compile(r"^(?:FR-[0-9]+\.[0-9]+\.[0-9]+[a-z]?|NFR-[0-9]+\.[0-9]+)$")
-SECTION_RE = re.compile(r"^§[0-9]+\.[0-9]+$")
-PAREN_RE = re.compile(r"\([^()]*\)")
-# Comma-separated list item: an optional "Task"/"Tasks" prefix then an id or an
-# id range ("6.1-6.3", en dash or hyphen).
-LIST_ITEM_RE = re.compile(
-    rf"^(?:Tasks?\s+)?({TASK_ID_RE})(?:\s*[–—-]\s*({TASK_ID_RE}))?$"
+from checks import (
+    CHAIN_LENGTH_RE,
+    CHAIN_TIE_RE,
+    check_batch_overview,
+    check_conflict_annotations,
+    check_makespan_table,
+    check_restated_quantities,
+    check_server_chain_sentence,
+    classify_track_count_divergences,
+    derived_quantities,
+    makespan_slot_total,
+    parse_makespan_cell,
+    parse_overview,
+    parse_server_chain_sentence,
+    parse_stated,
+    plan_summary_track_counts,
+    readable_pattern,
+    rendered_dependency_floor,
+    restatement_tolerance,
+    track_count_divergences,
+)
+from config import (
+    ARROW,
+    BARE_ID_RE,
+    BASELINE_REF,
+    BATCH_HEADING_RE,
+    CONCLUSION_RE,
+    CRITICAL_PATH_HEADING,
+    FLOOR_HEADING,
+    FLOOR_LENGTH_RE,
+    GATE_TASK_IDS,
+    HEADING_RE,
+    INTEGRATION_TASK_IDS,
+    LIST_ITEM_RE,
+    MAKESPAN_HEADING,
+    METADATA_FIELDS,
+    NUM_PATTERN,
+    NUMBER_WORDS,
+    OVERVIEW_HEADING,
+    PARALLEL,
+    PAREN_RE,
+    PLAN_PATH,
+    PROGRESS_PREFIX,
+    RATIO_PATTERN,
+    REPO_ROOT,
+    REQ_HEADING_RE,
+    REQ_RE,
+    REQUIREMENTS_DOC,
+    SECTION_RE,
+    SERVER_SCOPE,
+    SORT_LAST,
+    TASK_HEADING_RE,
+    TASK_ID_RE,
+    TASKS_DIR,
+    THREE_THINGS_HEADING,
+    TRACK_HEADING_RE,
+    TRACK_LETTER_RE,
+    english_number,
+    parse_count,
+)
+from declared import (
+    DECLARED_CONFLICT_SERIALISATIONS,
+    DECLARED_GAPS,
+    DECLARED_OVERVIEW_SERIALISATIONS,
+    DECLARED_OVERVIEW_TITLE_DIVERGENCES,
+    DECLARED_RESTATEMENTS,
+    DECLARED_TRACK_COUNT_DIVERGENCES,
+    DECLARED_UNREVIEWABLE_CONFLICTS,
+)
+from document import (
+    batch_label,
+    batch_order,
+    critical_path_lines,
+    find_block,
+    heading_blocks,
+    makespan_table,
+    overview_block,
+    parse_table,
+    read_source,
+    split_table,
+    track_letter,
+)
+from graph import batch_subset, id_key, longest_chain
+from models import (
+    Chain,
+    Claim,
+    ConflictSerialisation,
+    DeclaredDivergence,
+    DeclaredTitleDivergence,
+    DerivedQuantity,
+    OverviewUnit,
+    Restatement,
+    Task,
+    UnreviewableConflict,
+    pad_id,
+    slugify,
 )
 
-
-def read_source(source: str) -> str:
-    """Read the plan from a path or from ``git:<ref>[:<path>]``."""
-    if source.startswith("git:"):
-        spec = source[4:]
-        if ":" not in spec:
-            spec = f"{spec}:plan/boomerang-plan.md"
-        out = subprocess.run(
-            ["git", "show", spec],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return out.stdout
-    return Path(source).read_text()
+# Everything above is part of the surface, used here or not; listing it keeps a
+# linter from reading the re-exports as dead imports.
+__all__ = [
+    # config
+    "ARROW", "BARE_ID_RE", "BASELINE_REF", "BATCH_HEADING_RE", "CONCLUSION_RE",
+    "CRITICAL_PATH_HEADING", "FLOOR_HEADING", "FLOOR_LENGTH_RE", "GATE_TASK_IDS",
+    "HEADING_RE", "INTEGRATION_TASK_IDS", "LIST_ITEM_RE", "MAKESPAN_HEADING",
+    "METADATA_FIELDS", "NUM_PATTERN", "NUMBER_WORDS", "OVERVIEW_HEADING",
+    "PARALLEL", "PAREN_RE", "PLAN_PATH", "PROGRESS_PREFIX", "RATIO_PATTERN",
+    "REPO_ROOT", "REQ_HEADING_RE", "REQ_RE", "REQUIREMENTS_DOC", "SECTION_RE",
+    "SERVER_SCOPE", "SORT_LAST", "TASK_HEADING_RE", "TASK_ID_RE", "TASKS_DIR",
+    "THREE_THINGS_HEADING", "TRACK_HEADING_RE", "TRACK_LETTER_RE",
+    "english_number", "parse_count",
+    # models
+    "Chain", "Claim", "ConflictSerialisation", "DeclaredDivergence",
+    "DeclaredTitleDivergence", "DerivedQuantity", "OverviewUnit", "Restatement",
+    "Task", "UnreviewableConflict", "pad_id", "slugify",
+    # declared
+    "DECLARED_CONFLICT_SERIALISATIONS", "DECLARED_GAPS",
+    "DECLARED_OVERVIEW_SERIALISATIONS", "DECLARED_OVERVIEW_TITLE_DIVERGENCES",
+    "DECLARED_RESTATEMENTS", "DECLARED_TRACK_COUNT_DIVERGENCES",
+    "DECLARED_UNREVIEWABLE_CONFLICTS",
+    # document
+    "batch_label", "batch_order", "critical_path_lines", "find_block",
+    "heading_blocks", "makespan_table", "overview_block", "parse_table",
+    "read_source", "split_table", "track_letter",
+    # graph
+    "batch_subset", "id_key", "longest_chain",
+    # checks
+    "CHAIN_LENGTH_RE", "CHAIN_TIE_RE", "check_batch_overview",
+    "check_conflict_annotations", "check_makespan_table",
+    "check_restated_quantities", "check_server_chain_sentence",
+    "classify_track_count_divergences", "derived_quantities",
+    "makespan_slot_total", "parse_makespan_cell", "parse_overview",
+    "parse_server_chain_sentence", "parse_stated", "plan_summary_track_counts",
+    "readable_pattern", "rendered_dependency_floor", "restatement_tolerance",
+    "track_count_divergences",
+    # this module
+    "canonical_sort_key", "load_tasks_from_files", "parse_id_list", "parse_plan",
+    "parse_requirements", "render_frontmatter", "requirement_ids_from_doc",
+    "split_frontmatter",
+]
 
 
 def requirement_ids_from_doc(path: Path = REQUIREMENTS_DOC) -> set[str]:
     """Every requirement id the requirements document declares as a heading.
 
-    This is the universe the coverage check is taken against: a requirement
-    exists because the design document gives it a heading, not because some
-    task happened to cite it.
+    A requirement exists because the design document gives it a heading, not
+    because some task happened to cite it: that is the universe coverage is
+    taken against.
     """
     if not path.exists():
         return set()
@@ -122,35 +178,6 @@ def requirement_ids_from_doc(path: Path = REQUIREMENTS_DOC) -> set[str]:
         for line in path.read_text().split("\n")
         if (m := REQ_HEADING_RE.match(line))
     }
-
-
-def slugify(title: str, limit: int = 50) -> str:
-    """Lowercase, strip backticks/punctuation, hyphenate, truncate on a word."""
-    text = title.replace("`", "")
-    # Fold accents; map the typographic dashes/section sign to separators.
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9]+", "-", text)
-    text = text.strip("-")
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    if "-" in cut:
-        cut = cut[: cut.rfind("-")]
-    return cut.strip("-")
-
-
-def pad_id(task_id: str) -> str:
-    """``4.6`` -> ``4.06`` so files sort lexically. ``I.1`` is left alone."""
-    if task_id.startswith("I."):
-        return task_id
-    major, minor = task_id.split(".", 1)
-    suffix = ""
-    m = re.match(r"^([0-9]+)([a-z]?)$", minor)
-    if m:
-        minor, suffix = m.group(1), m.group(2)
-    return f"{major}.{int(minor):02d}{suffix}"
 
 
 def _expand(lo: str, hi: str) -> list[str]:
@@ -165,12 +192,10 @@ def _expand(lo: str, hi: str) -> list[str]:
 def parse_id_list(value: str) -> tuple[list[str], list[str]]:
     """Extract task ids from a dependency line value.
 
-    Returns ``(ids, unparsed_fragments)``. Prose fragments ("all server tasks",
-    "All of Batches 7-10") are returned as unparsed rather than mined for
-    numbers -- mining them would invent dependencies. Parentheticals are
-    dropped before splitting, so "(the barrel was written in 4.6)" cannot leak a
-    false id, but the full line is preserved verbatim in the task body and in
-    the ``*_raw`` frontmatter key.
+    Returns ``(ids, unparsed_fragments)``. Prose fragments ("all server tasks")
+    are returned unparsed rather than mined for numbers, and parentheticals are
+    dropped before splitting, because mining either would invent dependencies.
+    The full line survives verbatim in the body and in the ``*_raw`` key.
     """
     value = value.strip()
     if not value or value in {"None", "—", "-"}:
@@ -204,12 +229,10 @@ def parse_id_list(value: str) -> tuple[list[str], list[str]]:
 def parse_requirements(value: str) -> tuple[list[str], list[str], bool]:
     """Extract FR/NFR ids and design-section refs from a Requirements line.
 
-    Returns ``(requirements, sections, is_prose_only)``.
-
-    A line that opens with an em dash ("-- (validates the assumptions behind
-    FR-3.3.4, ...)") declares that the task covers NO requirement; the ids it
-    names are context, not coverage. Mining them would add spike and harness
-    tasks to traceability rows they do not provide evidence for.
+    Returns ``(requirements, sections, is_prose_only)``. A line opening with an
+    em dash declares that the task covers NO requirement -- the ids it names are
+    context -- so mining them would add spike and harness tasks to traceability
+    rows they provide no evidence for.
     """
     value = value.strip()
     if value.startswith("—"):
@@ -224,64 +247,6 @@ def parse_requirements(value: str) -> tuple[list[str], list[str], bool]:
         elif SECTION_RE.match(part):
             sections.append(part)
     return reqs, sections, False
-
-
-@dataclass
-class Task:
-    task_id: str
-    title: str
-    heading_level: int
-    batch: str  # "0".."10" or "deployment"
-    track_heading: str | None  # verbatim heading text after "### "
-    track: str | None  # e.g. "C: Extension storage"
-    track_scope: str | None  # "extension" / "server" / "repo" / ...
-    track_index: int  # order of first appearance within the batch
-    order: int  # global document order
-    body: str  # VERBATIM, heading line through the blank line before "---"
-    meta_raw: dict[str, str] = field(default_factory=dict)
-    prerequisites: list[str] = field(default_factory=list)
-    conflicts_with: list[str] = field(default_factory=list)
-    parallel_with: list[str] = field(default_factory=list)
-    requirements: list[str] = field(default_factory=list)
-    sections: list[str] = field(default_factory=list)
-    requirements_prose_only: bool = False
-    unparsed: dict[str, list[str]] = field(default_factory=dict)
-    status: str = "not_started"
-
-    @property
-    def batch_dir(self) -> str:
-        if self.batch == "deployment":
-            return "deployment"
-        return f"batch-{int(self.batch):02d}"
-
-    @property
-    def slug(self) -> str:
-        return slugify(self.title)
-
-    @property
-    def filename(self) -> str:
-        return f"{pad_id(self.task_id)}-{self.slug}.md"
-
-    @property
-    def relpath(self) -> str:
-        return f"tasks/{self.batch_dir}/{self.filename}"
-
-    @property
-    def kind(self) -> str:
-        if self.task_id in GATE_TASK_IDS:
-            return "gate"
-        if self.task_id in INTEGRATION_TASK_IDS:
-            return "integration"
-        return "implementation"
-
-    @property
-    def package_raw(self) -> str:
-        return self.meta_raw.get("Package", "").strip()
-
-    @property
-    def package(self) -> str:
-        """The package path(s) with markdown backticks removed."""
-        return self.package_raw.replace("`", "").strip()
 
 
 def parse_plan(text: str) -> list[Task]:
@@ -412,6 +377,7 @@ def _build_task(*, task_id, title, heading_level, batch, track_heading, track,
     return task
 
 
+
 # --------------------------------------------------------------------------
 # Frontmatter
 # --------------------------------------------------------------------------
@@ -492,3 +458,4 @@ def load_tasks_from_files(tasks_dir: Path = TASKS_DIR) -> list[dict]:
         out.append({"path": path, "fm": fm, "body": body})
     out.sort(key=lambda r: r["fm"]["order"])
     return out
+

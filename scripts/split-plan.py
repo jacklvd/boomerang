@@ -7,9 +7,19 @@
 --verify is the gate. It asserts the corpus is structurally sound -- 91 tasks,
 every metadata field present, frontmatter agreeing with the body line it was
 parsed from, no dangling or self references, conflicts reciprocal, every
-requirement in the design document covered by some task -- and then compares
+requirement in the design document covered by some task, every track_heading
+actually rendered in the index, each batch's track letters gapless from A, the
+rendered Critical Path floor equal to the longest prerequisite chain, and the
+AUTHORED makespan table still consistent with the corpus (every id real, every
+arrow an edge or a declared conflict serialisation, no row below the
+prerequisite-DAG floor), the AUTHORED server-chain sentence still describing a
+real, server-only, maximal chain, every AUTHORED restatement of a derived
+quantity outside the Critical Path section (DECLARED_RESTATEMENTS) still
+agreeing with what the corpus derives -- and then compares
 against the pre-split baseline, requiring that exactly the declared set of task
-bodies (INTENDED_BODY_CHANGES) differs from it.
+bodies (INTENDED_BODY_CHANGES) differs from it and that exactly the declared set
+of Plan Summary track counts (DECLARED_TRACK_COUNT_DIVERGENCES) disagrees with
+the corpus.
 
 The split is lossless by construction: each task file is a YAML frontmatter
 block followed by the task body copied VERBATIM out of the plan -- heading line
@@ -32,17 +42,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from plan_lib import (  # noqa: E402
     BASELINE_REF,
+    BATCH_HEADING_RE,
     DECLARED_GAPS,
+    DECLARED_TRACK_COUNT_DIVERGENCES,
     METADATA_FIELDS,
+    PLAN_PATH,
     TASKS_DIR,
+    track_letter,
+    batch_label,
     canonical_sort_key,
+    check_batch_overview,
+    check_conflict_annotations,
+    check_makespan_table,
+    check_restated_quantities,
+    check_server_chain_sentence,
+    classify_track_count_divergences,
     load_tasks_from_files,
+    longest_chain,
     pad_id,
     parse_id_list,
     parse_plan,
     parse_requirements,
     read_source,
     render_frontmatter,
+    rendered_dependency_floor,
     requirement_ids_from_doc,
     slugify,
     TASK_HEADING_RE,
@@ -70,15 +93,26 @@ INTENDED_BODY_CHANGES = {
     "1.2":  "B/G: reciprocal conflict with 1.4 (wxt.config.ts); AGENTS.md link repointed",
     "3.8":  "D: heading names the X-Boomerang-Client-Version gate (decision D16)",
     "3.14": "A: Task 0.1 added as a prerequisite (0.1 records the flow it is built from)",
+    "4.1":  "the 4.1 <-> 4.2 mutex dropped: no shared file exists in either "
+            "task's Instructions, in the Low-Level Design module table, or in "
+            "the tree, and what it described is the directed import already "
+            "held by 4.2 sitting in 4.1's prerequisites",
+    "4.2":  "the mirror of 4.1's: the same mutex dropped from this side, since "
+            "'the model boundary' is an architectural region and not a file",
     "4.5":  "D: heading annotated '(test double)' (decision D21)",
     "4.6":  "D: heading names the barrel, which 4.10's conflicts line refers back to",
     "4.7":  "B: reciprocal conflict with 4.12 (src/storage/coordinator.ts)",
     "4.14": "A/C/D/E: 3.18 prerequisite; FR-3.4.5b and NFR-6.3 coverage; '(runtime stub)'",
     "6.5":  "D: heading names adapter selection (step 7, cited by 4.14)",
-    "8.5":  "C/D: FR-3.4.5b coverage; heading names the simulated-booking marker",
+    "8.3":  "conflicts line names the colliding path (`extension/entrypoints/popup/`)",
+    "8.4":  "conflicts line names the colliding path (`extension/entrypoints/popup/`)",
+    "8.5":  "C/D: FR-3.4.5b coverage; heading names the simulated-booking marker; "
+            "conflicts line names the colliding path (`extension/entrypoints/popup/`)",
     "9.1":  "A: prerequisite 8.5 -> 8.6, matching the authored critical-path floor",
     "10.1": "E: NFR-6.6 belongs to the deployment track (low-level design §8.4)",
     "10.2": "D: heading names the configuration sweep (step 2)",
+    "10.3": "lint contracts derived from / asserted against the design's Mermaid "
+            "graphs rather than hand-transcribed, since a hand copy drifts",
     "I.2":  "E: NFR-6.6 coverage, per low-level design §8.4",
 }
 
@@ -128,6 +162,28 @@ def _diff(expected: str, actual: str, label: str) -> list[str]:
             n=1,
         )
     )
+
+
+def tracks_by_batch(plan_text: str) -> dict[str, list[str]]:
+    """Every ``###`` heading the plan renders, keyed by the batch owning it.
+
+    Headings are returned as the text AFTER ``### ``, which is the same form
+    ``track_heading`` frontmatter carries, so the two compare directly.
+    """
+    out: dict[str, list[str]] = {}
+    batch: str | None = None
+    for line in plan_text.split("\n"):
+        if bm := BATCH_HEADING_RE.match(line):
+            batch = bm.group(1)
+            out.setdefault(batch, [])
+        elif line.startswith("## Deployment Track"):
+            batch = "deployment"
+            out.setdefault(batch, [])
+        elif line.startswith("## "):
+            batch = None
+        elif line.startswith("### ") and batch is not None:
+            out[batch].append(line[4:])
+    return out
 
 
 def cmd_verify(baseline: str, tasks_dir: Path) -> int:
@@ -319,6 +375,154 @@ def cmd_verify(baseline: str, tasks_dir: Path) -> int:
                 broken.append(f"{r['fm']['id']}: {target} does not resolve from {r['path'].parent}")
     report(not broken, "every relative link in a task body resolves to a file that exists", broken)
 
+    # --- track headings: no orphans -----------------------------------------
+    # Task 0.2 was parked under Track A because the Track B heading it belonged
+    # to had been lost from the document, and nothing asserted the two agreed.
+    # A track_heading in frontmatter that the generated index does not render
+    # means the reader and the corpus disagree about where a task lives.
+    plan_text = PLAN_PATH.read_text() if PLAN_PATH.exists() else ""
+    rendered_tracks = tracks_by_batch(plan_text)
+    orphans = [
+        f"{r['fm']['id']}: track_heading {r['fm']['track_heading']!r} is not a `###` "
+        f"heading under Batch {r['fm']['batch']} in {PLAN_PATH.name}"
+        for r in records
+        if r["fm"]["track_heading"]
+        and r["fm"]["track_heading"] not in rendered_tracks.get(str(r["fm"]["batch"]), [])
+    ]
+    n_tracked = sum(1 for r in records if r["fm"]["track_heading"])
+    report(not orphans,
+           f"every task's track_heading is rendered in {PLAN_PATH.name} "
+           f"({n_tracked - len(orphans)}/{n_tracked} tracked tasks)",
+           orphans)
+
+    # --- track letters are gapless from A -----------------------------------
+    # The Track B heading going missing left Batch 0 running A, C. A gap is the
+    # visible symptom of a lost track, so it is the thing worth asserting: the
+    # letters a batch's tasks name must be A..X with nothing skipped. Headings
+    # with no letter (`Gate: Manual acceptance [extension]`) are not tracks and
+    # take no part in the sequence.
+    letters_by_batch = defaultdict(set)
+    for r in records:
+        th = r["fm"]["track_heading"]
+        if th and (letter := track_letter(th)):
+            letters_by_batch[str(r["fm"]["batch"])].add(letter)
+    gaps = []
+    for key in sorted(letters_by_batch, key=lambda k: (k == "deployment", k.zfill(3))):
+        letters = sorted(letters_by_batch[key])
+        expected = [chr(ord("A") + i) for i in range(len(letters))]
+        if letters != expected:
+            gaps.append(
+                f"batch {key}: track letters {', '.join(letters)} -- expected a gapless "
+                f"A{'..' + expected[-1] if len(expected) > 1 else ''}; "
+                f"missing {', '.join(l for l in expected if l not in letters)}"
+            )
+    report(not gaps,
+           f"track letters in each batch are gapless from A "
+           f"({len(letters_by_batch) - len(gaps)}/{len(letters_by_batch)} batches)",
+           gaps)
+
+    # --- the rendered dependency floor is the derived one -------------------
+    # ``### The dependency floor`` is GENERATED from the prerequisite graph.
+    # Asserting the rendered chain against a fresh walk catches the case the
+    # renderer cannot: the document on disk is stale, or was hand-edited.
+    derived = longest_chain(records)
+    rendered_ids, rendered_len = rendered_dependency_floor(plan_text)
+    detail = []
+    if rendered_ids != derived.chain:
+        detail.append(f"rendered: {' -> '.join(rendered_ids) or '(none)'}")
+        detail.append(f"derived:  {' -> '.join(derived.chain)}")
+        only_r = [t for t in rendered_ids if t not in derived.chain]
+        only_d = [t for t in derived.chain if t not in rendered_ids]
+        detail.append(f"only in the document: {only_r or '[]'} | only in the corpus: {only_d or '[]'}")
+    if rendered_len != derived.length:
+        detail.append(
+            f"'**Critical path length:**' says {rendered_len}, the derived chain is "
+            f"{derived.length} tasks"
+        )
+    report(not detail,
+           f"the rendered dependency floor is the longest prerequisite chain "
+           f"({derived.length} tasks; {derived.count} chain(s) share that length; "
+           f"ends at {', '.join(derived.endpoints)})",
+           detail)
+
+    # --- the AUTHORED makespan table still describes this corpus ------------
+    # Not regenerated: its rows order tasks that only conflict, and choosing an
+    # order is authored judgment. Checked instead -- and the check that matters
+    # is that no row claims FEWER slots than the prerequisite DAG already
+    # forces, which would understate what the plan costs.
+    findings, info = check_makespan_table(records, plan_text)
+    report(not findings,
+           "the authored makespan table agrees with the corpus: ids exist, every "
+           "arrow is a prerequisite edge or a declared conflict serialisation, no "
+           "row is below the DAG floor, the total matches the column",
+           findings)
+    for line in info:
+        print(f"       [info] {line}")
+
+    # --- the AUTHORED server-chain sentence still describes this corpus -----
+    # Prose, not a table, and for a long time nothing held it to the corpus: it
+    # printed a chain that was neither maximal within the server nor even
+    # server-only (it ended at 10.2, `track_scope: null`, packaged at the
+    # repository root). A reader deciding which track can afford to be
+    # interrupted is reading an assertion about the graph; assert it.
+    findings, info = check_server_chain_sentence(records, plan_text)
+    report(not findings,
+           "the authored server-chain sentence agrees with the corpus: ids exist, "
+           "every arrow is a prerequisite edge, every task is track_scope: server, "
+           "and its length is the derived server-only maximum",
+           findings)
+    for line in info:
+        print(f"       [info] {line}")
+
+    # --- the AUTHORED restatements of the derived numbers ------------------
+    # The task count, the dependency floor and the makespan slot total are all
+    # derived, and all three are restated in argument OUTSIDE ``## Critical
+    # Path`` -- in the header a reader meets first, and in the speedup
+    # paragraph. Those sentences are an argument, not a table, so they are
+    # checked rather than regenerated: the floor moving from 20 to 22 must not
+    # leave the header saying 20 forever.
+    findings, info = check_restated_quantities(records, plan_text)
+    report(not findings,
+           "every authored restatement of a derived quantity still agrees with the "
+           "corpus: each declared site is locatable, each stated number is a "
+           "correct rounding of the derived one, and no known-shape restatement "
+           "is undeclared",
+           findings)
+    for line in info:
+        print(f"       [info] {line}")
+
+    # --- the AUTHORED Batch Execution Overview still describes this corpus --
+    # 107 lines of hand-maintained schedule naming every task, its track and
+    # its order: the largest restatement of the corpus in the document, and the
+    # last large one nothing held to it. NOT regenerated -- it interleaves those
+    # facts with judgment that exists nowhere in frontmatter (why a lane is
+    # parallel, what each checkpoint buys, what a failed spike blocks), and a
+    # generator would delete all of it.
+    findings, info = check_batch_overview(records, plan_text)
+    report(not findings,
+           "the authored Batch Execution Overview agrees with the corpus: every id "
+           "exists, every task is under the batch and track its frontmatter gives "
+           "it, no task is missing from it, every arrow is a prerequisite edge or a "
+           "declared conflict serialisation, and every 'after' claim is a real edge",
+           findings)
+    for line in info:
+        print(f"       [info] {line}")
+
+    # --- every conflict mutex names what it collides over ------------------
+    # ``conflicts_with`` is an UNDIRECTED MUTEX, not a directed edge: it says
+    # two tasks cannot be in flight at once and never which goes first. That is
+    # only reviewable if it says WHAT they collide over -- "same popup shell and
+    # route table" can be neither refuted nor retired, and will outlive the file
+    # it was about.
+    findings, info = check_conflict_annotations(records)
+    report(not findings,
+           "every task declaring a conflict names at least one path in backticks, "
+           "or is declared unreviewable with a reason and a way to resolve it; "
+           "frontmatter and body annotations agree",
+           findings)
+    for line in info:
+        print(f"       [info] {line}")
+
     print()
     print("=" * 72)
     print(f"BASELINE COMPARISON ({baseline})")
@@ -338,6 +542,49 @@ def cmd_verify(baseline: str, tasks_dir: Path) -> int:
     for tid in sorted(intended, key=lambda x: (x.startswith("I."), pad_id(x))):
         mark = "changed" if tid in changed else "MISSING"
         print(f"       {mark:8s} {tid:5s} {INTENDED_BODY_CHANGES[tid]}")
+
+    # --- baseline: declared Plan Summary track-count divergences ----------
+    # Same shape as the check above, over a different axis. The baseline's
+    # hand-written Plan Summary claims a track count per batch; the corpus
+    # counts distinct ``###`` track headings. Three rows disagree for reasons
+    # that have been investigated and are recorded in
+    # ``plan_lib.DECLARED_TRACK_COUNT_DIVERGENCES`` with BOTH numbers, so this
+    # is set equality between declared and observed, not a skip-list: a new
+    # divergence (a lost track looks exactly like one), a declared divergence
+    # whose numbers have moved, and a declared divergence that has gone away
+    # all fail here.
+    observed, undeclared, mismatched, stale = classify_track_count_divergences(
+        records, text
+    )
+    detail = [
+        f"{batch_label(k)}: summary says {observed[k][0]}, corpus has {observed[k][1]} "
+        f"`###` track heading(s) -- not declared in DECLARED_TRACK_COUNT_DIVERGENCES"
+        for k in undeclared
+    ]
+    detail += [
+        f"{batch_label(k)}: summary says {observed[k][0]}, corpus has {observed[k][1]}, "
+        f"but the allowlist reconciles {DECLARED_TRACK_COUNT_DIVERGENCES[k].baseline} "
+        f"against {DECLARED_TRACK_COUNT_DIVERGENCES[k].corpus} "
+        f"({DECLARED_TRACK_COUNT_DIVERGENCES[k].reason}) -- the reason needs revisiting"
+        for k in mismatched
+    ]
+    detail += [
+        f"{batch_label(k)}: declared as diverging "
+        f"({DECLARED_TRACK_COUNT_DIVERGENCES[k].baseline} vs "
+        f"{DECLARED_TRACK_COUNT_DIVERGENCES[k].corpus}), but the summary and the "
+        f"corpus now agree -- the entry is stale, delete it"
+        for k in stale
+    ]
+    report(not detail,
+           f"{len(observed)} Plan Summary track count(s) diverge from the corpus; "
+           f"{len(DECLARED_TRACK_COUNT_DIVERGENCES)} declared divergences; sets match",
+           detail)
+    for key in sorted(DECLARED_TRACK_COUNT_DIVERGENCES,
+                      key=lambda k: (k == "deployment", k.zfill(3))):
+        entry = DECLARED_TRACK_COUNT_DIVERGENCES[key]
+        mark = "diverges" if key in observed else "MISSING"
+        print(f"       {mark:8s} {batch_label(key):11s} {entry.baseline} vs "
+              f"{entry.corpus}  {entry.reason}")
 
     # --- round trip over the UNCHANGED tasks ------------------------------
     # Ordering and per-task exactness are still asserted byte-for-byte; the
