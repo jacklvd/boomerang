@@ -51,6 +51,9 @@ upstream is written as "plan decision `Dn`" for that reason.
 | D23 | Add a manual acceptance task after Batch 8 | plan |
 | D24 | Two agents; per-task approval on the driver and storage spines | plan |
 | D25 | Amend upstream documents rather than working around them | requirements, HLD |
+| D26 | Generalize carrier pickup to configured third-party carriers | requirements, HLD, LLD, plan |
+| D27 | Add retailer-agnostic onboarding preferences | requirements, HLD, LLD, plan |
+| D28 | Reinstate the dashboard with a concrete origin requirement | requirements, HLD, LLD, plan |
 
 ---
 
@@ -420,6 +423,47 @@ The repository's established position is that upstream wins — *and that upstre
 which case it is corrected rather than routed around. A plan that silently contradicts its
 requirements produces a system nobody can audit against either document.
 
+### D26. Generalize carrier pickup to configured third-party carriers
+
+**Defect.** The Amazon return-flow spike found that USPS is not offered consistently: the available
+return methods depend on the retailer, item, account, and return context. Naming USPS as the only
+pickup carrier would make the implementation specific to one retailer and would reject otherwise
+valid carrier-backed return paths.
+
+**Decision.** Use the generic concept **third-party pickup** in the requirements and user-facing
+flow. The server supports a configured set of pickup carriers, and `label_carrier` must belong to
+that set before eligibility or scheduling can occur. The implementation may support USPS, UPS,
+and additional carriers independently; it must not assume one carrier is always available. Amazon's
+own door-pickup option is a retailer-provided option and is handled by the retailer adapter unless
+an explicit supported integration is added later.
+
+### D27. Add retailer-agnostic onboarding preferences
+
+**Defect.** Return-method choices and form requirements differ between retailers and even between
+items or accounts. Without preferences captured before the driver starts, the extension cannot
+make a useful first recommendation or know whether a printed label is practical for the user.
+
+**Decision.** On first interaction, offer a skippable onboarding form that stores a return address,
+the user's preferred return mode (self-service drop-off or home pickup), and whether the user has
+access to a printer. Store these values in a client-only `PREFERENCES` singleton in
+`chrome.storage.local`; do not create a server-side user database or account. Preferences guide
+which available option is highlighted, but never silently select an option or override the retailer's
+actual choices. When the user has no printer, prefer a no-printer-required option such as a QR-code
+drop-off when one is available.
+
+### D28. Reinstate the dashboard with a concrete origin requirement
+
+**Defect.** The dashboard was previously cut because its production origin was undecided, but the
+product now requires a main dashboard showing returnable value, savings, and ranked return windows.
+
+**Decision.** Reinstate the dashboard requirement and its `externally_connectable` integration.
+`DASHBOARD_ORIGIN` defaults to `http://localhost:3000` for development and must be set to a concrete
+production origin before a release build; an unset production value fails the build. The dashboard
+reads an enumerated summary from the extension: currently returnable value, saved value from
+successful returns, and each open item's days remaining in urgency order. These figures are derived
+at render time from stored order and return entities, not persisted as running totals. The dashboard
+does not receive onboarding preferences.
+
 ---
 
 ## Upstream amendments required
@@ -441,8 +485,13 @@ requirements produces a system nobody can audit against either document.
 | `boomerang-high-level-design.md` | §11 Q6 | Resolved — Batch 0 spike, with go/no-go criteria | D1 |
 | `boomerang-high-level-design.md` | §11 Q9 | Resolved — Batch 0 measures it | D4 |
 | `boomerang-high-level-design.md` | §11 Q11 | Assigned — Task I.3 answers it against the sandbox | D12 |
+| `boomerang-requirements.md` | FR-3.3.5, FR-3.4 | Generalize USPS-specific pickup rules to configured third-party pickup carriers | D26 |
+| `boomerang-requirements.md` | §3.0 | Add retailer-agnostic onboarding preferences and client-only storage | D27 |
+| `boomerang-requirements.md` | FR-3.6.3 | Reinstate the dashboard with render-time return and savings summaries | D28 |
+| `boomerang-high-level-design.md` | §4.2, §5.1, §6.7 | Add `PREFERENCES`, onboarding, and dashboard flows | D27, D28 |
+| `boomerang-low-level-design.md` | Storage, dashboard messaging, configuration | Add preferences storage and dashboard contract | D27, D28 |
 
-**All of the above were applied on 2026-08-27.** Questions 2, 7 and 10 in §11 remain open and
+**D1–D25 were applied on 2026-08-27; D26–D28 were applied on 2026-09-01.** Questions 2, 7 and 10 in §11 remain open and
 unassigned, and are marked as such rather than quietly dropped: the unauthenticated-endpoint
 availability gap, the terms-of-service assessment, and the region choice. None of them blocks Batch
 0.

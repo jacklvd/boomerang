@@ -17,7 +17,7 @@ Source material: [`../docs/SKETCH.md`](../docs/SKETCH.md) for the product,
 
 > **Revised 2026-08-27.** Four changes came out of the plan review recorded in
 > [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md): the client-version header is
-> now named normatively in §4.1 (plan decision D16); FR-3.6.3 is out of PoC scope (plan decision D6); `DASHBOARD_ORIGIN` is
+> now named normatively in §4.1 (plan decision D16); FR-3.6.3 is in scope again (plan decision D28); `DASHBOARD_ORIGIN` is
 > withdrawn from §5.2 as a consequence; and FR-3.4.5b requires a simulated booking to say so (plan decision D22).
 > Each amendment is marked where it lands. **`Dn` in these notes means a *plan* decision** — the
 > `D1`–`D7` cited above from [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) are a separate,
@@ -129,6 +129,11 @@ erDiagram
         string package_location
         string location_note
     }
+    PREFERENCES {
+      string return_address
+      string preferred_return_mode
+      bool has_printer
+    }
 ```
 
 Five attributes deserve a note, because each was added to close a specific gap:
@@ -216,6 +221,47 @@ the PoC books one box per pickup, and multi-package pickups are out of scope for
 
 ## 3. Functional Requirements
 
+### 3.0 Onboarding and Preferences
+
+> Added 2026-09-01 (decision D27), following the Task 0.1 retailer-flow spike. Amazon is not the
+> only retailer this product targets (see §7's known gaps — a second retailer is a stated
+> fast-follow), and different retailers offer different pickup carriers under different names. The
+> product therefore asks the user what they prefer **once, in generic terms**, rather than
+> hardcoding one carrier's name into the requirements.
+
+#### FR-3.0.1 Preferences captured at onboarding
+
+- On first install, the extension SHALL offer an onboarding form capturing a return address and a
+  preferred return method: **self-service drop-off** (the user drops the package off themselves;
+  typically free and requires no printer) or **home pickup** (a third-party carrier collects the
+  package; typically requires a printed label or QR code first). It SHALL also ask whether the user
+  has access to a printer (`has_printer`).
+- Declining or skipping onboarding SHALL be a supported state, exactly as declining the FR-3.7.2
+  host-permission grant is. The extension SHALL work with every field unset.
+- The extension SHALL store these fields in a new singleton entity, `PREFERENCES`, in
+  `chrome.storage.local`. **No server component SHALL receive, log, or persist them** — this
+  follows the same rule §1 states for order data: the system holds no OAuth grant and no account,
+  and a server-held, user-keyed preferences record would require inventing one.
+- These preferences are **retailer-agnostic.** They are captured once and apply across every
+  retailer the extension supports, not re-asked per retailer.
+
+#### FR-3.0.2 Preferences drive a default, never a silent selection
+
+- When return methods are presented under FR-3.3.4, the extension SHALL highlight the option
+  matching the user's preferred return method, but SHALL still render every option with its price
+  and SHALL still require the user's explicit choice. Highlighting is not selecting.
+- When `has_printer` is `false`, the extension SHALL highlight a free, no-printer-required option
+  (a self-service drop-off, typically via an in-store QR code) over an option that requires a
+  printed label, whenever the retailer offers both.
+- This SHALL NOT be read as sourcing drop-off locations. The extension defers to whichever
+  drop-off option the retailer's own page already lists; it computes no "nearest" location, and
+  FR-3.4.2's prohibition on a locations API is unchanged.
+
+#### FR-3.0.3 Preferences are editable
+
+- The extension SHALL let the user revisit and edit `PREFERENCES` after onboarding, the same way
+  `ADDRESS` is already editable.
+
 ### 3.1 Order Ingestion
 
 #### FR-3.1.1 Page recognition
@@ -296,8 +342,8 @@ direction: a false positive costs the user one manual step, a false negative cos
 The extension holds the only record of a booked pickup — there is no server-side copy and no
 `GET /pickups` — so an eviction or a bulk clear that removes the last `confirmationNumber` leaves a
 real carrier visit scheduled that the user can no longer cancel through the product. Their remaining
-option is USPS by telephone. A retention policy that can do that silently is a defect, not a
-housekeeping rule.
+option is contacting the carrier directly. A retention policy that can do that silently is a
+defect, not a housekeeping rule.
 
 ```mermaid
 flowchart TD
@@ -405,25 +451,31 @@ and worse than the paid-shipping case because the user never sees a price at all
 
 #### FR-3.3.5 Record which carrier's postage is on the box
 
+> **Generalized 2026-09-01 (decision D26).** Requirements previously named USPS as the only
+> acceptable pickup carrier. There are many third-party pickup carriers, and which one a given
+> retailer's label uses varies — hardcoding one name assumes a single retailer forever. The rule
+> below is carrier-agnostic: it gates on **membership in the configured set of supported pickup
+> carriers**, not on a specific carrier's identity.
+
 - The extension SHALL record `label_carrier` on the `RETURN_REQUEST` when a label is generated.
-- The system SHALL NOT offer or schedule a USPS Carrier Pickup for a label whose `label_carrier` is
-  not USPS.
+- The system SHALL NOT offer or schedule a third-party pickup for a label whose `label_carrier` is
+  not one of the server's configured `SUPPORTED_PICKUP_CARRIERS` (§5.1).
 
 - The extension SHALL derive `label_carrier`, in order of preference, from: the return method the
   user selected under FR-3.3.4; adapter-configured recognition performed on the label page **in the
   browser**; or an explicit question to the user.
-- The extension SHALL NOT default `label_carrier` to USPS when it cannot be determined, and SHALL
-  NOT schedule a pickup in that case.
+- The extension SHALL NOT default `label_carrier` to any specific carrier when it cannot be
+  determined, and SHALL NOT schedule a pickup in that case.
 
 FR-3.1.3 forbids *transmitting* the label page, not reading it locally, which is what makes
-client-side recognition available as a source. Defaulting to USPS on an undetermined carrier would
-manufacture the exact silent failure this field exists to prevent.
+client-side recognition available as a source. Defaulting to a guessed carrier on an undetermined
+label would manufacture the exact silent failure this field exists to prevent.
 
-A printed label is not sufficient for a USPS pickup — the postage must be **USPS** postage. The
-letter carrier collecting the box is collecting mail; a prepaid UPS label is not mail and will not
-be picked up. Without this field the system cannot tell the two apart, and the failure is silent:
-the pickup books successfully, the user leaves the box out, and nobody comes. That is the worst
-available failure mode, because the user only discovers it after the return window closes.
+A printed label is not sufficient for a pickup by any carrier — the postage must match the carrier
+actually being asked to collect. A driver collecting for carrier A will not honor a label bearing
+carrier B's postage. Without this field the system cannot tell the two apart, and the failure is
+silent: the pickup books successfully, the user leaves the box out, and nobody comes. That is the
+worst available failure mode, because the user only discovers it after the return window closes.
 
 #### FR-3.3.6 Print confirmation
 
@@ -563,9 +615,15 @@ after the worker that created it is gone.
 
 ### 3.4 Carrier Pickup
 
+> **Generalized 2026-09-01 (decision D26).** "Carrier Pickup" below means whichever third-party
+> pickup carrier the server is configured for (§5.1's `SUPPORTED_PICKUP_CARRIERS`), not one named
+> carrier. Requirements previously named USPS specifically; that was an assumption tied to one
+> retailer, and this product does not stay tied to one retailer (§7's known gaps).
+
 #### FR-3.4.1 Eligibility is a hard gate
 
-- The server SHALL call USPS eligibility before every schedule call, without exception.
+- The server SHALL call the configured pickup carrier's eligibility check before every schedule
+  call, without exception.
 - The server SHALL NOT cache an eligibility result across addresses or reuse a prior result.
 - The server SHALL return `address-not-serviceable` when eligibility fails.
 - **A negative eligibility answer is a successful response, not an error.** The eligibility endpoint
@@ -578,7 +636,8 @@ after the worker that created it is gone.
 
 - On ineligibility the extension SHALL state plainly that free carrier pickup is unavailable at
   this address, SHALL confirm the return itself remains valid, and SHALL direct the user to the
-  retailer's own drop-off information on the page they are already viewing.
+  retailer's own drop-off information on the page they are already viewing — including any
+  self-service drop-off option, which FR-3.0.2 already prefers when the user has no printer.
 - The system SHALL NOT silently escalate to any paid option.
 - The system SHALL NOT claim to source drop-off locations. No component produces them: there is no
   locations API in the carrier broker and no endpoint for one.
@@ -599,8 +658,8 @@ silently dropped.
 
 - The server SHALL reject a schedule request carrying `label_printed` false, with a `reason` the
   extension can act on.
-- The server SHALL reject a schedule request whose `label_carrier` is not USPS, with
-  `wrong-carrier-label`.
+- The server SHALL reject a schedule request whose `label_carrier` is not one of
+  `SUPPORTED_PICKUP_CARRIERS`, with `wrong-carrier-label`.
 - Both are **client-integrity checks**, not enforcement against a hostile caller. They catch our own
   client's bugs, a stale build, and malformed requests. They SHALL NOT be described as guarantees.
 
@@ -617,7 +676,7 @@ and the reserved concurrency limit of NFR-6.7 is the only bound on how often it 
   unserviceable day rolls forward rather than failing.
 - The server SHALL send a package location, mapped by the carrier adapter from the neutral value
   stored on `ADDRESS`. See FR-3.4.8.
-- The server SHALL return the `confirmationNumber`, the `ETag`, **the scheduled date USPS
+- The server SHALL return the `confirmationNumber`, the `ETag`, **the scheduled date the carrier
   assigned**, and **the standardized address it submitted** to the extension in the schedule
   response. The date is required by FR-3.4.7 and cannot be predicted client-side; the address is
   required by FR-3.4.6 and is produced server-side, so the client has no other source for it.
@@ -635,7 +694,9 @@ and the reserved concurrency limit of NFR-6.7 is the only bound on how often it 
 
 - When the server is configured with a carrier adapter that does not contact a carrier, the
   confirmation numbers it returns SHALL carry a fixed, recognisable prefix, published alongside the
-  wire contracts so both sides agree on it.
+  wire contracts so both sides agree on it. `MOCK_CONFIRMATION_PREFIX` (`SIM-`) is reserved for the
+  mock carrier adapter and SHALL NOT appear in a confirmation number returned by a real carrier
+  adapter.
 - The extension SHALL detect that prefix and SHALL render, next to every affected confirmation
   number, a marker stating that the booking is simulated and no carrier was contacted.
 - The extension SHALL make that determination **from the confirmation number**, not from its build
@@ -652,9 +713,9 @@ window closes. The prefix costs nothing and makes the failure self-evident.
   standardized address it was booked against, held on the `PICKUP` rather than as a reference to the
   editable `ADDRESS` singleton.
 - The extension SHALL write that snapshot from the standardized address returned by the schedule
-  response, and SHALL NOT write it from its own copy of the address. The address USPS is given is
-  produced by the schedule-time eligibility call and is never seen by the client until the response
-  carries it back.
+  response, and SHALL NOT write it from its own copy of the address. The address the carrier is
+  given is produced by the schedule-time eligibility call and is never seen by the client until the
+  response carries it back.
 - The extension SHALL write a provisional record before the schedule call — state `Booking`, a local
   `booking_intent_id`, its own best-known address, `standardized` false — and SHALL promote it on
   response. **This identifier is not the `request_id` of §4.2.** That one is the server's opaque
@@ -686,15 +747,16 @@ window closes. The prefix costs nothing and makes the failure self-evident.
 
 - All user-facing copy SHALL describe collection as **a day, never a time window**, and SHALL NOT
   present it as a guarantee. This is the invariant; it is not negotiable.
-- Copy SHALL name the day by rendering the `scheduled_date` USPS returned, not by assuming it.
-- Free Carrier Pickup happens on the normal delivery round, Monday through Saturday. The guaranteed
-  two-hour window is a separate paid product and is out of scope.
+- Copy SHALL name the day by rendering the `scheduled_date` the carrier returned, not by assuming
+  it.
+- Free Carrier Pickup happens on the carrier's normal delivery round. The guaranteed two-hour
+  window is a separate paid product and is out of scope.
 
 The previously mandated literal phrasing "with tomorrow's mail delivery" was wrong at three edges
-and is withdrawn. Same-day requests submitted before 2:00 AM Central are collected **today**;
-Sundays and holidays roll the date forward, so a Saturday evening booking is Monday; and
-`nextAvailablePickup` may itself roll past an unserviceable day. USPS tells us the answer in the
-schedule response — the requirement is to render what it said, not to guess.
+and is withdrawn. Same-day requests submitted before a carrier-specific cutoff are collected
+**today**; days the carrier does not run roll the date forward; and `nextAvailablePickup` may itself
+roll past an unserviceable day. The carrier tells us the answer in the schedule response — the
+requirement is to render what it said, not to guess.
 
 #### FR-3.4.8 Package location
 
@@ -720,7 +782,7 @@ about their own property, and the system quietly does something else with a real
 
 ```mermaid
 flowchart TD
-    A["Label printed and confirmed"] --> A2{"Label carrier is USPS"}
+    A["Label printed and confirmed"] --> A2{"label_carrier is a supported pickup carrier"}
     A2 -- "No" --> A3["No pickup offered, explain drop off"]
     A2 -- "Yes" --> B["POST pickups eligibility"]
     B --> C{"Address serviceable"}
@@ -732,7 +794,7 @@ flowchart TD
     F -- "Yes" --> H["Schedule with packageType RETURNS"]
     H --> I["Store confirmation number and address locally"]
     I --> J["Open prefilled calendar tab"]
-    J --> K["Name the scheduled day USPS returned"]
+    J --> K["Name the scheduled day the carrier returned"]
 ```
 
 ### 3.5 Calendar Reminder
@@ -808,40 +870,48 @@ the system by design. The record therefore states the only thing that is true.
 
 #### FR-3.6.3 Dashboard
 
-> **Out of PoC scope as of 2026-08-27 (plan decision D6).** This requirement is neither withdrawn nor
-> planned. It is the only requirement that forces `externally_connectable` into the manifest, and
-> that key widens the extension's attack surface and its Web Store permission disclosure for a
-> surface the PoC demo never opens — the popup already renders the ranked list FR-3.6.1 requires.
-> The production dashboard origin it depends on also does not exist yet, and
-> `externally_connectable.matches` rejects a bare wildcard, so the key could not be filled in
-> honestly even if it were declared. The implementation plan carries FR-3.6.3 as one of its two
-> declared traceability gaps, and the manifest test in the plan's Task 1.2 asserts
-> `externally_connectable` is **absent** so the cut cannot decay into an oversight. Reinstating it
-> requires the manifest key, an `on_external` handler, the enumerated read-only message subset
-> below, `DASHBOARD_ORIGIN` restored to §5.2, and the origin decided — recorded in the plan at Task
-> 5.6. Everything below stands unchanged for whoever does that.
+> **Reinstated 2026-09-01 (decision D28), superseding the 2026-08-27 cut (plan decision D6).** D6
+> cut this because the production dashboard origin was undecided and `externally_connectable`
+> cannot hold a wildcard. D28 resolves that the same way `EXTENSION_KEY` (§5.2) already resolves an
+> equivalent build-time-vs-environment split: `DASHBOARD_ORIGIN` defaults to
+> `http://localhost:3000` for local development and MUST be set to a concrete production origin
+> before a release build; a release build with it unset SHALL fail fast at build time rather than
+> ship a manifest with no working `externally_connectable` entry. This also extends the dashboard's
+> content: it now renders the financial summary described below, not only the ranked list.
 
-- The dashboard SHALL render the same ranked order list on a larger canvas.
-- Because the server is stateless, the dashboard SHALL obtain orders from the extension via
+- The dashboard SHALL render the same urgency-ranked order list the popup renders (FR-3.2.2), on a
+  larger canvas, plus three summary figures computed over it:
+  - **Recoverable value** — the sum of `price` across every `ORDER_ITEM` that is still returnable
+    (within its return window, no matter whether a return has been started).
+  - **Saved to date** — the sum of `price` across every `ORDER_ITEM` whose `RETURN_REQUEST` reached
+    a successful terminal state (`LabelPrinted`, `DroppedOff`, or `HandedOff` — FR-3.3.9). `Aborted`
+    requests SHALL NOT count.
+  - **Days remaining per item**, ranked soonest-first, identical to FR-3.2.2's ordering.
+- All three figures SHALL be **computed at render time from existing entities** — `ORDER_ITEM` and
+  `RETURN_REQUEST` — and SHALL NOT be backed by a new persisted, accumulating total. A stored
+  running total can drift from the records it summarizes; a value derived fresh from them cannot.
+- Because the server is stateless, the dashboard SHALL obtain this data from the extension via
   `externally_connectable` messaging from the page to the extension, not from a server endpoint.
 - The dashboard SHALL degrade to an install prompt when the extension is absent.
-- The client SHALL NOT cache order contents in its own storage.
+- The client SHALL NOT cache order contents, or the computed figures, in its own storage.
 - The dashboard SHALL be served from a fixed production origin, listed with the local development
   origin in the extension's `externally_connectable.matches`.
 - The dashboard origin SHALL NOT host third-party scripts, including the email capture form of
   FR-3.6.2, which SHALL be served from a separate marketing origin that is **not** listed in
   `externally_connectable.matches`.
 - The extension SHALL expose an enumerated set of messages to the dashboard origin, limited to the
-  ranked order list the dashboard renders. It SHALL NOT expose a general-purpose read of local
-  storage.
+  ranked order list and the three computed figures above. It SHALL NOT expose a general-purpose
+  read of local storage, and SHALL NOT expose `PREFERENCES` (FR-3.0.1) to the dashboard origin —
+  onboarding preferences are a client-only concern with no reason to cross an origin boundary.
 
 `externally_connectable` is granted to an origin, not to a page: every script that origin loads can
 message the extension. A third-party embed on the dashboard origin would therefore give that vendor
 — or anyone who compromises their CDN — read access to the user's entire order history.
 
 `externally_connectable.matches` accepts only concrete host patterns — a bare wildcard is rejected
-at load — so the production hostname is a decision that must be made before the extension can be
-packaged, not after. It is recorded as an open question.
+at load. D28 resolves the resulting "decide the hostname before packaging" problem the same way
+this document already resolves `EXTENSION_KEY`: a usable non-production default plus a required,
+validated production value, rather than an open question blocking Task 1.2 indefinitely.
 
 ### 3.7 Extension Permissions
 
@@ -948,11 +1018,11 @@ three required fields are the contract, and `details` is an extension point with
 | `reason` | Meaning |
 |---|---|
 | `unrecognized-page` | DOM did not parse as an order page |
-| `wrong-carrier-label` | The printed label is not USPS postage, so no USPS pickup is possible |
-| `address-not-serviceable` | USPS pickup unavailable at this address. On the eligibility endpoint this is **a successful negative answer**, not an error — see FR-3.4.1; as an error shape it appears only when a schedule was attempted anyway |
+| `wrong-carrier-label` | The printed label's carrier is not one of `SUPPORTED_PICKUP_CARRIERS`, so no pickup is possible |
+| `address-not-serviceable` | Pickup unavailable at this address for the configured carrier. On the eligibility endpoint this is **a successful negative answer**, not an error — see FR-3.4.1; as an error shape it appears only when a schedule was attempted anyway |
 | `location-not-serviceable` | The stored package location cannot be honoured by this carrier. **Carries `details.servable_locations`** — the reduced set to re-ask from |
 | `etag-expired` | Refresh the pickup before amending or cancelling |
-| `upstream-unavailable` | USPS or Bedrock failed; safe to retry |
+| `upstream-unavailable` | The pickup carrier or Bedrock failed; safe to retry |
 | `payload-too-large` | DOM payload exceeded the configured ceiling |
 | `label-not-printed` | The box has no printed label yet, so a pickup cannot be scheduled |
 | `client-too-old` | The installed extension predates a required API change; updating fixes it |
@@ -983,19 +1053,19 @@ representing it as an error was wrong.
 sequenceDiagram
     participant EXT as extension
     participant API as boomerang-api
-    participant USPS as usps-pickup
+    participant CARRIER as pickup-carrier
 
     EXT->>API: POST pickups eligibility with address
-    API->>USPS: eligibility request
-    USPS-->>API: serviceable plus standardized address
+    API->>CARRIER: eligibility request
+    CARRIER-->>API: serviceable plus standardized address
     API-->>EXT: eligible true
     Note over EXT,API: user has already confirmed the label is printed
     Note over EXT: writes a provisional booking record first
     EXT->>API: POST pickups with address
-    API->>USPS: eligibility again, authoritative
-    USPS-->>API: standardized address
-    API->>USPS: schedule with packageType RETURNS
-    USPS-->>API: confirmation number ETag and scheduled date
+    API->>CARRIER: eligibility again, authoritative
+    CARRIER-->>API: standardized address
+    API->>CARRIER: schedule with packageType RETURNS
+    CARRIER-->>API: confirmation number ETag and scheduled date
     API-->>EXT: confirmation number ETag date and standardized address
     Note over EXT: promotes the record and snapshots the returned address
 ```
@@ -1006,16 +1076,16 @@ sequenceDiagram
 sequenceDiagram
     participant EXT as extension
     participant API as boomerang-api
-    participant USPS as usps-pickup
+    participant CARRIER as pickup-carrier
 
     Note over EXT: stored ETag is stale after one hour
     EXT->>API: POST pickups refresh with confirmation number
-    API->>USPS: fetch current pickup
-    USPS-->>API: pickup state and fresh ETag
+    API->>CARRIER: fetch current pickup
+    CARRIER-->>API: pickup state and fresh ETag
     API-->>EXT: fresh ETag
     EXT->>API: DELETE pickups with fresh ETag
-    API->>USPS: cancel request
-    USPS-->>API: cancelled
+    API->>CARRIER: cancel request
+    CARRIER-->>API: cancelled
     API-->>EXT: cancelled
 ```
 
@@ -1027,8 +1097,9 @@ sequenceDiagram
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `ENVIRONMENT` | `dev` or `prod`; scopes SSM paths and selects the USPS base URL | none, required |
-| `CARRIER_ADAPTER` | Which carrier adapter the server constructs at startup: `mock` or `usps`. This is the parameter the two USPS credentials are conditionally required *by* | `mock` |
+| `ENVIRONMENT` | `dev` or `prod`; scopes SSM paths and selects configured carrier base URLs | none, required |
+| `SUPPORTED_PICKUP_CARRIERS` | Comma-separated set of third-party pickup carriers enabled for this deployment; a label carrier must belong to this set before pickup is offered | `usps` |
+| `CARRIER_ADAPTER` | Which carrier adapter the server constructs at startup: `mock` or a configured carrier adapter. The mock is for local/demo use and does not imply a production carrier | `mock` |
 | `BEDROCK_MODEL` | **Regional inference profile** identifier, not a bare model ID; a bare ID fails at invoke | **none, required** |
 | `BEDROCK_MODEL_PARSE` | Optional per-call-site override for the ingest parse | falls back to `BEDROCK_MODEL` |
 | `BEDROCK_MODEL_ACTION` | Optional per-call-site override for the driver fallback, which has the tighter budget of NFR-6.4 | falls back to `BEDROCK_MODEL` |
@@ -1041,7 +1112,7 @@ sequenceDiagram
 | `LOG_LEVEL` | Structured log level | `INFO` |
 | `BEDROCK_TIMEOUT_PARSE_MS` | Deadline on a single Bedrock invoke at the **order-parse** call site; exceeding it raises `upstream-unavailable` | `9000` |
 | `BEDROCK_TIMEOUT_ACTION_MS` | Deadline on a single Bedrock invoke at the **action-fallback** call site; exceeding it raises `upstream-unavailable` | `4500` |
-| `USPS_TIMEOUT_MS` | Deadline on a single USPS call; exceeding it raises `upstream-unavailable` | `8000` |
+| `CARRIER_TIMEOUT_MS` | Deadline on a single configured third-party carrier call; exceeding it raises `upstream-unavailable` | `8000` |
 | `MIN_CLIENT_VERSION` | Lowest extension version the server will serve; below it, `client-too-old` | `0.1.0` |
 | `MOCK_CONFIRMATION_PREFIX` | Fixed prefix on every confirmation number the mock carrier adapter returns, so a simulated booking is recognisable from the number alone, per FR-3.4.5b. Not configurable per deployment — it is a constant published with the wire contracts, listed here because it is a named value both workspaces read | `SIM-` |
 | `FUNCTION_TIMEOUT_MS` | The function's own timeout, supplied by the infrastructure from the same value it gives the function. Every upstream deadline above SHALL validate as below it | `60000` |
@@ -1061,7 +1132,7 @@ sequenceDiagram
 | `MODEL_FALLBACK_TIMEOUT_MS` | Budget for the action-fallback call; exceeding it is treated as `report_stuck`, per NFR-6.4 | `5000` |
 | `API_REQUEST_TIMEOUT_MS` | Deadline on a single request to the server, per attempt. SHALL sit **above** the server's longest upstream deadline so the server answers with a typed `reason` rather than the client giving up first | `12000` |
 | `API_RETRY_BUDGET_MS` | Ceiling on a whole bounded-retry sequence including its backoff. SHALL sit **below** three times `API_REQUEST_TIMEOUT_MS`, so the budget rather than the attempt count ends the sequence | `20000` |
-| ~~`DASHBOARD_ORIGIN`~~ | **Withdrawn 2026-08-27 (plan decision D6).** It existed only to fill `externally_connectable.matches` for FR-3.6.3, which is out of PoC scope; the extension exports no such constant. Restore this row if FR-3.6.3 is reinstated | — |
+| `DASHBOARD_ORIGIN` | Concrete dashboard origin included in `externally_connectable.matches`; defaults to `http://localhost:3000` in development and is required for release builds | `http://localhost:3000` in development |
 | `EXTENSION_KEY` | The pinned public key that fixes the extension ID, one per environment | The environment's published keypair |
 | `CLIENT_VERSION` | The extension's own version, build-substituted from the manifest. It is the value of the `X-Boomerang-Client-Version` header on every request (§4.1) and the value recorded as `consent_extension_version` on a `PICKUP` (NFR-6.2). Added 2026-08-28: two obligations already depended on it and no table declared it | The manifest version |
 | `STORAGE_EVICTION_MARGIN_BYTES` | Extra bytes byte-driven eviction frees beyond the size of the write that was refused. Candidate sizes are estimated by serialisation and Chrome's accounting includes per-key overhead, so evicting to the exact figure leaves the retry able to fail again. Added 2026-08-28: the margin was specified in the low-level design and never named or given a value | `65536` |
@@ -1080,7 +1151,7 @@ below the client's own `MODEL_FALLBACK_TIMEOUT_MS` so the server gives up first 
 working on a request the client has already abandoned as `report_stuck` is holding a concurrency
 slot for an answer nobody will read.
 
-**The two USPS credentials are conditionally required, and they are the only two values not read
+**Carrier credentials are conditionally required, and they are the values not read
 from the environment.** `CARRIER_ADAPTER` is what selects between them: the mock carrier adapter is
 the default until USPS API access is granted, so a deployment running against the mock SHALL start
 without them. The selector SHALL be a configuration parameter rather than an inference from whether

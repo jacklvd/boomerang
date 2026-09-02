@@ -44,8 +44,8 @@ different design — not a background worker.
 │ server (FastAPI)     │──►│ Bedrock (Claude) │  DOM → structured
 │  parse · rank        │   └──────────────────┘
 │  carrier broker      │   ┌──────────────────┐
-│  holds all API keys  │──►│ USPS Carrier     │
-└──────────┬───────────┘   │ Pickup           │
+│  holds all API keys  │──►│ configured        │
+└──────────┬───────────┘   │ third-party pickup│
            ▼               └──────────────────┘
 ┌──────────────────────┐
 │ client (Next.js)     │  landing · install funnel · dashboard
@@ -57,7 +57,7 @@ return flow, opens the calendar tab, requests retailer permissions in context. H
 carrier or retailer credentials.
 
 **Server** — stateless broker and inference host. Parses DOM via Bedrock, ranks urgency, brokers
-USPS calls, holds every credential. **Never initiates anything.**
+configured third-party pickup calls, holds every credential. **Never initiates anything.**
 
 **Client** — landing page, email subscribe, install funnel, post-install dashboard.
 
@@ -80,18 +80,22 @@ order ID) crossing to the backend is the fallback — a different product, but a
 
 ## Data flow: return + pickup
 
-1. User picks an order and confirms intent.
-2. Extension requests host permission for that retailer if not already granted (D7).
-3. Return driver navigates the retailer's return flow, from configured selectors first and the
+1. On first interaction, the extension records optional return preferences: return address, preferred
+   self-service drop-off or home pickup, and printer access. Preferences stay in client storage.
+2. User picks an order and confirms intent.
+3. Extension requests host permission for that retailer if not already granted (D7).
+4. Return driver navigates the retailer's return flow, from configured selectors first and the
    model only on a miss. At the choice of return method it stops and presents every option with its
    price (FR-3.3.4). Free drop-off ends here, successfully. A printable label continues → **printed
    label** + tracking number + which carrier's postage it is (D6).
-4. Server calls USPS eligibility for the user's address. **Hard gate** (D5). Ineligible → offer
-   nearest drop-off or a priced alternative with the price stated. Never auto-escalate.
-5. Server schedules the pickup and returns the `confirmationNumber` and `ETag` to the extension,
+5. Server calls the selected supported third-party carrier's eligibility for the user's address.
+   **Hard gate** (D5). Ineligible → keep the retailer's own drop-off options visible. Never
+   auto-escalate.
+6. Server schedules the pickup and returns the `confirmationNumber` and `ETag` to the extension,
    which stores the confirmation number and the address it was booked against (D5).
-6. Extension opens the prefilled calendar URL; user reviews and saves (D2).
-7. Confirmation copy names the day USPS returned — never a time window, never a guarantee (D6).
+7. Extension opens the prefilled calendar URL; user reviews and saves (D2).
+8. Confirmation copy names the day the configured carrier returned — never a time window, never a
+   guarantee (D6).
 
 ## Trust boundary
 
@@ -102,7 +106,7 @@ order ID) crossing to the backend is the fallback — a different product, but a
 | Label page DOM | Extension only | Never transmitted — it carries the tracking number and return address |
 | Structured orders | Extension (`chrome.storage.local`) | Returned in the ingest response; the server keeps nothing |
 | Retailer session | Browser only | Content script runs in the user's own session; we never see credentials |
-| USPS credentials | Server only | App-level client-credentials OAuth, not per-user |
+| Configured carrier credentials | Server only | App-level credentials, not per-user |
 | Pickup confirmation + address | Extension | The ETag is passed through and deliberately not stored |
 | Google account | Nowhere | No scopes requested at all |
 | Item + address → Google | Sent in the calendar template URL | We hold nothing of Google's; we do send this to them. Stated rather than implied |
@@ -176,9 +180,11 @@ requirement away is strictly better: when the prefilled tab opens, the user sees
 block rendered in their own calendar, in their own timezone. They spot a conflict faster than any
 parser, and moving the event is a drag.
 
-## D4 — USPS only for carrier pickup in v1
+## D4 — Third-party pickup, with USPS first
 
-UPS is a fast-follow behind a flag. FedEx is not integrated.
+USPS is the first concrete adapter. Other carriers are enabled only when their credentials and
+documented pickup contract are available; the retailer's actual return option determines which
+carrier can be used.
 
 Our user is a consumer holding a retailer-issued prepaid label. They will never have a UPS or
 FedEx shipper number, and asking kills the product. That single constraint decides it:
