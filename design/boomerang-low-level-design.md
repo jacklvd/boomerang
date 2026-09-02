@@ -31,20 +31,14 @@ surfaces that carry the PoC's critical path:
 |---|---|---|
 | **Extension** (WXT, MV3, TypeScript) | Fully | Owns ingestion, the return driver, all persistent state, and most of the functional requirements |
 | **Server** (FastAPI, Python 3.13) | Fully | Owns the model calls, the carrier integration and every credential |
-| **Client** (Next.js) | **Not covered** | It is a read-only view over data the extension hands it (`client/AGENTS.md`). Phase 1 is a landing page with no logic; Phase 2 renders a list it does not compute. It has no class design worth specifying, and inventing one would imply logic that must not live there |
+| **Client** (Next.js) | Dashboard contract only | The client is a read-only view over data the extension hands it (`client/AGENTS.md`). The landing page remains outside this implementation plan, but the dashboard summary model and its external message contract are specified because FR-3.6.3 is in scope |
 
-~~The extension side of the dashboard contract — the enumerated `externally_connectable` message
-surface of FR-3.6.3 — **is** specified, because it lives in the extension.~~
-
-**Amended 2026-08-27 (plan decision D6): FR-3.6.3 is out of PoC scope, so there is no dashboard
-contract to specify.** The extension declares no `externally_connectable` key, `src/messaging/`
-routes internal messages only, and `DASHBOARD_ORIGIN` has left the configuration surface
-(requirements §5.2). The reasoning is upstream and is not repeated here beyond its consequence for
-this document: the requirement's entire cost fell on the manifest — a widened attack surface and a
-widened Web Store permission disclosure — for a surface the PoC never opens, since FR-3.6.1's popup
-already renders the ranked list. Every specification this document previously carried for that
-surface is struck rather than deleted, so that reinstating FR-3.6.3 is a matter of unstriking rules
-that were reasoned about, not of reconstructing them.
+**FR-3.6.3 is in scope again** (2026-09-01, plan decision D28). The dashboard is a static client
+surface on a concrete origin, and the extension exposes only an enumerated read-only message for
+the ranked return list and render-time financial summaries. `DASHBOARD_ORIGIN` is a required
+build-time value for release builds and defaults to `http://localhost:3000` in development. The
+dashboard never receives `PREFERENCES`, never writes extension storage, and never gets a general
+purpose storage-read message.
 
 ### 1.1 The four constraints that shape every decision below
 
@@ -1072,12 +1066,23 @@ classDiagram
         +set(address) None
         +clear() None
     }
+    class PreferencesRepository {
+      +get() Preferences
+      +set(preferences) None
+      +clear() None
+    }
     StorageCoordinator --> OrderRepository
     StorageCoordinator --> PickupRepository
     StorageCoordinator --> ReturnRepository
     StorageCoordinator --> AddressRepository
+    StorageCoordinator --> PreferencesRepository
 ```
 
+
+  `PreferencesRepository` is a client-only singleton repository. It stores the onboarding return
+  address, preferred return mode (`dropoff` or `pickup`), and `has_printer`; it does not call the API.
+  Its schema is part of the implementation contract, not an ad hoc popup object, and malformed or
+  absent data reads as unset preferences.
 **Every entity has exactly one key, and the keys are declared upstream** (revised 2026-08-28, sixth
 review, CLASS-3/CONSIST-2). `item_id` and `return_request_id` were used as primary keys throughout
 this section while §3.5 deferred entity fields to the upstream ERDs, which did not contain them —
@@ -2435,7 +2440,7 @@ estimated. Validation refuses a value at or above the function's own 60-second t
 longer than the invocation it lives inside cannot fire, and a field that silently never fires is
 worse than no field at all.
 
-**The two USPS credentials are the only values that come from Parameter Store rather than the
+**Carrier credentials are the values that come from Parameter Store rather than the
 environment, and that asymmetry is deliberate** — a Lambda environment variable is readable by
 anyone with `GetFunctionConfiguration`, so a secret placed there is a secret published to a wider
 audience than the code. They are also the only fields whose requirement is conditional, which is why
@@ -2489,7 +2494,7 @@ which is also how `CARRIER_ADAPTER` and `FUNCTION_TIMEOUT_MS` reached requiremen
 | Constant | `dev` | `prod` |
 |---|---|---|
 | `API_BASE_URL` | `http://localhost:8000` | The deployed Function URL origin |
-| ~~`DASHBOARD_ORIGIN`~~ | ~~Local origin~~ | **Withdrawn 2026-08-27 (plan decision D6)** — it existed only to fill `externally_connectable.matches` for FR-3.6.3. Struck from requirements §5.2 in the same revision; the extension exports no such constant |
+| `DASHBOARD_ORIGIN` | `http://localhost:3000` | Defaults to `http://localhost:3000` in development; required and concrete for release builds |
 | `EXTENSION_KEY` | The dev keypair's public key | The published keypair's public key |
 | `MAX_INGEST_BYTES` | `262144` | `262144` |
 | `INGEST_DEBOUNCE_MS` | `800` | `800` |
@@ -2694,7 +2699,7 @@ Before that, this row named a double whose input did not exist.
 | `src/permissions/` | Query reports a granted host as granted; the offer is made only after a successful scan — FR-3.7.2; a decline is recorded and not re-offered on the next scan; a revoked host reverts to the click path without error |
 | `src/ranking/` | Ordering by days remaining; inferred windows ranked but presented as estimates; unknown window listed, never omitted; **ordering is stable across repeated renders of unchanged data** — urgency is derived at render per FR-3.2.2, so two renders a second apart must not reorder equal-urgency orders |
 | `src/api/` | `reason` mapped to typed errors; unknown `reason` handled; no retry on the schedule call; bounded retry on read-only calls. **Every request the client builds carries `X-Boomerang-Client-Version`, spelled exactly that way** — requirements §4.1, asserted on the header name and on `/health` too, because a gate that only fires on some routes is not a gate. **Request and response shapes are asserted against `contracts/`, not against literals written here** (plan decision D15): the client's serialisation of each endpoint equals the canonical request file byte for byte after normalisation, and each canonical response file deserialises into the typed result without loss |
-| `src/messaging/` | Only enumerated messages served; no general-purpose storage read exists; a message from an unrecognised type is refused rather than defaulted. ~~`sender.origin` mismatch refused~~ — **amended 2026-08-27 (plan decision D6)**: with FR-3.6.3 out of scope there is no external sender, so `externally_connectable` is absent from the manifest and `onMessageExternal` is never registered. The origin check is not weakened, it is unreachable; §8.4's FR-3.7.1 row asserts the absence instead, which is the stronger property |
+| `src/messaging/` | Only enumerated messages served; no general-purpose storage read exists; a message from an unrecognised type is refused rather than defaulted; dashboard messages verify `sender.origin` against `DASHBOARD_ORIGIN` before returning the read-only summary |
 | `entrypoints/popup/` simulated bookings — **FR-3.4.5b** (renamed 2026-08-28, sixth review, TEST-1: there is no `src/popup/`; the popup is an entrypoint, and §8.5 records what its exclusion from the measured floor costs and how this row is still run) | A confirmation number bearing `MOCK_CONFIRMATION_PREFIX` renders with the simulated marker; one without it renders without; the determination is made **from the confirmation number alone** — asserted by rendering a prefixed number in a build configured as production and confirming the marker still appears, which is the case the requirement exists for |
 | `src/calendar/` | Template URL carries only permitted fields; no order ID, price or tracking number; `.ics` generated locally; `reminder_offered_at` set on offer, never on save |
 | `app/config.py` | **The retailer policy table and its host map** (added 2026-08-28, seventh review, CONF-3): `retailer_policy_for_url` returns the configured policy for a host it knows, matches the **longest** suffix when two could match, and returns the system default of **30** for a host it does not know rather than raising — the day-one case, asserted positively so it cannot be mistaken for an oversight; a host-suffix entry naming a `retailer_key` absent from the policy table fails the cold start, as does a duplicate key or a non-positive day count. Each validated field rejects its bad values and accepts its good ones: an absent `BEDROCK_MODEL` fails startup while a prefix-less one warns and starts; a `min_client_version` that is not three dot-separated non-negative integers fails; a non-positive or non-integer timeout fails; **each of the three upstream deadlines fails when it is not below `function_timeout_ms`**, and the message names which one and both numbers. A `Settings` built from a fully populated environment matches the §7.1 table field for field — the test that catches a row added to the table and never to the class |
@@ -2838,15 +2843,15 @@ statements; `NFR-6.x` names the section, and the obligation each row asserts is 
 | FR-3.5.5 record the offer | Calendar unit tests; calendar tab fails |
 | FR-3.6.1 popup | First-run scan; ingest to ranked list |
 | FR-3.6.2 landing page | **Not verified by this document.** It is a `client/` surface with its own tests; this document covers the extension and the server only, per §1. Recorded here so the gap is deliberate rather than missed |
-| FR-3.6.3 dashboard | **Out of PoC scope as of 2026-08-27 (plan decision D6)** — nothing verifies it because nothing implements it. The integration row that stood here is removed rather than skipped, since a skipped test is a claim that the feature exists and is untested. Reinstating the requirement reinstates this row |
-| FR-3.7.1 minimal manifest | Manifest assertion test: no `<all_urls>`; **no `externally_connectable` key at all** (amended 2026-08-27, plan decision D6 — an absent key is a stronger assertion than one correct host, and it is what the withdrawal of FR-3.6.3 buys); CSP declared; `optional_host_permissions` carries every retailer origin and `host_permissions` carries none; and on a production bundle, the extension ID derived from the emitted manifest equals the recorded production ID (§7.2) |
+| FR-3.6.3 dashboard | **In scope again as of 2026-09-01 (plan decision D28)** — Task 5.6 owns the external message contract, Task 8.7 owns the dashboard summary/UI, and Task 9.7 verifies the platform boundary |
+| FR-3.7.1 minimal manifest | Manifest assertion test: no `<all_urls>`; `externally_connectable.matches` contains only the concrete configured dashboard origin (D28); CSP declared; `optional_host_permissions` carries every retailer origin and `host_permissions` carries none; and on a production bundle, the extension ID derived from the emitted manifest equals the recorded production ID (§7.2) |
 | FR-3.7.2 two-tier permissions | First-run scan; permission declined |
 | FR-3.7.3 disclosure | Fallback telemetry fields asserted; **listing copy is a review gate** |
 | NFR-6.1 privacy | **The obligation:** order contents, titles, addresses and confirmation numbers never reach a log, at any level, and exception detail never reaches a response body. `app/logging.py` unit tests at `DEBUG`; `app/errors.py`'s unhandled-exception row asserting no leaked detail; the allowlist formatter's unrecognised-field placeholder (§6.1) |
 | NFR-6.2 compliance | **The obligation:** `consented_at` and `consent_extension_version` on the `PICKUP` record, captured at the confirmation screen preceding `POST /pickups`, and **never recorded server-side**. "Consent recorded at the confirmation screen" and "consent survives a lost response" assert all three — presence before the call, the screen's own instant, and absence from every request body. The **wording** of the disclosure remains a review gate |
 | NFR-6.3 resilience | **The obligation:** no failure leaves a return in an unrecoverable or invisible state. Return with one miss; tab closed; worker terminated mid-flow; schedule response lost; cancel refused after a good refresh; the store-rebuild row of §6.2 |
 | NFR-6.4 performance and presentation | **The obligations:** each upstream call is separately bounded and the client gives up on the action call before the server does; an inferred window is never presented as stated. Fallback timeout becomes `report_stuck`; upstream deadline exceeded, both upstreams; `app/config.py` rejecting a deadline not below `function_timeout_ms`; inferred window presentation |
-| NFR-6.5 security | **The obligations:** every field crossing the boundary is validated, no origin but the pinned ones is served, and CORS is configuration rather than a control. Order validator; `app/models/` strictness rows; **the FR-3.7.1 manifest assertion that no `externally_connectable` key exists at all**; the CORS configuration row, which asserts headers only and says so. ~~`sender.origin` refusal~~ — **repointed 2026-08-28 (sixth review, TEST-3)**: §8.2 struck that assertion on 2026-08-27 under plan decision D6 and this row went on citing it, which is a traceability row reporting coverage that no longer exists. The absence assertion is the replacement §8.2 itself names as the stronger property — an origin check can be weakened by an edit, whereas a manifest with no external-messaging key has no origin to check |
+| NFR-6.5 security | **The obligations:** every field crossing the boundary is validated, no origin but the pinned ones is served, and CORS is configuration rather than a control. Order validator; `app/models/` strictness rows; the FR-3.7.1 manifest assertion that `externally_connectable.matches` contains only the concrete dashboard origin; the external `sender.origin` check; and the CORS configuration row, which asserts headers only and says so |
 | NFR-6.6 infrastructure | **Not tested here, but no longer unowned** — the check is Terraform, and it belongs to the deployment track: plan Task I.1 declares the topology and verifies it by `terraform plan`, Task I.2 applies it and smoke-tests the deployed endpoints (plan decisions D7 and D8). See §8.5 |
 | NFR-6.7 abuse and spend | **Not tested here, but no longer unowned** — same owner: the reserved concurrency, the Bedrock `InputTokenCount` alarm and the daily budget are declared and plan-asserted in Task I.1. See §8.5 |
 
@@ -2918,12 +2923,9 @@ more than the tidiness (revised 2026-08-27, from the implementation-plan review)
    scope judgement but the ownership — "deferred until access is granted" is a sentence that stays
    true forever unless something is written down to notice when the condition clears.
 
-3. ~~**The production dashboard hostname**~~ **Resolved by removal (plan decision D6).** FR-3.6.3 is
-   out of PoC scope, so there is no dashboard, no origin to name and no `externally_connectable` key
-   to fill — and therefore no naming decision blocking the manifest. This is the cleanest kind of
-   answer to an open question: the thing that needed naming stopped existing. §8.4's FR-3.7.1 row
-   now asserts the key's **absence**, which is what made the question disappear rather than merely
-   go quiet.
+3. ~~**The production dashboard hostname**~~ **Resolved by D28.** `DASHBOARD_ORIGIN` defaults to
+  `http://localhost:3000` in development and must be concrete before a release build. The
+  dashboard is in scope, and Task 5.6 owns its origin-checked external message contract.
 
 4. **What keeps a citation in this document from naming a requirement that does not exist?** Two
    review rounds each caught one — an entity attributed to a high-level design section that does not

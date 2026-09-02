@@ -4,8 +4,9 @@
 
 Boomerang is a reverse-logistics concierge. A Manifest V3 browser extension reads retailer order
 pages the user is already viewing, a stateless FastAPI service on AWS Lambda parses them with
-Amazon Bedrock and brokers USPS Carrier Pickup calls, and the user gets a printed return label,
-a booked pickup, and a calendar reminder without visiting the retailer's site themselves.
+Amazon Bedrock and brokers configured third-party pickup calls, and the user gets a return-method
+recommendation, a booked pickup when available, and a calendar reminder without visiting the
+retailer's site themselves.
 
 The architecture is shaped by one fact established in
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md): **Boomerang holds no OAuth grant for any
@@ -18,9 +19,9 @@ settled in [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) and are treated 
 section 6 covers only the architectural decisions this document adds.
 
 **Key technology choices at a glance:** WXT-built MV3 extension in TypeScript, FastAPI on AWS
-Lambda behind a public Function URL, Amazon Bedrock for extraction, USPS Carrier Pickup for
-collection, SSM Parameter Store for credentials, GitHub Actions and CloudWatch for operations. No
-database, no VPC, no message queue.
+Lambda behind a public Function URL, Amazon Bedrock for extraction, configured third-party pickup
+carriers for collection, SSM Parameter Store for credentials, GitHub Actions and CloudWatch for
+operations. No server database, no VPC, no message queue.
 
 ---
 
@@ -46,7 +47,7 @@ flowchart TB
 
     subgraph third["Third party services"]
         BR["Amazon Bedrock"]
-        USPS["USPS Carrier Pickup"]
+        CARRIER["Configured third-party pickup carriers"]
     end
 
     subgraph web["Static web"]
@@ -60,7 +61,7 @@ flowchart TB
     SW -- "HTTPS" --> URL
     URL --> FN
     FN --> BR
-    FN --> USPS
+    FN --> CARRIER
     FN --> SSM
     FN --> CW
     SW --> CAL
@@ -88,8 +89,9 @@ owns all persistent state, and holds no credential of any kind.
 | **Return driver** | Service worker, acting on the tab through `chrome.scripting` | Walks the retailer return flow in a visible tab from configured selectors, pausing at irreversible steps and at the choice of return method | Retailer page DOM, service worker |
 | **Action validator** | Service worker, before any injection | Checks every model-proposed action against the closed vocabulary before it touches the page | Return driver |
 | **Service worker** | Extension background context | The only network egress point; calls the API, owns local storage, opens the calendar tab, requests host permissions | API, local store, popup, dashboard |
-| **Popup** | Extension page, own origin | Primary surface; ranks orders by urgency **at render time**, starts returns, and offers **"Scan this page"** on the first run | Local store only |
-| **Local store** | `chrome.storage.local`, reachable only from extension contexts | Orders, items, address, pickup confirmation numbers, and the return driver's session state | Service worker |
+| **Popup** | Extension page, own origin | Primary surface; captures onboarding preferences, ranks orders by urgency **at render time**, starts returns, and offers **"Scan this page"** on the first run | Local store only |
+| **Dashboard** | Static client page on a fixed origin | Renders the ranked list and render-time recoverable value, saved value, and days remaining | Extension via an enumerated external message subset |
+| **Local store** | `chrome.storage.local`, reachable only from extension contexts | Orders, items, preferences, address, pickup confirmation numbers, and the return driver's session state | Service worker; popup reads |
 
 **The middle column is a security boundary, not a deployment note.** The content script is the only
 subcomponent that shares a process with a retailer page, and it runs in Chrome's isolated world, so
@@ -107,10 +109,10 @@ service worker and the *result* of validation is what crosses into the tab, as a
 
 **Why the extension owns state rather than the server:**
 - Nothing the server could store would survive the absence of a grant to fetch it again.
-- A server restart cannot orphan a real USPS booking if the confirmation number lives on the client.
+- A server restart cannot orphan a real third-party booking if the confirmation number lives on the client.
 - It removes a database, a backup story, and a category of privacy exposure from the design.
 
-The mirror of that third point is stated in §4.3: the client can orphan a real USPS booking, and the
+The mirror of that third point is stated in §4.3: the client can orphan a real carrier booking, and the
 design has to say what it does about that.
 
 #### The service worker is ephemeral; the return flow is not
@@ -162,8 +164,8 @@ every credential in the system. It never initiates anything and stores nothing b
 | **Ingestion handler** | Order-page subtree to structured orders via Bedrock | Bedrock |
 | **Window deriver** | Derives `return_by` and marks it inferred. Does **not** rank — ranking is a render-time concern on the client | none, pure computation |
 | **Return step advisor** | Fallback only, when the retailer adapter has no matching selector. Proposes one action from a closed vocabulary via forced tool use | Bedrock |
-| **Carrier broker** | USPS eligibility, schedule, refresh, cancel | USPS, Parameter Store |
-| **Credential loader** | Fetches and caches USPS credentials at cold start | Parameter Store |
+| **Carrier broker** | Eligibility, schedule, refresh, and cancel for configured third-party pickup carriers | Configured carriers, Parameter Store |
+| **Credential loader** | Fetches and caches credentials for configured carriers at cold start | Parameter Store |
 
 **Why Lambda:**
 - The workload only exists while a user is present; there is nothing to keep warm between sessions.
@@ -185,7 +187,7 @@ when the extension is absent.
 | Service | Role | Failure Posture |
 |---|---|---|
 | **Amazon Bedrock** | DOM to structured orders; next-step reasoning for the return driver | Retryable; surfaces as `upstream-unavailable` |
-| **USPS Carrier Pickup** | Eligibility, scheduling, cancellation | Eligibility, refresh and cancel are retryable; **the schedule call is not** — see §5.2. Eligibility failure is a normal outcome, not an error |
+| **Configured pickup carriers** | Eligibility, scheduling, cancellation | Eligibility, refresh and cancel are retryable; **the schedule call is not** — see §5.2. Eligibility failure is a normal outcome, not an error |
 | **Google Calendar** | Receives a prefilled template URL opened in a tab | No integration to fail; a URL either opens or does not |
 
 ---
@@ -275,6 +277,11 @@ erDiagram
         string package_location
         string location_note
     }
+    PREFERENCES {
+      string return_address
+      string preferred_return_mode
+      bool has_printer
+    }
 ```
 
 ### 4.2 Key Entities
@@ -288,6 +295,7 @@ erDiagram
 | **BookedAddress** | An immutable copy of the address a pickup was actually booked against | `postal_code`, `standardized`, `package_location` | Owned by exactly one pickup, never edited |
 | **DriverSession** | The durable record of an in-progress return, rehydrated after the service worker is terminated | `state`, `item_id`, `order_id`, `retailer_key`, `step_key`, `chosen_option`, `attempt_count`, `tab_id`, `tab_url`, `started_at`, `last_progress_at`, `schema_version` (amended 2026-08-28, seventh low-level-design review, CLASS-2: seven fields the design persists were declared in no document, and `adapter_step_key` is renamed `step_key` to match requirements §4.1's own spelling of the same concept) | Owned by at most one return request |
 | **Address** | The current collection address, standardized by USPS, plus where the carrier should look | `postal_code`, `standardized`, `package_location` | Singleton in the store, seeds new bookings |
+| **Preferences** | User's retailer-agnostic onboarding defaults | `return_address`, `preferred_return_mode`, `has_printer` | Singleton in the client store; guides highlighting only |
 
 **`ADDRESS` is editable; `BOOKED_ADDRESS` is not, and they cannot be the same record.** USPS refresh
 and cancel both take the address the pickup was booked against, and FR-3.4.6 requires storing the
@@ -474,6 +482,14 @@ grants access to a page **only on a user gesture**, so on a freshly installed ex
 content script running on page load and nothing to ingest. The first scan has to be something the
 user clicks. FR-3.7.2 calls this the thing without which the product cannot start.
 
+**First interaction — onboarding:**
+
+Before the first scan, the popup offers a skippable preferences form. It records the user's return
+address, whether they generally prefer self-service drop-off or home pickup, and whether they have
+printer access. The values are written to `PREFERENCES` in `chrome.storage.local`; they never go to
+the server. The preference guides highlighting only: the user still chooses from the options the
+retailer actually offers.
+
 **First run — the gesture path:**
 
 ```mermaid
@@ -485,7 +501,7 @@ sequenceDiagram
     participant API as boomerang-api
 
     USER->>POPUP: opens the popup on an order page
-    Note over POPUP: no orders yet, no host permission
+    Note over POPUP: onboarding may be complete, skipped, or still pending
     POPUP->>USER: offers Scan this page
     USER->>POPUP: clicks Scan this page
     Note over POPUP,SW: the click is the activeTab gesture
@@ -563,9 +579,9 @@ flowchart TD
     G3 -- "Printable label" --> I["Reach label page, user prints"]
     G -- "No" --> I
     I --> J["User affirms the label is printed"]
-    J --> J2{"Label carrier is USPS"}
-    J2 -- "No" --> J3["No pickup possible, explain drop off"]
-    J2 -- "Yes" --> K["Check USPS eligibility in the service worker, before the offer renders"]
+    J --> J2{"Label carrier is supported"}
+    J2 -- "No" --> J3["No brokered pickup possible, explain the retailer's option"]
+    J2 -- "Yes" --> K["Check the configured carrier's eligibility before the offer renders"]
     K --> L{"Address serviceable"}
     L -- "No" --> M["Explain, and point at the retailer's own drop off options"]
     L -- "Yes" --> N0["Write a provisional booking intent record first"]
@@ -1031,7 +1047,8 @@ production hostname. The extension's `externally_connectable.matches` lists exac
   on it.
 
 **Consequence:** choosing the production hostname is now a prerequisite for shipping the extension,
-not a later detail. It is unresolved — see section 11.
+not a later detail. `DASHBOARD_ORIGIN` defaults to `http://localhost:3000` during development and
+must be concrete before a release build.
 
 **That origin is privileged, and nothing else may share it.** `externally_connectable` is granted to
 an *origin*, not to a page: every script that origin loads can message the extension and read the
@@ -1051,9 +1068,9 @@ Therefore:
   surface, so the case for putting it there never arises. A conditional exception that nothing needs
   is a conditional exception someone will later satisfy.
 - **The extension's message surface is narrow and enumerated.** The dashboard requests the ranked
-  order list it renders; the extension serves that and nothing else. There is no general-purpose
-  "read storage" message, so the blast radius of a compromised dashboard origin is bounded by what
-  the dashboard was going to display anyway.
+  order list and three render-time summary values it renders; the extension serves that and nothing
+  else. There is no general-purpose "read storage" message, so the blast radius of a compromised
+  dashboard origin is bounded by what the dashboard was going to display anyway.
 - **Every `onMessageExternal` handler checks `sender.origin` before doing anything else.** Listing
   an origin in `externally_connectable.matches` decides which origins Chrome will *deliver* from; it
   does not tag the message with a verified caller for us. The `sender` on each message carries the
@@ -1067,6 +1084,12 @@ Therefore:
   it is the second half of the escaping rule: escaping stops injected markup from being parsed as
   markup, and the policy stops any that slips through from loading or executing anything remote.
 - **No third-party script on the dashboard origin, enforced by CSP.**
+
+The dashboard summary is an ephemeral projection, not a stored entity: recoverable value is the sum
+of currently returnable item prices, saved value is the sum of successful return items, and each
+open item carries its days remaining. The extension computes this projection from `ORDER_ITEM` and
+`RETURN_REQUEST` at request/render time. It does not persist running totals, and it never includes
+`PREFERENCES` in the external response.
 
 ### 6.8 The model gets a closed action vocabulary, and is the exception rather than the loop
 
@@ -1624,11 +1647,10 @@ the system whose loss is not recoverable by rotating it.
 > `D1`–`D7` product decisions in [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), which this
 > section also cites and which keep their own numbering.
 
-1. ~~**What is the production hostname for the dashboard?**~~ **Resolved by removal (plan decision D6).**
-   FR-3.6.3 is out of PoC scope, so the extension declares no `externally_connectable` key and there
-   is no host pattern to fill in. This was the only question here with a hard dependency on
-   shipping, and it is discharged by not shipping the surface that created it rather than by
-   choosing a name. It returns the moment the dashboard does.
+1. ~~**What is the production hostname for the dashboard?**~~ **Resolved by D28.**
+  `DASHBOARD_ORIGIN` defaults to `http://localhost:3000` in development and must be concrete before
+  a release build. The dashboard is in scope and its origin-checked external message contract is
+  owned by the messaging task.
 
 2. **Is an unauthenticated public endpoint acceptable at launch?** *Still open, unchanged.* Section
    6.2 bounds *spend* with reserved concurrency, a payload ceiling and token limits, and detects the
