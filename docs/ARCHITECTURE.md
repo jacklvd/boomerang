@@ -1,277 +1,354 @@
-# Architecture & Decisions
+# Architecture and decisions
 
-How the pieces fit, and the settled decisions behind the shape. **Read the relevant decision
-before proposing an alternative** — these were expensive to establish. Sources in
-[`../.claude/artifacts/`](../.claude/artifacts/).
+> **Status:** Updated for the product decisions made on 2026-09-05. The requirements, detailed
+> design, milestone plan, and migration section of the planning decision record have been
+> reconciled with these decisions; the files under `plan/tasks/`, implementation, and workspace
+> guidance still describe the previous local-only, USPS-oriented PoC in places. The decisions marked
+> **Current** here govern the changed areas listed in
+> [`README.md`](README.md#direction-migration).
 
-> This document is the *why*. The *what to build* is
-> [`../design/boomerang-requirements.md`](../design/boomerang-requirements.md) and
-> [`../design/boomerang-high-level-design.md`](../design/boomerang-high-level-design.md), which
-> refine several decisions here — notably a stateless server on Lambda with no VPC and no
-> database. Where they disagree with this file, they win; the decision text below is annotated
-> where that has happened.
+This document records why the system has its current shape. [`SKETCH.md`](SKETCH.md) owns the
+product story and scope; [`RETURN_WORKFLOW.md`](RETURN_WORKFLOW.md) owns the current normal return
+flow and preserves interruption/resumption only as a deferred proposal.
 
-## The one thing to understand first
+## The central boundary
 
-Boomerang holds **no OAuth grant for any user**. The backend has no independent path to user
-data: it cannot poll, cannot run a nightly job, cannot check anything while the user is away.
-Every byte the server sees arrived because the extension pushed it during a session where the
-user was present.
+Boomerang may persist normalized account data, but it still has no independent access to a
+retailer's authenticated pages. The extension reads those pages in the user's existing browser
+session and sends only a bounded, sanitized representation for order normalization or current-step
+return planning. The backend cannot poll a retailer, reopen a return flow, or learn about an order
+the extension did not send.
 
-If a feature needs the server to know something the extension never sent, that feature needs a
-different design — not a background worker.
+For terminal return pages, the representation may include only the non-sensitive structure needed
+to report an outcome. Raw label artifacts, QR contents, addresses, barcodes, and protected URLs do
+not leave the browser.
+
+The web dashboard and extension have different responsibilities:
+
+- The **dashboard** is the account-level view of returnable orders, deadlines, preferences, and
+  current return summaries.
+- The **extension** is the browser-execution surface. It reads live retailer pages, performs
+  reversible form actions, and owns detailed workflow/session state and the latest safe checkpoint.
+- The **API** normalizes browser-supplied data, serves the dashboard, and stores normalized account
+  records. It never receives retailer credentials.
 
 ## Components
 
+```mermaid
+flowchart LR
+    subgraph Browser
+        RP["Retailer page<br/>user's session"]
+        EX["Chrome extension<br/>scan + return driver"]
+        LS["Extension local storage<br/>workflow/session state + safe checkpoint"]
+        WD["Web dashboard<br/>returns + preferences"]
+    end
+
+    subgraph Backend
+        API["FastAPI service<br/>auth + normalization + dashboard API"]
+        DB[("Database<br/>normalized account data")]
+        AI["Bedrock / agent pipeline"]
+    end
+
+    GI["Google Identity"]
+    GC["Google Calendar API<br/>priority 2"]
+
+    RP <--> EX
+    EX <--> LS
+    EX -->|"bounded sanitized DOM"| API
+    WD <--> API
+    API <--> DB
+    API -->|"transient task input"| AI
+    WD --> GI
+    WD -.->|"separate Calendar consent"| GC
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ BROWSER                                                     │
-│  ┌───────────────┐   reads DOM    ┌──────────────────────┐  │
-│  │ content       │◄───────────────│ retailer order page  │  │
-│  │ script        │                │ (user's own session) │  │
-│  └───────┬───────┘                └──────────────────────┘  │
-│  ┌───────▼───────┐   opens tab    ┌──────────────────────┐  │
-│  │ service       │───────────────►│ calendar template URL│  │
-│  │ worker        │                │ (no host permission) │  │
-│  └───────┬───────┘                └──────────────────────┘  │
-│  ┌───────▼───────┐                                          │
-│  │ popup         │  order list, urgency, "return this"      │
-│  └───────┬───────┘                                          │
-└──────────┼──────────────────────────────────────────────────┘
-           │ HTTPS  ── the only data path off the client ──
-           ▼
-┌──────────────────────┐   ┌──────────────────┐
-│ server (FastAPI)     │──►│ Bedrock (Claude) │  DOM → structured
-│  parse · rank        │   └──────────────────┘
-│  carrier broker      │   ┌──────────────────┐
-│  holds all API keys  │──►│ USPS Carrier     │
-└──────────┬───────────┘   │ Pickup           │
-           ▼               └──────────────────┘
-┌──────────────────────┐
-│ client (Next.js)     │  landing · install funnel · dashboard
-└──────────────────────┘
-```
 
-**Extension** — the only component with access to user data. Reads order pages, drives the
-return flow, opens the calendar tab, requests retailer permissions in context. Holds **no**
-carrier or retailer credentials.
+The exact client/server custody of a Calendar access or refresh token is still open. The diagram
+shows the product relationship, not a settled token-storage choice.
 
-**Server** — stateless broker and inference host. Parses DOM via Bedrock, ranks urgency, brokers
-USPS calls, holds every credential. **Never initiates anything.**
+## Data and authority
 
-**Client** — landing page, email subscribe, install funnel, post-install dashboard.
+The database and extension are both sources of truth, but never for the same detailed state.
 
-## Data flow: ingestion
-
-1. User navigates to a retailer order page they're already logged into.
-2. Content script waits for render (`MutationObserver` — order pages are SPAs and a single read
-   at `document_idle` will flake) and extracts the order-list subtree.
-3. Service worker posts it to `POST /orders/ingest`.
-4. Server sends it to Bedrock with a retailer-specific extraction prompt, gets structured orders
-   back, computes return-window urgency, returns the ranked list.
-5. Popup renders it.
-
-**Design note.** Sending DOM to Bedrock rather than parsing in the extension is the choice that
-draws Chrome Web Store reviewer attention — comparable extensions advertise that they run locally
-and send nothing anywhere. It buys resilience against DOM churn, the single largest maintenance
-risk in the product. Keep the payload minimal: the order-list subtree, not the whole page. If the
-review narrative becomes a problem, on-device extraction with only derived facts (retailer, date,
-order ID) crossing to the backend is the fallback — a different product, but a real one.
-
-## Data flow: return + pickup
-
-1. User picks an order and confirms intent.
-2. Extension requests host permission for that retailer if not already granted (D7).
-3. Return driver navigates the retailer's return flow, from configured selectors first and the
-   model only on a miss. At the choice of return method it stops and presents every option with its
-   price (FR-3.3.4). Free drop-off ends here, successfully. A printable label continues → **printed
-   label** + tracking number + which carrier's postage it is (D6).
-4. Server calls USPS eligibility for the user's address. **Hard gate** (D5). Ineligible → offer
-   nearest drop-off or a priced alternative with the price stated. Never auto-escalate.
-5. Server schedules the pickup and returns the `confirmationNumber` and `ETag` to the extension,
-   which stores the confirmation number and the address it was booked against (D5).
-6. Extension opens the prefilled calendar URL; user reviews and saves (D2).
-7. Confirmation copy names the day USPS returned — never a time window, never a guarantee (D6).
-
-## Trust boundary
-
-| Data | Lives where | Notes |
+| Domain | Authoritative store | Notes |
 |---|---|---|
-| Order page DOM | Extension → server → Bedrock | Transient; not persisted raw |
-| Return-flow step DOM | Extension → server → Bedrock | Fallback path only, when no selector matches. Same minimisation rules |
-| Label page DOM | Extension only | Never transmitted — it carries the tracking number and return address |
-| Structured orders | Extension (`chrome.storage.local`) | Returned in the ingest response; the server keeps nothing |
-| Retailer session | Browser only | Content script runs in the user's own session; we never see credentials |
-| USPS credentials | Server only | App-level client-credentials OAuth, not per-user |
-| Pickup confirmation + address | Extension | The ETag is passed through and deliberately not stored |
-| Google account | Nowhere | No scopes requested at all |
-| Item + address → Google | Sent in the calendar template URL | We hold nothing of Google's; we do send this to them. Stated rather than implied |
+| User identity | Database | Keyed by Google's stable OpenID Connect `sub` claim, not email |
+| Orders and items | Database | Normalized records supplied through the extension |
+| Prices and dates | Database | Includes delivered date and parsed return deadline when available |
+| Policy facts | Database | Rules, fees, deadlines, and provenance/confidence where the parser provides them |
+| User preferences | Database | Used to rank and explain choices, never to authorize one |
+| Current return summary | Database | Minimal dashboard projection; for QR outcomes, v1 stores only `qr_ready` |
+| Detailed workflow/session state | `chrome.storage.local` | Latest safe checkpoint, current-run step, tab context, fields filled, attempts, and timestamps |
+| Retailer session | Browser only | Cookies, authorization headers, and credentials never leave the browser |
+| Raw or transmitted DOM representation | Nowhere durable | Processed transiently and discarded after success or failure |
 
-The extension never holds an API key; the server never holds a user credential. Neither can be
-compromised into the other's capabilities.
+The dashboard may display the database summary while the extension retains richer local progress.
+When they reconnect, the extension may publish a new summary only after validating the live page or
+an explicit user action. The database must not reconstruct or command a retailer workflow from an
+old summary alone.
 
----
+## Primary data flows
 
-# Decisions
+### Sign-in and extension connection
 
-## D1 — Read retailer order pages, not Gmail
+1. The user authenticates to the web app with Sign in with Google.
+2. Boomerang validates the identity response and keys the account by `sub`.
+3. The dashboard and extension establish an application authenticated connection using a mechanism
+   still to be specified in the detailed design.
+4. Signing in does not by itself grant Calendar access or retailer access.
 
-Order ingestion comes from a content script reading retailer "Your Orders" pages. Gmail is out of
-scope in every form, API and scraping alike.
+### Order ingestion
 
-The first reason survives every other one: **Gmail is the wrong page to read even if it were
-free.** A receipt email tells you an order happened, not whether it can still be returned. The
-order page carries authoritative status, return eligibility, and the entry point into the return
-flow — the three things the agent acts on. There is shipped Chrome Web Store precedent for the
-technique.
+1. The user opens a retailer order-status page in their existing signed-in session.
+2. A user gesture grants the extension temporary page access on first use. A standing retailer host
+   permission may be requested later, in context.
+3. The extension extracts a bounded, sanitized order subtree and sends it to the API.
+4. The API synchronously invokes the parsing pipeline for now, validates the normalized result, and
+   persists items, prices, delivery dates, and available policy facts.
+5. The dashboard reads those database records and computes or renders urgency from the latest known
+   return deadline.
 
-Every Gmail scope that reads content or metadata is *restricted* — including `gmail.metadata`
-(downgrading from `gmail.readonly` buys a narrower footprint and an easier story, not a cheaper
-process). That means app verification, then a CASA security assessment: ~$540–$1,800/yr in
-perpetuity, 6–12 weeks before the first outside user, annual revalidation forever.
+Synchronous parsing is a planning assumption, not a closed decision. The AI-pipeline owner still
+needs to establish payload limits, latency, timeout behavior, retries, and whether the API can meet
+its hosting runtime limit. See [D13](#d13--synchronous-parsing-is-provisional--current).
 
-The trigger clause is specific: an app that "accesses or **has the capability to access** Google
-user data from or through a server" needs the annual third-party assessment. Our FastAPI service
-forwarding content to Bedrock lands squarely inside it, and "we don't persist anything" doesn't
-help.
+### Return execution
 
-Scraping `mail.google.com` needs no scope, and skipping the API is not escaping policy. Chrome Web
-Store **Limited Use** governs every byte of user data the extension handles, not only data
-obtained through a Google API, and tightened on 1 August 2026: collection must be strictly
-necessary to the single disclosed purpose, cross-purpose reuse prohibited, prominent disclosure
-for every collection. "Strictly necessary to a returns tool" is arguable for an orders page and a
-far harder case for a user's entire inbox.
+1. The user explicitly starts a return from the dashboard or extension.
+2. The extension opens or focuses the retailer flow and reads the current live DOM.
+3. For every return-flow step, the extension extracts a bounded, sanitized representation of that
+   current DOM and sends it to the agent through the API.
+4. The agent proposes exactly one tool call from the closed vocabulary: `click`, `select_option`,
+   `fill`, `pause_for_user`, `report_stuck`, or `report_outcome`.
+5. Trusted extension code validates the proposal against the current live DOM, target restrictions,
+   and user-confirmation rules. Bundled selectors may help resolve or validate a target, but they
+   never construct or execute an action without an agent proposal.
+6. The extension executes one validated, authorized browser action, hands control back for
+   `pause_for_user` or `report_stuck`, or records one validated terminal outcome. After an action
+   settles, it starts the next step from a new bounded, sanitized representation. A stale or invalid
+   proposal executes nothing and publishes nothing.
+7. Autofill is limited to reversible, allowed fields. Password, payment, file-upload, and other
+   sensitive inputs are never fill targets. In v1, `pause_for_user` hands control to the user; it
+   does not enter a resumable workflow state.
+8. V1 assumes the automated run proceeds without a supported interruption. If the page diverges or
+   the user takes over, Boomerang hands control back and does not promise to resume that run.
+9. Preferences rank visible return methods and explain tradeoffs. Every method and known price
+   remains visible; the user chooses and confirms final submission.
+10. The retailer's QR-code, printable-label, or manual outcome updates the database summary. For a
+    QR outcome, only `qr_ready` is persisted; whether to store a QR representation is deferred.
+    Detailed workflow/session state and the latest safe checkpoint remain local.
 
-Web Store review is the only distribution gate — there is no second channel — and the Bedrock
-hop is already the hardest question in ours, since comparable order-scraping extensions advertise
-that they run locally and send nothing anywhere. A `mail.google.com` host permission combines that
-with the broad-host-permission flag that draws in-depth review, on a DOM with the same obfuscated
-virtualized character D3 refuses in Calendar.
+`report_outcome` accepts only `qr_ready` or `label_ready` in v1 and carries no QR, label, address,
+barcode, or protected URL. `handed_to_carrier` and `complete` remain outside that tool until their
+independent evidence and transition decisions are resolved.
 
-*Costs us:* no ambient inbox awareness. We learn about an order when the user visits the order page.
-*Reopens if:* unattended background monitoring becomes non-negotiable — ambient awareness is the
-one thing an order page structurally cannot provide, and no parser improves it into existence.
+The proposed interruption state machine is preserved as explicitly deferred material in
+[`RETURN_WORKFLOW.md`](RETURN_WORKFLOW.md#appendix-deferred-interruption-and-resumption-proposal). It
+is not a v1 architecture requirement or a main-plan deliverable.
 
-## D2 — Write calendar events through a prefilled URL
+### Calendar reminder, priority 2
 
-`https://calendar.google.com/calendar/render?action=TEMPLATE` with `text`, `dates`, `ctz`,
-`details`, `location`. The user sees their own calendar with the form filled in and clicks Save.
-`.ics` fallback for non-Google users.
+Google authentication and Google Calendar authorization are separate grants. Sign-in commonly uses
+the identity scopes `openid`, `email`, and `profile`; creating a Calendar event requires an
+additional Calendar scope. Google documents these as separate authentication and authorization
+flows in [Google Identity Services](https://developers.google.com/identity/oauth2/web/guides/overview)
+and lists the available scopes in the
+[Calendar authorization guide](https://developers.google.com/workspace/calendar/api/auth).
 
-No OAuth scope, no SDK, no credential. And `chrome.tabs.create({url})` needs **no host permission
-at all** — host permissions gate script injection, fetch, and reading sensitive tab properties,
-not navigation. So we write to Calendar while requesting nothing for `google.com`.
+Boomerang therefore asks for the narrow event-writing permission when the user chooses **Add to
+calendar**, not simply because the user signed in. It does not read availability. Token custody,
+refresh behavior, revocation, and the final scope are open design choices.
 
-The confirmation click isn't friction. It *is* the "ping," and it makes the agent's action
-reviewable before it commits.
+Calendar remains priority 2. No current low-level implementation design should assign it to the
+client or server or define wire contracts until that priority and blocker 5 are taken up.
 
-## D3 — Don't read calendar availability
+## Decisions
 
-The agent proposes a pickup day from the carrier's slots. It does not determine when the user is
-free.
+### D1 — Read retailer pages; defer Gmail — Current
 
-There's no scrape-free way to read Calendar, and `calendar.google.com` is an obfuscated
-virtualized SPA whose DOM would be the most fragile surface in the product. Designing the
-requirement away is strictly better: when the prefilled tab opens, the user sees the proposed
-block rendered in their own calendar, in their own timezone. They spot a conflict faster than any
-parser, and moving the event is a drag.
+Order ingestion comes from retailer order-status pages, not Gmail. The order page contains the
+current eligibility, deadline, and return entry point that the product acts on. Gmail API access
+and Gmail DOM scraping are both deferred from v1.
 
-## D4 — USPS only for carrier pickup in v1
+Using Google as the Boomerang account provider does not change this decision. Identity permission
+does not authorize inbox access, and no Gmail scope belongs in the v1 consent request.
 
-UPS is a fast-follow behind a flag. FedEx is not integrated.
+### D2 — Use the Calendar API after separate consent — Current; replaces the template-URL decision
 
-Our user is a consumer holding a retailer-issued prepaid label. They will never have a UPS or
-FedEx shipper number, and asking kills the product. That single constraint decides it:
+The earlier architecture avoided OAuth by opening a prefilled Calendar URL. The current product
+decision intentionally adopts the Google Calendar API as priority 2.
 
-| | Schedule without a shipper account? |
-|---|---|
-| **USPS** | **Yes** — the request body has no account field of any kind |
-| UPS | Conditionally — `Shipper` is optional if you pay by tracking number or card |
-| FedEx | No — `associatedAccountNumber` is required and is the account invoiced |
+Authentication establishes who the user is; Calendar authorization grants a distinct capability.
+Request it incrementally when the user invokes **Add to calendar**. Choose the least-privileged
+scope that supports the final event ownership and update behavior. Whether to store a refresh token
+is not yet decided and belongs with the retention policy and threat model.
 
-The USPS `SchedulePickupRequest` has no `accountNumber`, no CRID, no MID, no payment token. The
-pickup binds to the consumer's address and their own email or SMS contact; the only thing
-authenticated is *our app*. Scheduling on a user's behalf isn't a workaround — it's the ordinary
-shape of the API. And it's free on both sides.
+### D3 — Do not read calendar availability — Current
 
-UPS is workable via `PaymentMethod 04` (bill the pickup to the retailer's 1Z return tracking
-number, ≤30 per pickup) but you need a UPS account just to get credentials, and a refused payment
-leaves us owing ~$9–15. FedEx has no tracking-number payment path at all; its fallback is the
-fedex.com guest flow through the browser we already drive.
+Calendar integration creates a deadline or follow-up reminder. It does not inspect free/busy data,
+select a time based on the user's schedule, or require background Calendar reads. If future product
+requirements add those behaviors, they require a separate privacy and scope decision.
 
-*Rejected: shipping aggregators.* EasyPost and Shippo both bind a pickup to a shipment *you*
-created on *your* carrier account. A retailer-issued label is neither. They add cost and a
-dependency without removing the account requirement.
+### D4 — USPS pickup in v1 — Deferred; no longer current
 
-## D5 — Eligibility is a hard gate; the ETag is refreshed, never stored
+USPS pickup scheduling, eligibility, cancellation, confirmation handling, and all related dashboard
+controls are excluded from the first version. The old USPS-first decision remains identifiable as
+D4 so older design and review references can be migrated deliberately.
 
-Eligibility runs before every schedule call, no exceptions. The extension stores the
-`confirmationNumber` and the address it was booked against; nobody stores the `ETag`.
+### D5 — USPS eligibility and ETag handling — Deferred with D4
 
-Eligibility is address-specific, so a meaningful share of users get a no — the agent needs a
-graceful second answer, not an error. Amend and cancel both require an ETag, but it is good for
-one hour or one use, so a stored one is worthless by the time the user changes their mind. The
-correct pattern is refresh-then-cancel: re-read the pickup to obtain a current ETag, then act on
-it. Treating a stored ETag as usable is the part most integrations get wrong.
+The previous eligibility gate and refresh-before-cancel rules matter only if carrier pickup returns
+to scope. They must not drive v1 data models, screens, or acceptance criteria.
 
-*Superseded detail:* this decision originally had the server persist both values. The server is
-now stateless — see [`../design/boomerang-high-level-design.md`](../design/boomerang-high-level-design.md) §6.3.
+### D6 — USPS postage and pickup-day copy — Deferred with D4
 
-## D6 — The label must be printed before the pickup call
+The previous printed-USPS-postage prerequisite and pickup-day language are not v1 behavior. QR codes
+and retailer labels remain valid retailer outcomes without implying that Boomerang scheduled a
+pickup.
 
-A pickup needs a printed label on the box, not a QR code. USPS Free Package Pickup only covers
-packages with prepaid postage affixed; a pickup for an unlabeled box isn't legitimate. And the
-postage must be **USPS** postage — the letter carrier is collecting mail, so a prepaid UPS label
-will not be collected however printed it is.
+A dashboard state such as `handed_to_carrier` or “picked up” must identify its evidence as
+user-confirmed or retailer-observed. Live carrier tracking is not implied.
 
-Related copy constraint: free pickup happens on the normal delivery round, Mon–Sat — a **day, not
-a window**, and never a guarantee. Never auto-escalate to a paid option.
+### D7 — Minimal Manifest V3 permissions, requested in context — Current
 
-*Superseded details:* two, both in
-[`../design/boomerang-requirements.md`](../design/boomerang-requirements.md).
+The extension starts with `activeTab`, `scripting`, and `storage`. Retailer domains are optional host
+permissions requested only after a user gesture and in context. The first run offers **Scan this
+page** because `activeTab` cannot inject automatically on page load.
 
-The driver no longer *selects* the printable label. Where a retailer offers a choice it presents
-every option with its price and stops (FR-3.3.4) — on Amazon the printable label is often a paid
-refund deduction while the QR drop-off is free, so auto-selecting it to satisfy this decision's own
-precondition would spend the user's money to reach a pickup they never asked for. A QR drop-off is
-now a successful outcome, not the `qr-only` error.
+Do not add `<all_urls>` to simplify acquisition. It broadens access and undermines the extension's
+review and privacy posture.
 
-The mandated phrase "with tomorrow's mail delivery" is withdrawn (FR-3.4.7). It was wrong at three
-edges: same-day requests before 2:00 AM CT are collected *today*, Sundays and holidays roll forward,
-and `nextAvailablePickup` can roll past an unserviceable day. USPS returns the scheduled date; copy
-renders it. The day-not-a-window invariant is unchanged.
+### D8 — Make the database-backed web dashboard the product home — Current
 
-## D7 — Minimal manifest, permissions requested in context
+The dashboard is no longer a deferred install funnel. It stores and presents normalized orders,
+return deadlines and values, preferences, current states, and extension connectivity. The extension
+remains necessary because the web service cannot access the retailer session.
 
-The manifest declares `activeTab`, `scripting` and `storage`. Retailer domains go in
-`optional_host_permissions`, requested when the user names the retailer.
+The screenshot supplied on 2026-09-05 is a layout reference, not a data contract. Its returns list,
+urgency legend, sorting, summary metrics, Pickups/handoffs view, privacy navigation, and connection
+state carry forward. USPS scheduling, confirmation, address, postage, and cancellation controls do
+not; the Pickups view is a carrier-neutral status view in v1.
 
-*Superseded detail:* this decision originally said `activeTab` and `scripting` only, which forbade
-the permission every stored entity depends on, and it had no first-run story —
-`activeTab` grants access only on a user gesture, so an extension holding it alone can never ingest
-on page load, and one holding no host permission has nothing to escalate from. The two-tier
-acquisition that fixes it is FR-3.7.2: a "Scan this page" click first, the standing grant offered
-only after the user has seen it work. The manifest also pins a generated `key` so the extension ID
-is stable enough to allowlist — see
-[`../design/boomerang-high-level-design.md`](../design/boomerang-high-level-design.md) §6.6.
+### D9 — Split durable account state from local execution state — Current
 
-Broad host permissions — especially `<all_urls>` — flag an extension for in-depth Chrome Web
-Store review and often a return for revision. The quality FAQ's own example is a shopping
-extension with an action button plus host access on the store being browsed; "e-commerce returns"
-is the same shape and is defensible, but must be argued in the listing rather than assumed.
+Database state supports the cross-session dashboard. Extension-local state supports safe browser
+automation and recovery. Keeping both is intentional, but a field must have one authoritative home.
+The database stores only the current return summary; `chrome.storage.local` stores the detailed
+workflow/session state and latest safe checkpoint. Keeping that checkpoint does not make
+user-controlled pause/resume or interrupted-flow recovery part of the current contract.
 
----
+Raw DOM and bounded, sanitized DOM representations are transient inputs, not database models.
 
-## Open questions
+### D10 — Use Google identity, keyed by `sub` — Current
 
-- **Which retailer for the PoC.** Amazon has the best-documented order-page DOM and published
-  scraping precedent; J.Crew carries the demo narrative and a simpler return flow. Ingestion is
-  easy either way — the return-flow drive is the risky half and should decide it.
-- **Model-training stretch goal.** Chrome Web Store Limited Use has no equivalent of the
-  Workspace model-training prohibition, which attaches to data obtained through Google APIs. Data
-  read off a retailer's page isn't covered — so it's a disclosure question, not a prohibition.
-  Out of PoC scope regardless.
-- **On-behalf scheduling is unobjected-to, not blessed.** Nothing in the USPS API terms prohibits
-  it, and USPS's own material frames the APIs as serving "you and your customers." Worth written
-  confirmation from USPS API support before scaling, and worth capturing explicit per-pickup user
-  consent either way.
+Google is the v1 account provider. The backend verifies the identity assertion and keys the user by
+the stable OpenID Connect `sub` value. Google explicitly warns that email can change and recommends
+`sub` as the unique identifier in its
+[OpenID Connect documentation](https://developers.google.com/identity/openid-connect/openid-connect).
+
+Retailer accounts are not linked to Boomerang through Google, and Google sign-in does not allow the
+server to access retailer pages.
+
+### D11 — Interruptible and resumable autofill — Deferred proposal; not current
+
+The Stop/Continue control and the `Stopping`, `Paused`, `Resuming`, and `NeedsReview` states are an
+exploratory design for a later phase. They are not v1 requirements and must not be added to the main
+implementation plan yet.
+
+The current flow assumes one uninterrupted automated run. If the user takes over or the flow loses
+its known state, the run ends or hands off for manual completion; v1 does not reconcile the edited
+page and continue from a stored checkpoint.
+
+### D12 — Preferences rank; users decide — Current
+
+The initial preferences are lowest cost, fastest refund or replacement, no printer, and greater
+sustainability. They affect ranking and explanation only. Boomerang never hides a method, invents a
+price, chooses a paid option, or submits a form based solely on a stored preference.
+
+### D13 — Synchronous parsing is provisional — Current
+
+The initial API contract assumes one synchronous request from extension input to validated,
+persisted normalized output. This keeps the first workflow simple, but it is blocked on the AI
+pipeline being refined by another owner.
+
+Before the contract is settled, measure realistic minimized-DOM payloads, model latency, retries,
+and the effective gateway/hosting timeout. If the result cannot reliably fit, the architecture must
+adopt an asynchronous job model rather than disguising a timeout as a parsing error.
+
+The per-step return agent also needs a measured request/response, timeout, and retry contract. That
+runtime work does not change the agent-first authority model: a timeout or transport failure hands
+control to the user and never authorizes a deterministic selector-only action.
+
+### D14 — Plan every return-flow step with the agent — Current
+
+The return driver is agent-first. On every step, the extension sends a bounded, sanitized
+representation of the current live DOM and receives exactly one proposed tool call from the closed
+vocabulary. Trusted extension code retains authority: it resolves and validates browser actions
+against the live page and user-confirmation rules immediately before execution, and validates a
+reported outcome before publishing it.
+
+The closed vocabulary adds `report_outcome(outcome_kind)` for terminal-page classification. Its v1
+values are `qr_ready` and `label_ready`, and its request and response contain no raw label artifact,
+QR contents, address, barcode, or protected URL. The terminal-page sanitizer exposes only the
+bounded structural and non-sensitive facts required to classify the outcome.
+
+Bundled retailer selectors are hints for target resolution, page recognition, and validation. They
+may improve reliability, but they do not form a deterministic first path and cannot advance the
+flow without an agent proposal. This keeps planning adaptive without allowing retailer-controlled
+content or model output to bypass the extension's safety boundary.
+
+This authority model is settled. Open blocker 2 covers the concrete per-step request, latency,
+timeout, and retry contract; open blocker 7 covers retailer-specific selector hints and acceptance
+fixtures. Neither blocker permits a selector-only execution path.
+
+## Retention and deletion baseline
+
+Retention answers **how long stored data remains**. Deletion rules answer **what event removes it,
+from which stores, and whether removal is immediate or recoverable**. They are different from the
+database schema: deciding to store an order does not decide whether it remains for 30 days, one
+year, or until account deletion.
+
+The agreed baseline is:
+
+- raw DOM and bounded, sanitized DOM representations have zero durable retention;
+- account deletion removes the user's normalized orders, items, policies, preferences, and return
+  summaries from the database;
+- clearing extension data removes local workflow/session state and its latest safe checkpoint but
+  does not silently delete the web account's database records;
+- disconnecting Calendar revokes access and removes any stored Calendar credential, if the final
+  design stores one.
+
+Still to decide:
+
+- how long completed, expired, and abandoned orders remain;
+- whether users can delete a single order and what related records cascade;
+- when completed local workflow/session state and its latest safe checkpoint are cleared;
+- whether account deletion has a recovery period and how backups expire;
+- whether Calendar uses a refresh token and, if so, its revocation and deletion lifecycle.
+
+The product Privacy surface and implementation requirements must state the final answers before a
+public launch.
+
+## Open blockers
+
+1. **Interruption policy:** v1 currently assumes an uninterrupted run and D11 is only a deferred
+   proposal. Before the interruption workstream and its acceptance criteria are treated as settled,
+   decide what Boomerang supports when a user interrupts: manual handoff with no recovery, stop-only
+   behavior, or full checkpointed resumption. Then either keep D11 deferred with explicit acceptance
+   criteria for the fallback or promote a chosen design into scope.
+2. **AI runtime and contracts:** normalization is synchronous for planning, while both normalization
+   and per-step agent requests still need measured payload, latency, timeout, retry, and hosting
+   contracts.
+3. **Dashboard status evidence:** decide whether carrier handoff is user-confirmed,
+   retailer-observed, or both, and record the source.
+4. **Retention details:** choose completed-order, expired-order, local workflow/session state,
+   checkpoint, token, and backup lifetimes.
+5. **Calendar design:** when priority 2 is taken up, choose component ownership, wire contracts, the
+   narrow scope, access/refresh-token custody, revocation path, and whether event updates are
+   supported.
+6. **Dashboard-to-extension bridge:** authenticate and address the correct browser workflow without
+   exposing a general-purpose command channel.
+7. **Retailer target:** confirm the first retailer before detailed selectors and acceptance tests are
+   treated as current.
+8. **Complete-state semantics:** define what `complete` means, which user-confirmed or
+   retailer-observed evidence can establish it, and which state transitions may lead to it. This is
+   independent of carrier-handoff evidence in blocker 3.
