@@ -14,9 +14,10 @@ current implementation contract.
 | [`../design/boomerang-data-model.md`](../design/boomerang-data-model.md) | Shared logical, wire, and extension-local models for parallel implementation | Current implementation contract for its stated scope |
 | [`../design/boomerang-api-contract.md`](../design/boomerang-api-contract.md) | Dashboard and extension UI HTTP endpoints and examples | Current implementation contract for its stated scope |
 | [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md) | Current migration decisions plus clearly marked historical planning decisions | Current for the migration section; historical below it |
-| [`../plan/boomerang-plan.md`](../plan/boomerang-plan.md) | Milestone order and workstream readiness | Current milestone/workstream plan |
+| [`../plan/boomerang-milestones.md`](../plan/boomerang-milestones.md) | Human-authored milestone order and workstream readiness | Current authoritative milestone/workstream plan |
+| [`../plan/boomerang-plan.md`](../plan/boomerang-plan.md) | Reserved future generated task-level plan and index | No generated task plan is currently published |
 | [`../plan/tasks/`](../plan/tasks/) | Previous task-level decomposition | Unreconciled historical planning material |
-| [`../scripts/split-plan.py`](../scripts/split-plan.py) and [`../scripts/build-plan-index.py`](../scripts/build-plan-index.py) | Tooling for the previous task corpus | Dormant until the separate task-planning pass updates or retires it |
+| [`../scripts/split-plan.py`](../scripts/split-plan.py) and [`../scripts/build-plan-index.py`](../scripts/build-plan-index.py) | Legacy task-corpus and generated-plan tooling | Historical until a later implementation pass refactors or retires it |
 | [`../reviews/`](../reviews/) | Findings against specific earlier revisions | Historical evidence, not current authority |
 | [`../.claude/artifacts/`](../.claude/artifacts/) | Raw research behind earlier decisions | Source material |
 
@@ -49,12 +50,14 @@ For the following areas, the current docs take precedence until that reconciliat
   deferred until that priority is taken up
 - USPS pickup and all carrier-pickup controls excluded from v1
 
-The current design remains authoritative for details not summarized above. The milestone plan has
-been migrated, but the task-level decomposition has not. Do not begin implementation from a mixed
-reading: use the current plan with these sources and treat `plan/tasks/` as historical input until
-it is reconciled. The task splitting and index scripts target that same historical corpus; they are
-not current validation gates and must not be used to validate the milestone plan until the separate
-task-planning pass updates or retires them.
+The current design remains authoritative for details not summarized above. The human-authored
+[`plan/boomerang-milestones.md`](../plan/boomerang-milestones.md) has been migrated, but the
+task-level decomposition has not. No generated task plan is currently published at
+`plan/boomerang-plan.md`. Do not begin implementation from a mixed reading: use the milestone plan
+with these sources and treat `plan/tasks/` as historical input until it is reconciled. The task
+splitting and index scripts target that same historical corpus; they are not current validation
+gates and must not be used to validate the milestone plan until a later implementation pass updates
+or retires them.
 
 ## Resolving disagreement
 

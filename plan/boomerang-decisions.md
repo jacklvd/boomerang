@@ -19,7 +19,9 @@ This section records that migration without erasing why the earlier plan existed
 authority is [`docs/README.md`](../docs/README.md), [`docs/SKETCH.md`](../docs/SKETCH.md),
 [`docs/RETURN_WORKFLOW.md`](../docs/RETURN_WORKFLOW.md),
 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), and the current requirements and design
-contracts. [`boomerang-plan.md`](boomerang-plan.md) now describes milestones and workstreams;
+contracts. [`boomerang-milestones.md`](boomerang-milestones.md) is the human-authored,
+authoritative milestone/workstream plan. [`boomerang-plan.md`](boomerang-plan.md) is reserved for a
+future generated task-level plan and index; no generated task plan is currently published.
 [`plan/tasks/**`](tasks/) remains unreconciled historical planning material.
 
 The findings in [`docs/spikes/retailer-flow.md`](../docs/spikes/retailer-flow.md) remain useful
@@ -54,6 +56,19 @@ persist a QR representation in v1.
 | `MIG-11` | Core v1 is the database dashboard plus one visible, supervised, uninterrupted Chrome return run. QR status is priority 1. Calendar is priority 2. All carrier pickup is deferred. | Remove pickup and Calendar-template work from the core sequence; plan Calendar only after core and `ARCH-B5`. |
 | `MIG-12` | The production topology is not selected. The former Lambda Function URL/no-VPC/no-database target cannot be carried forward because a durable database and authenticated account APIs are now required. | Continue local scaffolding only as scaffolding. Re-plan core-v1 deployment after the data, authentication, AI-runtime, and bridge constraints are sufficiently settled. Priority-2 Calendar does not block that work; the core topology must preserve a clean boundary for the later `ARCH-B5` design. |
 | `MIG-13` | The old task graph is not synchronized with the current requirements. | Use milestone/workstream planning now; do not publish task totals, makespan, critical path, progress, or complete task traceability until `plan/tasks/**` is reconciled. |
+| `MIG-14` | Planning authority flows from the current source documents to the human-authored milestone plan, then to approved tasks. | Keep the authoritative milestone source separate from the future generated task plan; generated task analysis must never redefine upstream product or architecture decisions. |
+
+#### MIG-14 — Separate authored milestones from the generated task plan
+
+[`boomerang-milestones.md`](boomerang-milestones.md) is the human-authored, authoritative
+milestone/workstream plan. [`boomerang-plan.md`](boomerang-plan.md) is reserved for a future
+generated task-level plan and index and currently contains only a compatibility placeholder.
+
+A later implementation pass will refactor the generator to combine the milestone source with an
+approved, reconciled task corpus. That generated artifact may report task status, traceability, and
+dependency analysis, but tasks and their derived output must never redefine scope, priorities,
+milestones, or architecture. The existing task corpus and planning scripts remain historical until
+that pass. No repository hook or CI workflow currently enforces those scripts.
 
 ### Provisional assumptions and unfrozen implementation choices
 
