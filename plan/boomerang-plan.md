@@ -5,13 +5,13 @@ into implementable tasks organized by execution batch. Tasks within a batch can 
 according to their track assignments. All tasks in a batch must complete before committing and
 moving to the next batch.
 
-**Total Tasks:** 91
+**Total Tasks:** 94
 **Batches:** 11 (Batch 0 through Batch 10), plus a deployment track
 **Makespan under the batch barrier:** ~35 slots (20-task theoretical floor — see [Critical Path](#critical-path))
 **Max Parallel Tracks:** 11 (in Batch 3)
 
 > **This plan was revised on 2026-08-27** following an adversarial review. Twenty-five decisions —
-> including the addition of Batch 0, the removal of FR-3.6.3 from scope, and three upstream
+> including the addition of Batch 0, the reinstatement of FR-3.6.3, and three upstream
 > amendments — are recorded with their reasoning in
 > [`plan/boomerang-decisions.md`](boomerang-decisions.md). Read that document before questioning why
 > a task exists. **`Dn` throughout this plan means a decision in that record** — not the `D1`–`D7`
@@ -42,15 +42,16 @@ request and response JSON for every endpoint and one error body per reason code 
 assert their serialization against those files. It is a shared *artifact*, deliberately not a shared
 build step, so the parallelism above survives (decision D15).
 
-**`client/` is out of scope, deliberately.** Low-level design §1 excludes it: phase 1 is a landing
-page with no logic and phase 2 renders a list it does not compute. FR-3.6.2 therefore has no task
-here and is recorded as an explicit gap in the traceability table rather than silently missing.
+**The client landing page is out of scope, deliberately; the dashboard is not.** The dashboard is a
+read-only view over data the extension hands it, with its message contract in Task 5.6 and its UI and
+summary model in Task 8.7. The marketing landing page and install funnel remain the one explicit gap
+(FR-3.6.2), recorded in the traceability table rather than silently omitted.
 
-**FR-3.6.3 is cut from PoC scope.** The dashboard-to-extension messaging path needs a dashboard
-hostname that does not exist (high-level design §11 Q1), and that hostname would otherwise block
-Task 1.2 — the second task in the plan. The manifest declares no `externally_connectable` key, Task
-5.6 routes internal messages only, and FR-3.6.3 joins FR-3.6.2 as a declared gap allowlisted in the
-Task 10.2 sweep. See decision D6.
+**FR-3.6.3 is in PoC scope.** The dashboard is a static client page with a concrete origin. Task
+1.2 reserves the `externally_connectable` manifest shape, Task 5.6 implements its narrow read-only
+message contract, and the dashboard task consumes only ranked orders and render-time summaries.
+`DASHBOARD_ORIGIN` defaults to localhost for development and is required for release builds. See
+decision D28.
 
 **Unit tests live inside their implementation task; integration tests are their own tasks.** The
 §8.2 table is a per-module contract, and `implement-task-code` writes tests first — so splitting a
@@ -142,9 +143,10 @@ Batch 3: Schemas, protocols, leaf modules
 
 Batch 4: Model boundary, carriers, storage, egress
   Track A (serial): 4.2 -> 4.1                       [server bedrock and prompts]
-  Track B (serial): 4.3 -> 4.4 -> 4.5                [server carriers usps]
+      Track B (serial): 4.3 -> 4.4 -> 4.5 -> 4.16       [server carrier adapters]
   Track C (serial): 4.6 -> 4.7                       [extension storage core]
-  Track C' (parallel after 4.7): 4.8, 4.9, 4.10, 4.11 -> 4.12   [extension repositories]
+        Track C' (parallel after 4.7): 4.8, 4.9, 4.10, 4.11, 4.15         [extension repositories]
+        Track C' (after 4.8, 4.9, 4.10, 4.11): 4.12                        [extension coordinator]
   Track D (serial): 4.13                             [extension api]
   Track E (serial): 4.14                             [server runtime mock carrier]
   --- Tracks A, B, E PARALLEL; C, D PARALLEL; server and extension PARALLEL ---
@@ -176,8 +178,9 @@ Batch 7: Server integration tests; driver flows
 
 Batch 8: Entrypoints and wiring
   Track A (serial): 8.1 -> 8.2                       [extension worker and content]
-  Track B (serial): 8.3 -> 8.4 -> 8.5                [extension popup]
-  Gate (serial): 8.6 (after 8.5)                     [manual acceptance in a real browser]
+      Track B (serial): 8.3 -> 8.4 -> 8.5 -> 8.7         [extension popup]
+      Track C (parallel after 8.2): 8.7                       [dashboard]
+      Gate (serial): 8.6 (after 8.5 and 8.7)             [manual acceptance in a real browser]
   --- Tracks A, B CONFLICT-free but B depends on 8.2 for messaging ---
   >>> Commit checkpoint: the extension loads and runs end to end by hand,
   >>> observed in Chrome and not only under the fake browser
@@ -185,7 +188,7 @@ Batch 8: Entrypoints and wiring
 Batch 9: Extension integration tests
   Track A (serial): 9.1                              [harness]
   Track B (parallel after 9.1): 9.2, 9.3, 9.4, 9.5, 9.6, 9.7
-  >>> Commit checkpoint: every FR except the two declared gaps has a passing assertion
+      >>> Commit checkpoint: every in-scope FR except the landing-page gap has a passing assertion
 
 Batch 10: Build gates and repository checks
   Track A: 10.1    Track B: 10.2    Track C: 10.3
@@ -435,17 +438,12 @@ After all tracks complete:
 
 ---
 
-### Track B: Server USPS carrier [server]
+### Track B: Server carrier adapters [server]
 
 - [Task 4.3: `app/carriers/usps/token.py` — OAuth token provider](tasks/batch-04/4.03-app-carriers-usps-token-py-oauth-token-provider.md) — prerequisites: 2.1, 2.2 · conflicts: 4.4, 4.5
 - [Task 4.4: `app/carriers/usps/adapter.py` — `UspsAdapter`](tasks/batch-04/4.04-app-carriers-usps-adapter-py-uspsadapter.md) — prerequisites: 3.4, 3.5, 4.3 · conflicts: 4.3, 4.5
 - [Task 4.5: `app/carriers/usps/scripted.py` — `ScriptedUspsAdapter` (test double)](tasks/batch-04/4.05-app-carriers-usps-scripted-py-scripteduspsadapter.md) — prerequisites: 3.4, 3.5 · conflicts: 4.3, 4.4
-
----
-
-### Track E: Server runtime mock carrier [server]
-
-- [Task 4.14: `app/carriers/mock.py` — `MockCarrierAdapter` (runtime stub)](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter-runtime.md) — prerequisites: 3.4, 3.5, 3.18 · conflicts: none
+- [Task 4.16: Configured third-party carrier selection](tasks/batch-04/4.16-configured-third-party-carrier-selection.md) — prerequisites: 3.4, 3.5, 4.3–4.5 · conflicts: none
 
 ---
 
@@ -457,7 +455,8 @@ After all tracks complete:
 - [Task 4.9: `ReturnRepository`](tasks/batch-04/4.09-returnrepository.md) — prerequisites: 4.7 · conflicts: none
 - [Task 4.10: `PickupRepository`](tasks/batch-04/4.10-pickuprepository.md) — prerequisites: 4.7 · conflicts: none
 - [Task 4.11: `AddressRepository` and `SessionStore`](tasks/batch-04/4.11-addressrepository-and-sessionstore.md) — prerequisites: 4.7 · conflicts: none
-- [Task 4.12: Coordinator cross-entity operations — eviction and clear-all](tasks/batch-04/4.12-coordinator-cross-entity-operations-eviction-and.md) — prerequisites: 4.8, 4.9, 4.10, 4.11 · conflicts: 4.7
+- [Task 4.12: Coordinator cross-entity operations — eviction and clear-all](tasks/batch-04/4.12-coordinator-cross-entity-operations-eviction-and.md) — prerequisites: 4.8, 4.9, 4.10, 4.11, 4.15 · conflicts: 4.7
+- [Task 4.15: `PREFERENCES` schema and `PreferencesRepository`](tasks/batch-04/4.15-preferences-schema-and-repository.md) — prerequisites: 2.4, 2.6, 4.7 · conflicts: none
 
 ---
 
@@ -466,6 +465,11 @@ After all tracks complete:
 - [Task 4.13: `src/api/` — the typed server client](tasks/batch-04/4.13-src-api-the-typed-server-client.md) — prerequisites: 2.5, 3.15, 3.16, 3.18 · conflicts: none
 
 ---
+
+### Track E: Server runtime mock carrier [server]
+
+- [Task 4.14: `app/carriers/mock.py` — `MockCarrierAdapter` (runtime stub)](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter-runtime.md) — prerequisites: 3.4, 3.5, 3.18 · conflicts: none
+
 
 ### Batch 4 Commit Checkpoint
 
@@ -630,15 +634,19 @@ After all tracks complete:
 
 ### Track B: Popup surfaces [extension]
 
-- [Task 8.3: Popup shell, ranked list, scan gesture, permission offer](tasks/batch-08/8.03-popup-shell-ranked-list-scan-gesture-permission.md) — prerequisites: 3.11, 3.17, 8.2 · conflicts: 8.4, 8.5
+- [Task 8.3: Popup shell, ranked list, scan gesture, permission offer](tasks/batch-08/8.03-popup-shell-ranked-list-scan-gesture-permission.md) — prerequisites: 3.11, 3.17, 4.15, 8.2 · conflicts: 8.4, 8.5
 - [Task 8.4: Popup return surfaces — choice, affirmation, stuck](tasks/batch-08/8.04-popup-return-surfaces-choice-affirmation-stuck.md) — prerequisites: 8.3 · conflicts: 8.3, 8.5
 - [Task 8.5: Popup pickup, calendar, clear-all, and the simulated-booking marker](tasks/batch-08/8.05-popup-pickup-calendar-clear-all-and-the-simulated.md) — prerequisites: 3.12, 4.12, 8.4 · conflicts: 8.3, 8.4
+
+### Track C: Dashboard [client and extension]
+
+- [Task 8.7: Dashboard and external message surface](tasks/batch-08/8.07-dashboard-and-external-message-surface.md) — prerequisites: 4.8, 4.9, 5.6, 8.2 · conflicts: none
 
 ---
 
 ### Gate: Manual acceptance [extension]
 
-- [Task 8.6: Walk the whole product by hand in a real browser](tasks/batch-08/8.06-walk-the-whole-product-by-hand-in-a-real-browser.md) — prerequisites: 8.5 · conflicts: none
+- [Task 8.6: Walk the whole product by hand in a real browser](tasks/batch-08/8.06-walk-the-whole-product-by-hand-in-a-real-browser.md) — prerequisites: 8.5, 8.7 · conflicts: none
 
 ---
 
@@ -651,6 +659,8 @@ After all tracks complete:
 - [ ] **Task 8.6's step list has been run in a real browser and recorded as passing.** A green Batch 9
       against the fake browser does not substitute for this.
 - [ ] A mock-backed booking renders as simulated, in the browser, observed by a person.
+- [ ] The dashboard renders recoverable value, saved value, and the urgency-ranked open-item list
+      through the narrow external message contract.
 - [ ] Nothing injects on page load; the first scan is a gesture and the standing permission is offered
       after it.
 - [ ] The order cap is enforced end-to-end: ingesting past `MAX_STORED_ORDERS` evicts down to the cap
@@ -780,6 +790,8 @@ named file.
 | [4.12](tasks/batch-04/4.12-coordinator-cross-entity-operations-eviction-and.md) | Coordinator cross-entity operations — eviction and clear-all | 4.8, 4.9, 4.10, 4.11 | 4.7 | 4.13 | [ ] |
 | [4.13](tasks/batch-04/4.13-src-api-the-typed-server-client.md) | `src/api/` — the typed server client | 2.5, 3.15, 3.16, 3.18 | None | 4.6–4.12, 4.14 | [ ] |
 | [4.14](tasks/batch-04/4.14-app-carriers-mock-py-mockcarrieradapter-runtime.md) | `app/carriers/mock.py` — `MockCarrierAdapter` (runtime stub) | 3.4, 3.5, 3.18 | None | 4.1–4.13 | [ ] |
+| [4.15](tasks/batch-04/4.15-preferences-schema-and-repository.md) | `PREFERENCES` schema and `PreferencesRepository` | 2.4, 2.6, 4.7 | None | 4.8–4.11, 4.13 | [ ] |
+| [4.16](tasks/batch-04/4.16-configured-third-party-carrier-selection.md) | Configured third-party carrier selection | 3.4, 3.5, 4.3–4.5 | None | 4.1–4.15 | [ ] |
 | [5.1](tasks/batch-05/5.01-app-services-ingest-py-ingestservice.md) | `app/services/ingest.py` — `IngestService` | 2.1, 3.2, 3.7, 4.1, 4.2 | None | 5.2–5.6 | [ ] |
 | [5.2](tasks/batch-05/5.02-app-services-action-py-actionservice.md) | `app/services/action.py` — `ActionService` | 2.1, 3.3, 4.1, 4.2 | None | 5.1, 5.3–5.6 | [ ] |
 | [5.3](tasks/batch-05/5.03-app-services-pickup-py-pickupservice.md) | `app/services/pickup.py` — `PickupService` | 2.1, 3.4, 3.5 | None | 5.1, 5.2, 5.4–5.6 | [ ] |
@@ -812,6 +824,7 @@ named file.
 | [8.3](tasks/batch-08/8.03-popup-shell-ranked-list-scan-gesture-permission.md) | Popup shell, ranked list, scan gesture, permission offer | 3.11, 3.17, 8.2 | 8.4, 8.5 | None | [ ] |
 | [8.4](tasks/batch-08/8.04-popup-return-surfaces-choice-affirmation-stuck.md) | Popup return surfaces — choice, affirmation, stuck | 8.3 | 8.3, 8.5 | None | [ ] |
 | [8.5](tasks/batch-08/8.05-popup-pickup-calendar-clear-all-and-the-simulated.md) | Popup pickup, calendar, clear-all, and the simulated-booking marker | 3.12, 4.12, 8.4 | 8.3, 8.4 | None | [ ] |
+| [8.7](tasks/batch-08/8.07-dashboard-and-external-message-surface.md) | Dashboard and external message surface | 4.8, 4.9, 5.6, 8.2 | None | 8.5 | [ ] |
 | [8.6](tasks/batch-08/8.06-walk-the-whole-product-by-hand-in-a-real-browser.md) | Walk the whole product by hand in a real browser | 8.5 | None | None | [ ] |
 | [9.1](tasks/batch-09/9.01-end-to-end-extension-test-harness.md) | End-to-end extension test harness | 8.6 | None | None | [ ] |
 | [9.2](tasks/batch-09/9.02-ingestion-and-permission-rows.md) | Ingestion and permission rows | 9.1 | None | 9.3–9.7 | [ ] |
@@ -831,7 +844,7 @@ named file.
 start immediately in parallel with Batch 0; what waits on Task 0.1 is 2.8, 3.13, 3.14, 7.7–7.10 and
 the Batch 9 driving rows, marked in bold in the Prerequisites column above.
 
-**Progress:** 0 / 91 tasks complete
+**Progress:** 0 / 94 tasks complete
 
 ---
 
@@ -889,7 +902,7 @@ deepest task and walks back by the lowest-numbered prerequisite still on a maxim
 | 5 | 5.4 → 5.5 | 2 |
 | 6 | 6.1 → 6.2 → 6.3 → 6.4 → 6.5 | 5 |
 | 7 | 7.7 → 7.8 → 7.9 → 7.10 | 4 |
-| 8 | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.6 | 6 |
+| 8 | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.7 → 8.6 | 7 |
 | 9 | 9.1 → any row | 2 |
 | 10 | 10.1 ∥ 10.2 ∥ 10.3 | 1 |
 | **Total** | | **~35** |
@@ -943,7 +956,7 @@ parallel with Batch 1; do not let it queue behind scaffolding.
 | 6 | A, B | server ∥ extension | 6.1–6.4 (`app/routes/__init__.py`); **6.6 → 6.7 → 6.8 serial** (`src/driver/driver.ts`); 6.5 needs all four routes and 4.14 | Last batch where the two workspaces are still independent |
 | — | Deployment | I.1 → I.2, I.3 ∥ I.2 | None — `infra/` is untouched by every other task | Opens after 6.5; runs concurrently with Batches 7–9 and gates nothing in them |
 | 7 | A, B, C | server integration ∥ extension driver flows | 7.7–7.10 serial (`src/driver/driver.ts`); 7.2–7.6 mutually free | 7.2–7.6 are five agents on five files; 7.7–7.10 is one agent |
-| 8 | A, B, Gate | Mostly serial | 8.3–8.5 share the popup shell and route table | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.6; 8.6 is a human at a browser, not an agent |
+| 8 | A, B, C, Gate | Mostly serial | 8.3–8.5 share the popup shell and route table | 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.7 → 8.6; 8.6 is a human at a browser, not an agent |
 | 9 | A, B | 9.2–9.7 all ∥ after 9.1 | None — one file each | Six agents can run the integration rows at once |
 | 10 | A, B, C | 10.1 ∥ 10.2 ∥ 10.3 | None | CI enforcement; 10.2 needs 7.6 and 9.7 to have landed |
 
@@ -957,19 +970,19 @@ if either changes.
 | 1 | 5 | 4 (A, B, C, D) | 1.2 ↔ 1.4 |
 | 2 | 8 | 7 (A, B, C, D, E, F, G) | 2.6 ↔ 2.7 |
 | 3 | 18 | 11 (A, B, C, I, D, E, F, G, J, H, K) | 3.1 ↔ 3.2, 3.1 ↔ 3.3, 3.1 ↔ 3.4, 3.2 ↔ 3.3, 3.2 ↔ 3.4, 3.3 ↔ 3.4, 3.9 ↔ 3.10, 3.13 ↔ 3.14, 3.15 ↔ 3.16 |
-| 4 | 14 | 5 (A, B, E, C, D) | 4.3 ↔ 4.4, 4.3 ↔ 4.5, 4.4 ↔ 4.5, 4.6 ↔ 4.7, 4.7 ↔ 4.12 |
+| 4 | 16 | 5 (A, B, E, C, D) | 4.3 ↔ 4.4, 4.3 ↔ 4.5, 4.4 ↔ 4.5, 4.6 ↔ 4.7, 4.7 ↔ 4.12 |
 | 5 | 6 | 5 (A, B, C, D, E) | 5.4 ↔ 5.5 |
 | 6 | 8 | 2 (A, B) | 6.1 ↔ 6.2, 6.1 ↔ 6.3, 6.1 ↔ 6.4, 6.2 ↔ 6.3, 6.2 ↔ 6.4, 6.3 ↔ 6.4, 6.6 ↔ 6.7, 6.6 ↔ 6.8, 6.7 ↔ 6.8 |
 | Deployment | 3 | 0 (—) | None |
 | 7 | 10 | 3 (A, B, C) | 7.7 ↔ 7.8, 7.7 ↔ 7.9, 7.7 ↔ 7.10, 7.8 ↔ 7.9, 7.8 ↔ 7.10, 7.9 ↔ 7.10 |
-| 8 | 6 | 3 (A, B, Gate) | 8.3 ↔ 8.4, 8.3 ↔ 8.5, 8.4 ↔ 8.5 |
+| 8 | 7 | 4 (A, B, C, Gate) | 8.3 ↔ 8.4, 8.3 ↔ 8.5, 8.4 ↔ 8.5 |
 | 9 | 7 | 2 (A, B) | None |
 | 10 | 3 | 3 (A, B, C) | None |
 
 **Theoretical speedup, honestly stated.** Batches 3, 7 and 9 are the wide ones: 11, 5 and 6
-simultaneous agents respectively. Ninety-one tasks over a 20-task dependency floor is a **4.5x**
+simultaneous agents respectively. 94 tasks over a 20-task dependency floor is a **4.7x**
 ceiling — but that ceiling is unreachable under the commit barrier this plan imposes, and the number
-that matters is 91 over a ~35-slot makespan, which is **~2.6x**. In practice the useful agent count
+that matters is 94 over a ~36-slot makespan, which is **~2.6x**. In practice the useful agent count
 is **two to four**: one on the extension spine (which is the critical path and cannot be split), one
 on the server, and one or two absorbing the wide batches as they open. Beyond four, agents queue
 behind `src/driver/driver.ts` and the popup route table and add coordination cost without adding
@@ -991,6 +1004,9 @@ about the shipped bundle and the module graph.
 
 | Requirement | Implementation Task(s) | Unit Test Task(s) | Integration Test Task(s) |
 |-------------|------------------------|-------------------|--------------------------|
+| FR-3.0.1 | 4.15, 8.3 | in-task (4.15, 8.3) | 9.2 |
+| FR-3.0.2 | 4.15, 8.3, 8.4 | in-task (4.15, 8.3, 8.4) | 9.3 |
+| FR-3.0.3 | 4.15, 8.3 | in-task (4.15, 8.3) | 9.2 |
 | FR-3.1.1 | 3.13, 3.14, 8.1 | in-task (3.13, 3.14, 8.1) | 9.2 |
 | FR-3.1.2 | 3.9, 8.1 | in-task (3.9, 8.1) | 9.2 |
 | FR-3.1.3 | 3.2, 3.10, 6.2, 6.8, 8.1 | in-task (3.2, 3.10, 6.2, 6.8, 8.1) | 7.2, 9.2 |
@@ -1026,7 +1042,7 @@ about the shipped bundle and the module graph.
 | FR-3.5.5 | 8.5 | in-task (8.5) | 9.7 |
 | FR-3.6.1 | 5.6, 8.3 | in-task (5.6, 8.3) | 9.7 |
 | FR-3.6.2 | **— (deliberate gap)** | — | — |
-| FR-3.6.3 | **— (deliberate gap, out of PoC scope)** | — | — |
+| FR-3.6.3 | 5.6, 8.7 | in-task (5.6, 8.7) | 9.7 |
 | FR-3.7.1 | 1.2, 1.4 | in-task (1.2, 1.4) | 10.1 |
 | FR-3.7.2 | 3.17, 8.3 | in-task (3.17, 8.3) | 9.2 |
 | FR-3.7.3 | 3.17, 8.3 | in-task (3.17, 8.3) | 9.2 |
@@ -1038,16 +1054,10 @@ about the shipped bundle and the module graph.
 | NFR-6.6 | 2.2, 4.2, 4.3, 6.5, I.1 | in-task (2.2, 4.2, 4.3, 6.5, I.1) | I.2 |
 | NFR-6.7 | 2.2, 6.1, 6.5, I.1 | in-task (2.2, 6.1, 6.5, I.1) | 7.6 |
 
-**Two gaps, stated rather than hidden.** FR-3.6.2 (landing page and install funnel) has no task. It
-belongs to `client/`, which the low-level design excludes from its scope in §1 — this plan decomposes
-that design and inherits the boundary. FR-3.6.3 (dashboard) has no task either, and for a different
-reason: it is the only requirement that forces `externally_connectable` into the manifest, which
-widens the extension's attack surface and its Web Store permission warnings for a surface nothing in
-the PoC demo touches. It is deliberately deferred, not overlooked — see the decisions record, and see
-Task 5.6's developer note for exactly what reinstating it would require. Neither requirement is
-withdrawn and neither is satisfied; both are unplanned, and Task 10.2's citation sweep carries them
-as its **two** allowlisted exemptions so that the sweep passes without either gap quietly
-disappearing. Anything else missing from this table is a bug in the plan.
+**One gap, stated rather than hidden.** FR-3.6.2 (landing page and install funnel) has no task. The
+dashboard requirement FR-3.6.3 is now in scope: Task 5.6 owns its external message contract and Task
+8.7 owns its UI and summary model. Only FR-3.6.2 remains an allowlisted gap in Task 10.2; anything
+else missing from this table is a bug in the plan.
 
 **The manual gate is not in the table, and that is on purpose.** Task 8.6 walks FR-3.1.1, FR-3.3.x,
 FR-3.4.x, FR-3.5.x and FR-3.7.2/3 by hand in a real browser, but it is a gate rather than a test:
@@ -1070,25 +1080,25 @@ FR ones.
 
 | Batch | Tasks | Tracks | Theme |
 |-------|-------|--------|-------|
-| 0 | 3 | 3 | De-risking — the retailer flow, USPS access, and Bedrock latency, before anything is built on them |
+| 0 | 3 | 3 | De-risking — the retailer flow, carrier access, and Bedrock latency, before anything is built on them |
 | 1 | 5 | 4 | Scaffolding — both workspaces exist, CI runs, the extension IDs are pinned, coverage is enforced |
 | 2 | 8 | 7 | Foundations — errors, config, logging, shared types, and the test fakes |
 | 3 | 18 | 11 | Leaf modules — wire models, carrier protocol, extraction, ranking, validation, and the frozen contracts |
-| 4 | 14 | 5 | Adapters and stores — Bedrock, USPS, the mock carrier, and the whole storage layer |
+| 4 | 16 | 5 | Adapters and stores — Bedrock, configured carriers, preferences, and the whole storage layer |
 | 5 | 6 | 5 | Services — the three server services and the driver's collaborators |
 | 6 | 8 | 2 | Assembly — routes and app wiring; the return state machine |
 | — | 3 | 0 | **Deployment track** — the Lambda topology, a live smoke test, and USPS sandbox reconciliation |
 | 7 | 10 | 3 | Server integration tests, and the return flows end to end in the worker |
-| 8 | 6 | 3 | Entrypoints — content script, background worker, popup surfaces, and the manual acceptance gate |
+| 8 | 7 | 4 | Entrypoints — content script, background worker, popup, dashboard, and the manual acceptance gate |
 | 9 | 7 | 2 | Extension integration tests across all six §8.3 row groups |
 | 10 | 3 | 3 | CI enforcement — bundle posture, citation sweep, module boundaries |
-| **Total** | **91** | | |
+| **Total** | **94** | | |
 
 **What "done" means.** After Batch 10, the checks that keep this architecture honest run in CI rather
 than in review attention: the shipped manifest declares only `activeTab`, `scripting` and `storage`,
-carries the **prod** pinned key, and has no `externally_connectable` (Task 10.1); `routes` cannot
+carries the **prod** pinned key, and has a concrete `externally_connectable` dashboard origin (Task 10.1); `routes` cannot
 import `carriers` or `bedrock`, and `services` cannot import `fastapi` (Task 10.3); the wire shapes
 in `contracts/` fail exactly one workspace's suite when either side drifts (Task 3.18); and every
-requirement except the two declared gaps — FR-3.6.2 and FR-3.6.3 — has a task citing it, as does every
+requirement except the landing-page gap — FR-3.6.2 — has a task citing it, as does every
 configuration parameter named in §5.1 and §5.2 (Task 10.2). What CI cannot check, Task 8.6 checks by
 hand once, and records in `docs/acceptance.md`.
