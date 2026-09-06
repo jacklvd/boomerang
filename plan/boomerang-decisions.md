@@ -1,4 +1,141 @@
-# Boomerang — Plan Review Decisions
+# Boomerang — Planning Decision Record
+
+> **Current direction:** The migration decision dated 2026-09-06 is the active planning baseline.
+> The 2026-08-27 and 2026-09-01 decisions are preserved below as historical context. When they
+> conflict, the migration decision and the current product/design documents supersede them.
+
+## Current migration decision — 2026-09-06
+
+### Why this decision exists
+
+The product direction changed after the original task plan was reviewed. The old plan assumed an
+extension-local account history, a selector-first driver, a USPS or third-party pickup path, a
+Calendar template in the core flow, and a Lambda Function URL with no database. The current product
+instead has a database-backed web dashboard, Google identity, browser-sourced ingestion, an
+agent-first supervised return loop, split database/local state ownership, and retailer-produced QR
+or printable-label outcomes.
+
+This section records that migration without erasing why the earlier plan existed. The current
+authority is [`docs/README.md`](../docs/README.md), [`docs/SKETCH.md`](../docs/SKETCH.md),
+[`docs/RETURN_WORKFLOW.md`](../docs/RETURN_WORKFLOW.md),
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md), and the current requirements and design
+contracts. [`boomerang-plan.md`](boomerang-plan.md) now describes milestones and workstreams;
+[`plan/tasks/**`](tasks/) remains unreconciled historical planning material.
+
+The findings in [`docs/spikes/retailer-flow.md`](../docs/spikes/retailer-flow.md) remain useful
+research evidence, but its retargeting recommendations are not current product decisions. In
+particular, Boomerang does not automatically choose a default reason or return method and does not
+persist a QR representation in v1.
+
+### Decision classifications
+
+| Classification | Meaning in this record |
+|---|---|
+| **Accepted** | Current direction; implementation and future planning must preserve it |
+| **Provisional** | The boundary is usable, but evidence or a contained implementation choice is still required |
+| **Deferred** | Deliberately outside core v1; no active implementation design should be inferred |
+| **Open / blocked** | A named architecture decision must be made before the affected contract or acceptance work can close |
+| **Historical** | Preserved to explain the old plan; not current authority |
+
+### Accepted architecture and scope decisions
+
+| ID | Accepted decision | Consequence for planning |
+|---|---|---|
+| `MIG-01` | The web dashboard is the product home and reads authenticated account data from a database. | Replace extension-local dashboard history and the no-database plan with account persistence, APIs, and dashboard work. |
+| `MIG-02` | Sign in with Google establishes the account, keyed by the stable OpenID Connect `sub` claim. Identity consent grants neither Gmail, Calendar, nor retailer access. | Add identity/account isolation early; never key identity by email and never add Gmail. |
+| `MIG-03` | Retailer data originates only in the user's browser. The extension sends bounded, sanitized live-page data to the server for transient processing and validated normalization. | The server has no polling, background retailer access, or retailer credential. Ingestion is extension-to-server. |
+| `MIG-04` | Database account state and extension-local browser workflow state have separate authority. | Store normalized orders, policies, preferences, and minimal summaries in the database; keep current step, tab, choices, attempts, and safe checkpoint in `chrome.storage.local`. |
+| `MIG-05` | Every return-flow step is agent-first. The agent proposes exactly one closed tool call; trusted extension code validates before execution or outcome publication. | Remove selector-first and model-fallback work. Selectors may assist recognition, resolution, and validation only. |
+| `MIG-06` | Recommendations do not grant authority. Preferences rank and explain; the user sees all visible methods and prices, chooses the method, edits the reason, and confirms irreversible actions. | Do not auto-select a return reason, method, or paid option. |
+| `MIG-07` | Retailer-produced QR and printable-label outcomes are valid without pickup. V1 persists `qr_ready` or `label_ready` status, not the artifact. | Make terminal sanitization and summary publication part of the return flow; do not attach carrier semantics to either state. |
+| `MIG-08` | The stable v1 HTTP contract currently covers account profile, dashboard aggregate, item detail, preferences, supported return-summary publication, and account deletion. | Build dashboard and server fixtures from the current API/data contracts. Keep ingestion, agent, Calendar, and bridge routes outside this stable surface until their respective architecture gates close. Carrier pickup routes remain deferred and require a separate future product decision and carrier contract. |
+| `MIG-09` | The extension keeps the minimal install posture: `activeTab`, `scripting`, and `storage`; first access follows a user gesture and optional standing retailer access is requested later in context. | Permission and review posture are core acceptance criteria. |
+| `MIG-10` | Raw DOM, bounded sanitized DOM, retailer cookies and authorization credentials, sensitive retailer form fields, and raw QR/label artifacts have no durable home in Boomerang storage. | Add fail-closed egress, validation, logging, model-invocation, persistence, and privacy checks across milestones. |
+| `MIG-11` | Core v1 is the database dashboard plus one visible, supervised, uninterrupted Chrome return run. QR status is priority 1. Calendar is priority 2. All carrier pickup is deferred. | Remove pickup and Calendar-template work from the core sequence; plan Calendar only after core and `ARCH-B5`. |
+| `MIG-12` | The production topology is not selected. The former Lambda Function URL/no-VPC/no-database target cannot be carried forward because a durable database and authenticated account APIs are now required. | Continue local scaffolding only as scaffolding. Re-plan core-v1 deployment after the data, authentication, AI-runtime, and bridge constraints are sufficiently settled. Priority-2 Calendar does not block that work; the core topology must preserve a clean boundary for the later `ARCH-B5` design. |
+| `MIG-13` | The old task graph is not synchronized with the current requirements. | Use milestone/workstream planning now; do not publish task totals, makespan, critical path, progress, or complete task traceability until `plan/tasks/**` is reconciled. |
+
+### Provisional assumptions and unfrozen implementation choices
+
+| ID | Provisional boundary | What would make it final |
+|---|---|---|
+| `PROV-01` | Normalization may begin synchronously. | Measurements and the full runtime decision under `ARCH-B2`; asynchronous work is introduced only if those results require it. |
+| `PROV-02` | The stable account API can be implemented while session transport and the Google credential-exchange route remain behind an authentication adapter. | Choose cookie or bearer transport and the exchange flow without changing the stable v1 bodies. |
+| `PROV-03` | The logical data contract is sufficient for schema exploration, repositories, and frontend fixtures. | Select the database/ORM, migrations, indexes, and lifecycle behavior consistently with `ARCH-B4`. |
+| `PROV-04` | Existing client, server, Compose, and infrastructure files may support local development during migration. | A separate deployment decision establishes the target compute, database, network, hosting, secret, environment, and pipeline topology. |
+
+None of these provisional boundaries authorizes invented payload ceilings, latency budgets, retry
+rules, retention windows, bridge credentials, or production resources.
+
+### Deferred capabilities
+
+| Capability | Current disposition |
+|---|---|
+| Google Calendar | Priority 2; separate incremental consent; detailed design waits for `ARCH-B5` |
+| Carrier pickup | Deferred from v1 for every carrier, including USPS, UPS, FedEx, retailer pickup, and paid pickup |
+| Stop/Continue and interrupted-run resumption | Deferred; exact conservative v1 interruption acceptance remains `ARCH-B1` |
+| QR or label artifact storage | Deferred; v1 stores only outcome status |
+| Asynchronous normalization | Deferred unless `ARCH-B2` measurements require it |
+| Gmail and unattended retailer access | Excluded, not queued as later v1 work |
+| Cross-browser support | Deferred; Chrome only for v1 |
+
+### Open architecture decisions
+
+These entries record planning gates, not placeholder answers.
+
+| Gate | Open decision | Planning effect |
+|---|---|---|
+| `ARCH-B1` | Exact v1 behavior after user, tab, page, or worker interruption | Blocks final interruption behavior and acceptance; does not turn checkpoints into resume support |
+| `ARCH-B2` | AI payloads, observation binding, latency, timeout, retry, sync/async, and hosting fit | Blocks final normalization and per-step agent contracts and runtime acceptance |
+| `ARCH-B3` | Allowed evidence and publisher for `handed_to_carrier` | Blocks handoff writes; defensive reads remain allowed |
+| `ARCH-B4` | Record/checkpoint/token lifetimes, single-order deletion, cleanup, backup, recovery, and expiry | Blocks detailed lifecycle behavior beyond baseline account deletion and local clearing |
+| `ARCH-B5` | Calendar component ownership, wire contract, scope, token custody, refresh/revocation, and updates | Blocks priority-2 Calendar implementation |
+| `ARCH-B6` | Secure dashboard-to-extension binding, addressing, transport, acknowledgements, and revocation | Blocks live connection and dashboard start/focus integration |
+| `ARCH-B7` | First retailer | Blocks adapters, retailer fixtures, policy assumptions, rescan rules, and real-browser acceptance |
+| `ARCH-B8` | Meaning, evidence, and legal transitions for `complete` | Blocks `complete` writes independently of carrier handoff |
+
+### Supersession map for the 2026-08-27/2026-09-01 decisions
+
+The historical `D1`–`D28` entries below remain unchanged as records of the old plan. Their
+current disposition is explicit here.
+
+| Old decision | Current status | Migration effect |
+|---|---|---|
+| `D1` | **Superseded** | A free printable USPS label is no longer the PoC gate. Retailer selection and acceptance are now `ARCH-B7`; QR or label outcome does not require pickup. |
+| `D2` | **Superseded in its fixture rule** | Captured raw or bounded sanitized page representations may not become durable fixtures. Retailer fixtures must be designed after `ARCH-B7` under current privacy constraints. |
+| `D3` | **Superseded** | USPS access is not a v1 dependency because all carrier pickup is deferred. |
+| `D4` | **Partially retained** | Measuring realistic model payloads and latency remains required by `ARCH-B2`; the old timeout constants and batch assignment are not current. |
+| `D5` | **Historical only** | Partial gating remains a useful planning principle, but the named batches/tasks are obsolete. |
+| `D6` | **Superseded** | The database-backed dashboard is core. Its connection to the extension is not cut; it is blocked explicitly by `ARCH-B6`. |
+| `D7` | **Superseded** | The fixed Lambda/no-database topology conflicts with the database-backed architecture. Production topology is open. |
+| `D8` | **Superseded with D7** | No current milestone implements the old Lambda target or relies on its legacy-scaffold retirement sequence. |
+| `D9` | **Superseded** | The old deployment-track timing and dependency are withdrawn with the obsolete task graph. |
+| `D10` | **Retained as a delivery practice** | CI should exist early, but its exact task and sequence await task reconciliation. |
+| `D11` | **Superseded** | Batch barriers, 20-task floor, and approximately 35-slot makespan are not valid for the current architecture. |
+| `D12` | **Superseded** | USPS mocks and sandbox reconciliation are deferred carrier work, not active v1 tasks. |
+| `D13` | **Historical quality target** | The old 95% extension threshold is not affirmed by the current design; the future task pass must set evidence-based gates. |
+| `D14` | **Retained as repository practice** | The repo-wide hook convention still applies, but task timing is pending reconciliation. |
+| `D15` | **Partially retained** | Shared canonical contract examples remain useful; the old ingestion, next-step, pickup, and error payload set is replaced by the current API/data contracts. |
+| `D16` | **Superseded** | The current stable v1 contract does not require `X-Boomerang-Client-Version`. |
+| `D17` | **Superseded** | The old configuration surface is not a current contract; new runtime values wait for the relevant design gates. |
+| `D18` | **Superseded** | A sweep over obsolete configuration names cannot establish current traceability. Rebuild checks after task reconciliation. |
+| `D19` | **Historical only** | The storage-barrel optimization was tied to the old extension-owned data tasks and makes no current sequencing commitment. |
+| `D20` | **Not carried forward** | Extension identity/origin requirements must follow `ARCH-B6` and the future deployment design; the old keypair task is not current authority. |
+| `D21` | **Superseded** | USPS test-double/runtime-stub design is deferred carrier work. |
+| `D22` | **Superseded** | Simulated pickup booking has no core-v1 user surface because pickup is deferred. |
+| `D23` | **Partially retained** | Real-browser acceptance remains required, but its scenario now ends in a validated QR/label outcome and excludes pickup and Calendar. |
+| `D24` | **Historical only** | Agent count and per-task approval policy cannot be carried forward before a new task graph exists. |
+| `D25` | **Accepted and retained** | Correct upstream documents and contracts rather than working around conflicts. |
+| `D26` | **Superseded for v1** | Generalizing pickup does not keep it in scope; all carrier pickup is deferred. |
+| `D27` | **Superseded** | Preferences are account data in the database using the current four-value vocabulary. Return address/pickup preference is not a v1 preference, and no preference auto-selects a method. |
+| `D28` | **Partially retained** | The dashboard remains core, but it reads database APIs rather than extension-local summaries. The bridge/origin protocol remains `ARCH-B6`, not a settled `externally_connectable` contract. |
+
+## Historical plan review — 2026-08-27 and 2026-09-01
+
+> The remainder of this file records the decisions that produced the former batch/task plan. Counts,
+> schedules, requirement identifiers, API/configuration names, carrier behavior, and upstream
+> amendments below describe that historical plan only. The supersession map above controls their
+> current status.
 
 **Date:** 2026-08-27
 **Reviewed document:** [`plan/boomerang-plan.md`](boomerang-plan.md) at 79 tasks / 10 batches
