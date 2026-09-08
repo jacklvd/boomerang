@@ -1,11 +1,10 @@
 /**
- * The dashboard is a read-only view over data the *extension* owns — the server
- * is stateless and has no `GET /orders`. Until the extension exposes its store
- * over `externally_connectable`, the UI renders this fixture.
+ * Stands in for extension-owned data — the server is stateless, so there is no
+ * `GET /orders` to call.
  *
- * dev-note: `daysLeft` is baked rather than derived from `returnBy`, so the
- * fixture renders identically at build time and in the browser (static export,
- * no hydration drift). Swap for a real countdown when the extension feeds us.
+ * dev-note: `daysLeft` is baked, not derived from `returnBy`, so the fixture
+ * renders the same at build time and in the browser. Real countdown once the
+ * extension feeds us.
  */
 export type Order = {
   id: string
