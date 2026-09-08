@@ -1,187 +1,193 @@
-# Boomerang — The "Reverse-Logistics" Concierge
+# Boomerang — The Reverse-Logistics Concierge
 
-*An everyday agent that handles e-commerce returns end-to-end.*
+*A web-first returns workspace with a browser extension that can carry out the tedious parts.*
 
-> **Status:** PoC. Product sketch — what we're building and why.
-> Architecture and settled decisions: [`ARCHITECTURE.md`](ARCHITECTURE.md).
-> The buildable spec lives in [`../design/`](../design/) —
-> [requirements](../design/boomerang-requirements.md) and
-> [high-level design](../design/boomerang-high-level-design.md). Where this sketch and those
-> disagree, they win.
-> Research sources: [`../.claude/artifacts/`](../.claude/artifacts/). Implementation tickets land
-> in [`../.claude/tickets/`](../.claude/tickets/) when the next phase starts.
+> **Status:** Product direction updated 2026-09-05. This document owns the product story and v1
+> scope. [`RETURN_WORKFLOW.md`](RETURN_WORKFLOW.md) owns the normal behavior and records interruption
+> and resumption only as a deferred proposal.
+> [`ARCHITECTURE.md`](ARCHITECTURE.md) owns the current technical decisions. The design documents,
+> milestone plan, and migration section of the planning decision record have been reconciled with
+> this direction; the older task material in [`../plan/tasks/`](../plan/tasks/) has not. See
+> [`README.md`](README.md) for the migration notice.
 
----
+## The problem
 
-## 1. The Problem
+Buying online is one click. Returning something is a sequence of small, deferrable chores with a
+deadline. Each handoff is another chance for a valid return to be forgotten until its window closes.
 
-E-commerce returns are a massive source of personal friction. You buy clothes, they don't fit, and you lose $50 because you forgot to:
+```mermaid
+flowchart TD
+    A["Order arrives — it does not fit"] --> B["Find the return portal"]
+    B --> C["Understand the policy and deadline"]
+    C --> D["Complete the return form"]
+    D --> E["Choose a return method"]
+    E --> F["Use the QR code or label"]
+    F --> G["Hand the item to the carrier"]
+    G --> H["Refund or replacement"]
 
-1. Navigate the return portal
-2. Print the label
-3. Drop off the box within the 30-day window
+    B -.->|"forgotten"| X["Return window closes"]
+    C -.->|"policy is unclear"| X
+    D -.->|"form is tedious"| X
+    F -.->|"no time to finish"| X
 
----
-
-## 2. How It Works
-
-**1. Ambient order awareness** — A browser extension reads the retailer order pages you already
-visit, extracts what you bought and when, and tracks the return window.
-
-**2. Triggered action** — You tell the agent:
-> "Return the blue sweater from the J.Crew order."
-
-The agent walks the retailer's return flow — reason code, label generation — and stops where the
-retailer offers a choice of return methods, showing you each one **with its price**. Free carrier
-pickup requires prepaid USPS postage on the box, so it needs a printed label; but the printable
-label is sometimes the paid option, and that's your call to make, not the agent's.
-
-**3. The magic** — It checks USPS pickup eligibility for your address, schedules a free Carrier
-Pickup for the next delivery day, and opens a prefilled calendar event so you remember to put
-the box out.
-
-**4. The ping**
-> "I set up the J.Crew return. Your carrier will collect it with Wednesday's mail — leave the box out with the printed label on it before your usual delivery time."
-
-The day comes from USPS's own response, not from an assumption. Usually it's tomorrow; before 2 AM
-Central it's today; on a Saturday evening it's Monday.
-
----
-
-## 3. What Research Changed
-
-Two briefs were written against the original sketch and moved five things. Each is load-bearing.
-Full reasoning in [`ARCHITECTURE.md`](ARCHITECTURE.md); sources in
-[`../.claude/artifacts/`](../.claude/artifacts/).
-
-| Originally | Now | Why |
-|---|---|---|
-| Gmail API monitors the inbox | Content script reads **retailer order pages** | Every useful Gmail read scope is *restricted* — verification + CASA assessment, ~$540–$1,800/yr forever, 6–12 weeks before the first outside user. An extension reading rendered DOM needs no OAuth scope at all. Order pages also carry better data than receipts. |
-| Calendar API writes the reminder | **Prefilled `render?action=TEMPLATE` URL** | No scope, no host permission, no SDK. The user reviews and saves — which is also the consent moment. |
-| Agent reads calendar for availability | Agent **proposes**, user's eyes are the check | No scrape-free way to read Calendar, and its DOM is the most fragile surface in the product. |
-| "Porch pickup tomorrow, 9 AM–12 PM" | The **day USPS returns**, named plainly | Free USPS pickup is a **day, not a window**. The two-hour guarantee is a different product, ~$25. And "tomorrow" is itself a guess — the cutoff, Sundays and holidays all move it. |
-| USPS/UPS, carrier unspecified | **USPS only for v1** | USPS is the only carrier whose pickup request has no account field at all. Our user is a consumer with a retailer-issued label; they'll never have a UPS or FedEx account. |
-
-One consequence reshapes the architecture rather than a feature: **with no OAuth grant, the
-backend can never see anything on its own.** Every byte reaches FastAPI because the extension
-pushed it. "Passive monitoring" becomes "runs when the user is there."
-
----
-
-## 4. User Flow
-
-```
-                  Landing page (Next.js)
-                          │
-                          ▼
-                  Install extension  ← the only permission prompt
-                          │
-                          ▼
-        ┌─── User browses a retailer order page ───┐
-        │                                          │
-        ▼                                          │
-  Content script reads the rendered DOM            │  (repeats; no
-        │                                          │   background
-        ▼                                          │   access)
-  POST /orders/ingest  →  Bedrock parses           │
-        │                                          │
-        ▼                                          │
-  Orders ranked by return-window urgency ──────────┘
-        │
-        ▼
-  User: "return the blue sweater from J.Crew"
-        │
-        ▼
-  Request host permission for that retailer, in context
-        │
-        ▼
-  Drive the return flow → present every option with its price
-        │
-        ├─ free drop-off ──► done, no pickup needed
-        │
-        ▼
-  Printed label + tracking number + which carrier's postage
-        │
-        ▼
-  USPS eligibility check   ← hard gate, never skipped
-        │
-        ├─ ineligible ──► offer nearest drop-off, or priced UPS
-        │
-        ▼
-  Schedule pickup → extension stores confirmationNumber + address
-        │
-        ▼
-  Open prefilled Calendar URL → user reviews → Saves
-        │
-        ▼
-  Confirmation names the day USPS returned
+    style X fill:#fee,stroke:#c33
+    style H fill:#efe,stroke:#3a3
 ```
 
-The first run is different: `activeTab` can't inject on page load, so the popup offers **"Scan this
-page"** and the standing permission is offered afterwards, once the user has seen it work.
+The dashed edges are the product: Boomerang keeps the return visible and helps the user cross each
+point where it would otherwise stall.
 
----
+## The product
 
-## 5. Technical Implementation
+Boomerang has two cooperating surfaces:
 
-| Surface | Role |
+- **The web dashboard is the home.** A user signs in with Google and sees orders that still need
+  action, their return deadlines and value, the current return state, and recommendations based on
+  their preferences.
+- **The Chrome extension is the hands.** It reads the retailer page in the user's existing session,
+  asks the agent to plan each return-flow step, validates and executes proposed browser actions or
+  records a validated terminal outcome, and records what it filled locally.
+
+The intended interaction is:
+
+1. The user signs in to Boomerang with Google and connects the extension.
+2. On a retailer order-status page, the extension sends a minimized order subtree for synchronous
+   normalization.
+3. The service extracts items, prices, delivered dates, and available policy facts such as rules,
+   deadlines, and fees. The normalized result is saved to the user's account and appears on the
+   dashboard.
+4. The dashboard orders return candidates by urgency and shows preferences such as lowest cost,
+   fastest refund or replacement, no printer, and sustainability.
+5. When the user starts a return, the extension drives the visible retailer flow. For every step it
+   sends a bounded, sanitized representation of the current DOM to the agent and receives exactly
+   one closed-tool proposal. Trusted extension code validates and executes browser actions or
+   records a validated `report_outcome` result. Bundled selectors may assist resolution and
+   validation but never bypass the agent. The user reviews the form and confirms submission.
+6. Every visible return method and price remains available. Preferences rank and explain the
+   options; they do not choose one or silently authorize a fee.
+7. The current version assumes the automated return runs from start to finish. Supported
+   interruption, editing, and resumption are deferred; if the user takes over, Boomerang does not
+   promise to resume that run.
+8. The retailer may produce a QR code or printable label. A sanitized terminal-page representation
+   may reach the agent so it can propose `report_outcome`, but raw labels, QR contents, addresses,
+   barcodes, and protected URLs stay out of the request. For QR outcomes, v1 stores only the
+   `qr_ready` status; whether to store a QR representation is deferred. A Google Calendar reminder
+   is priority 2.
+
+The full behavior is in [`RETURN_WORKFLOW.md`](RETURN_WORKFLOW.md).
+
+## Dashboard direction
+
+The supplied dashboard concept establishes the v1 information hierarchy:
+
+- Returns, Pickups/handoffs, and Privacy navigation
+- a visible extension-connected state
+- summary metrics such as returns closing soon, remaining returnable value, and returns in progress
+- sorting by closing soonest
+- order rows with item, retailer, delivered date, price, days remaining, and current return status
+- an explanation of urgency thresholds
+- a detail card for the selected return or next action
+
+Keep the screenshot's Pickups area as a filtered view of returns that reached carrier handoff. Do
+not carry forward USPS booking semantics: replace **Pickups booked** with a carrier-neutral handoff
+count, replace the USPS next-pickup card with the selected return or next action, and remove
+confirmation-number, scheduling, and **Cancel pickup** controls. The underlying return states are
+`not_started`, `in_progress`, `qr_ready`, `label_ready`, `handed_to_carrier`, and `complete`.
+
+Because there is no carrier integration in v1, a “picked up” or `handed_to_carrier` status must name
+its source. It may be user-confirmed or read from a retailer page; it must not imply that Boomerang
+scheduled or observed a USPS pickup.
+
+The meaning, evidence, and legal transitions for `complete` remain a separate open architecture
+decision. They are not part of the carrier-handoff evidence decision.
+
+The old sentence “Nothing here is stored on our servers” must also be removed from the dashboard.
+Normalized orders, policy data, preferences, and current return summaries are now account data in
+the database. The Privacy surface must explain that plainly.
+
+## State ownership
+
+The database and extension are both sources of truth for different domains:
+
+| Source of truth | Owns |
 |---|---|
-| **Extension** (MV3) | Reads order pages, drives the return flow, opens the calendar URL. The only component with access to user data. |
-| **Client** (Next.js) | Landing page, install funnel, order dashboard. |
-| **Server** (FastAPI) | Parses order DOM via Bedrock, ranks urgency, brokers carrier calls, holds the API keys. Sees only what the extension sends. |
+| Database | Google-linked user record, normalized orders and items, prices, delivered dates, parsed policy rules/deadlines/fees, user preferences, and the current return summary shown on the dashboard |
+| Extension local storage | Detailed workflow/session state and the latest safe checkpoint, including the retailer step, browser tab context, and what Boomerang filled so far |
 
-| Layer | Stack |
-|---|---|
-| Extension | TypeScript, Manifest V3, content scripts + `chrome.scripting` |
-| Front-end | TypeScript / Next.js 16 + shadcn-ui + Base UI + Tailwind 4 |
-| Back-end | FastAPI + Bedrock (Claude Opus 5) |
-| Infra | Terraform — Lambda + Function URL, SSM Parameter Store, CloudWatch. No VPC, no database. |
+Raw DOM and bounded, sanitized DOM representations are never database models. They are processed
+transiently and discarded after each normalization or return-step request. Retailer cookies and
+credentials never leave the browser.
 
-```
-extension/   MV3 extension     (to build)
-client/      Next.js app       (scaffolded)
-server/      FastAPI service   (scaffolded)
-infra/       Terraform         (EC2 scaffold, superseded by the Lambda design)
-```
+## Priorities and scope
 
-Each workspace has its own `AGENTS.md` with scope, phase, and local conventions.
+### Core v1
 
----
+- Sign in with Google
+- web dashboard backed by a database
+- extension connection status
+- retailer order-page scanning with Manifest V3 APIs
+- item, price, delivery-date, policy, deadline, and fee normalization
+- preference-based recommendations
+- visible, agent-guided return autofill that assumes an uninterrupted run
+- user review and confirmation before submission
 
-## 6. PoC Scope
+### Priority 1
 
-**In:** one retailer end to end — ingestion → urgency ranking → assisted return flow → USPS
-eligibility + pickup (mocked until API access lands) → prefilled calendar event.
+- record the `qr_ready` status for a QR-code outcome produced by the retailer
 
-**Out, deliberately:** Gmail in any form. A second retailer. UPS/FedEx fallbacks. Unattended
-background monitoring. Teaching the model receipt patterns.
+### Priority 2
 
-**Critical path:** USPS Carrier Pickup isn't in the default API access package and USPS warns of
-extended wait times. Filing the access request is the one task that can't be parallelized away —
-do it before writing the client, and build against a mock adapter while it sits in the queue.
+- create a reminder with the Google Calendar API after separate Calendar authorization
 
----
+### Deferred
 
-## 7. Agent Tools
+- Gmail API access or Gmail scraping
+- USPS pickup scheduling and cancellation
+- UPS, FedEx, paid pickup products, and carrier tracking
+- unattended access to retailer accounts
+- user-controlled Stop/Continue, pause/resume checkpoints, and interrupted-flow recovery
+- asynchronous parsing, unless the AI pipeline proves a synchronous request cannot meet the
+  required runtime
 
-| Tool | Description |
-|---|---|
-| **Order Gatherer** | Parse order-page DOM into structured orders; rank by return-window urgency |
-| **Return Driver** | Navigate the retailer's return flow to a printed label + tracking number |
-| **Pickup Scheduler** | USPS eligibility → schedule → extension stores `confirmationNumber` + address; refresh before any cancel |
-| **Calendar Writer** | Build the prefilled Calendar template URL, or an `.ics` fallback |
+The v1 retailer set and exact dashboard-status source still need to be confirmed. The earlier Amazon
+assumption is not silently carried forward by this product-direction change.
 
----
+## Google identity and Calendar
 
-## 8. Compliance Posture
+Google is the account provider. Authentication uses Sign in with Google and the OIDC identity
+scopes needed to establish the user account. The Google account's stable `sub` claim—not the email
+address—is the database identity key.
 
-The extension route escapes Google's restricted-scope regime, but not policy in general. Chrome
-Web Store **Limited Use** governs all user data an extension handles — not just data from Google
-APIs — and tightened on **1 August 2026**: collection must be strictly necessary to the single
-disclosed purpose, cross-purpose reuse is prohibited, every collection needs prominent disclosure.
+Calendar access is related but not automatic. Creating an event requires a separate Calendar OAuth
+scope and consent flow. Boomerang asks for that permission when the user chooses **Add to calendar**,
+not during sign-in merely because the user has a Google account. V1 does not read availability.
+Calendar component ownership and wire contracts are deferred until priority 2 is taken up.
 
-- **The Bedrock hop is what a reviewer will ask about.** Comparable order-scraping extensions
-  advertise that they run locally and send nothing anywhere. We differ; disclose it loudly.
-- **Keep host permissions small.** Broad `<all_urls>` flags in-depth review. Ship `activeTab`,
-  `scripting` and `storage`; request retailer domains in context, after the first successful scan.
-- **Chrome Web Store review is the only distribution gate.** There is no second channel.
+## Privacy baseline
+
+- Persist normalized order and policy records, preferences, and current return summaries in the
+  account database.
+- Keep detailed workflow/session state and the latest safe checkpoint in `chrome.storage.local`.
+- Do not persist raw DOM or bounded, sanitized DOM representations.
+- Allow a bounded, sanitized terminal-page representation to reach the agent, but remove raw label
+  artifacts, QR contents, addresses, barcodes, and protected URLs before transmission.
+- Do not transmit retailer cookies, authorization headers, passwords, payment fields, or file
+  inputs.
+- Do not claim that v1 can resume an interrupted run; the Stop/Continue proposal is deferred.
+- Explain database storage, Google identity, model processing, and Calendar authorization on the
+  Privacy page and in the extension disclosure.
+
+Retention and deletion are not yet fully specified. The agreed baseline, the meaning of those
+terms, and the remaining choices are recorded once in
+[`ARCHITECTURE.md`](ARCHITECTURE.md#retention-and-deletion-baseline).
+
+The current engineering and policy blockers—including the provisional AI runtime contracts—are kept
+in [`ARCHITECTURE.md`](ARCHITECTURE.md#open-blockers) rather than repeated in this product summary.
+
+## Current implementation status
+
+Implementation status changes too often to maintain safely in a product narrative. The repository
+map in [`../AGENTS.md`](../AGENTS.md) records what exists today. The current design and milestone
+plan describe the approved target; the files under `plan/tasks/`, current implementation, and
+workspace guidance still require reconciliation where they describe the previous local-only,
+USPS-oriented PoC.
