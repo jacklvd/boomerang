@@ -5,7 +5,7 @@
 2. [User Preferences Model](#2-user-preferences-model)
 3. [End-to-End Pipeline Architecture](#3-end-to-end-pipeline-architecture)
 4. [Detailed Pipeline Stages](#4-detailed-pipeline-stages)
-5. [Open Decisions](#5-open-decisions)
+5. [Decisions Recorded](#5-decisions-recorded)
 
 ---
 
@@ -86,11 +86,12 @@ The ranking stage weighs return options against a small set of user-declared or 
 
 ### Stage 1: Trigger & DOM Capture
 - **Trigger Mechanism:** Flow begins when the user clicks the extension icon while on a retailer order status page, which surfaces a **"Return Order?"** prompt. This click is the explicit user action satisfying Decision D1 — the prompt itself does not appear ambiently on page load.
-- **DOM Capture:** The content script uses a `MutationObserver` to wait for the SPA to render the order-list subtree before reading. It must not read at document idle due to SPA render flakiness.
-- **API Handoff:** The service worker posts the transient, sanitized DOM subtree to `POST /orders/ingest`.
+- **DOM Capture:** After the user confirms the prompt, the content script uses a `MutationObserver` to wait for the SPA to render the order-list subtree, clones only that retailer-specific subtree, and removes scripts, styles, event handlers, and unrelated page content. It must not read at document idle due to SPA render flakiness.
+- **API Handoff and Retention:** The service worker sends the sanitized subtree as the context in one `POST /orders/ingest` request. FastAPI passes that request body to Bedrock and returns the structured extraction in the same response; it writes neither the DOM nor model context to Redis, a cache, or a database. The extension retains only the returned structured order and in-progress selections in extension storage for later stages.
 
 ### Stage 2: Order Normalization & Reason Pre-Pick
 - **Model Invocation:** FastAPI forwards the DOM payload to Claude 3.5 Sonnet via Amazon Bedrock.
+- **Latency Boundary:** `POST /orders/ingest` is a synchronous Lambda Function URL request, not an API Gateway long-running workflow. Its single Bedrock parse call has a configurable 9-second deadline, leaving time for request validation and network overhead well below the Lambda timeout. If that deadline is exceeded, the server returns `upstream-unavailable`; it does not queue, persist, or continue the work after the response. The extension may retry this read-only request with backoff while the user is present.
 - **Structured Extraction:** Output is forced into typed Pydantic models — `ExtractedItem` (items, prices, delivered dates) and `ReturnPolicy`.
 - **Urgency Ranking:** Orders are sorted by remaining return window.
 - **Reason Pre-Pick (optional):** The AI proposes a common return reason for the item category (e.g., "doesn't fit," "changed mind," "damaged") based on the product type. This is a suggestion only — the user can accept, edit, or clear it in the review step.
