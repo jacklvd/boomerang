@@ -18,6 +18,10 @@ const buttonVariants = cva(
         destructive:
           'bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40',
         link: 'text-primary underline-offset-4 hover:underline',
+        // Boomerang's marketing CTA. Teal is reserved for actions — never for
+        // urgency, which is what the badge scale is for.
+        brand: 'bg-accent text-on-accent hover:bg-accent/90',
+        brandOutline: 'border-line bg-surface text-ink hover:bg-bg',
       },
       size: {
         default:
@@ -29,6 +33,7 @@ const buttonVariants = cva(
         'icon-xs': "size-6 rounded-none [&_svg:not([class*='size-'])]:size-3",
         'icon-sm': 'size-7 rounded-none',
         'icon-lg': 'size-9',
+        xl: 'h-auto gap-2 rounded-[10px] px-[26px] py-[15px] text-[15px] font-semibold',
       },
     },
     defaultVariants: {
