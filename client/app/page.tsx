@@ -26,9 +26,9 @@ import { WaitlistForm } from '@/components/landing/waitlist-form'
 import { MOCK_ORDERS, totalAtRisk } from '@/lib/orders'
 import { cn } from '@/lib/utils'
 
-/* dev-note: the listing does not exist yet, so the install funnel points at the
-   waitlist. One constant to swap once the extension is published — there is no
-   second distribution channel. */
+/* TODO: point at the Chrome Web Store listing once the extension is published.
+   Until then the install funnel falls back to the waitlist — there is no second
+   distribution channel to fall back to. */
 const CHROME_STORE_URL = '#waitlist'
 
 const NAV_LINKS = [
@@ -261,9 +261,7 @@ const PICKUP_FACTS = [
 function Pickup() {
   return (
     <section id="pickup" className="scroll-mt-20">
-      <div
-        className={cn(shell, 'flex flex-col gap-14 px-6 py-24 md:px-18 lg:flex-row lg:gap-18')}
-      >
+      <div className={cn(shell, 'flex flex-col gap-14 px-6 py-24 md:px-18 lg:flex-row lg:gap-18')}>
         <div className="flex-1">
           <p className={cn(eyebrow, 'text-ink-faint')}>The part people don&rsquo;t believe</p>
           <h2 className="mt-3.5 max-w-[15ch] font-display text-[34px] leading-[1.06] font-semibold tracking-[-0.02em] text-ink md:text-[46px]">
@@ -364,6 +362,9 @@ function Privacy() {
             <ShieldCheck size={18} weight="bold" className="text-accent-bright" />
             The extension asks for activeTab, scripting and storage. Nothing else at install.
           </span>
+          {/* TODO: /privacy is designed but not built yet — it ships in the
+              follow-up PR. The Chrome Web Store listing needs this exact URL to
+              be live before submission. */}
           <a
             href="/privacy"
             className="text-[14.5px] font-medium text-accent-bright hover:underline"
@@ -406,9 +407,7 @@ const FAQS = [
 function Faq() {
   return (
     <section className="bg-surface">
-      <div
-        className={cn(shell, 'flex flex-col gap-12 px-6 py-24 md:px-18 lg:flex-row lg:gap-22')}
-      >
+      <div className={cn(shell, 'flex flex-col gap-12 px-6 py-24 md:px-18 lg:flex-row lg:gap-22')}>
         <div className="w-full max-w-100">
           <p className={cn(eyebrow, 'text-accent')}>Questions</p>
           <h2 className="mt-4 font-display text-[32px] leading-[1.08] font-semibold tracking-[-0.02em] text-ink md:text-[42px]">
