@@ -18,3 +18,6 @@ Thumbs.db
 # Python bytecode (scripts/)
 __pycache__/
 *.pyc
+
+# agents plan
+.agents/plan

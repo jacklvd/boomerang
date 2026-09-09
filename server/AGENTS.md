@@ -4,19 +4,17 @@ FastAPI service. Read [`../AGENTS.md`](../AGENTS.md) first for repo-wide rules.
 
 ## Scope
 
-The server is a **stateless broker and inference host**. It:
+The server is an authenticated account-data service and inference host. It:
 
-- turns messy order-page DOM into structured orders, via Bedrock
-- ranks orders by return-window urgency
-- brokers USPS eligibility and pickup scheduling
-- holds every credential in the system
+- turns bounded browser-supplied order data into validated normalized records via Bedrock;
+- stores normalized accounts, orders, items, policies, preferences, and return summaries in
+  PostgreSQL;
+- derives dashboard projections from that durable account data; and
+- holds service and model-provider credentials.
 
-It does **not** own a browser, touch a retailer session, or hold a user credential.
-
-**Stateless means stateless.** The server persists nothing between requests — no orders, no
-addresses, no pickup records, no database, no cache. Every request carries what it needs. If you
-find yourself wanting somewhere to put something between two calls, put it in the response and let
-the extension hold it.
+It does **not** own a browser, touch a retailer session, persist raw or sanitized DOM, or store the
+extension's detailed workflow/session state. The browser remains the only component that can access
+or operate a retailer session.
 
 **The server never initiates anything.** Every code path starts with a request from the extension
 or the dashboard. There is no poller, no scheduler, no webhook to a user — and no OAuth grant that
@@ -27,16 +25,18 @@ would make one possible. If you're reaching for a background job over user data,
 
 | Phase | State |
 |---|---|
-| **Now** | `/health` only. `app/{api,routes,models}/` exist and are empty — that's the intended shape, not an oversight. |
-| **Phase 1** | `POST /orders/ingest` — Bedrock extraction, urgency ranking. **There is no `GET /orders`.** The ranked list comes back in the ingest response and the extension stores it. |
-| **Phase 2** | Pickup endpoints — eligibility, schedule, refresh, cancel. Gated on USPS API access, so build behind a mock adapter with the same interface; switching to live is a base URL and a credential. |
-| **Later** | Deployment to Lambda. **No datastore is planned** — see the persistence rule below. |
+| **Now** | `/health` plus the strict domain and PostgreSQL ORM model layer. Local PostgreSQL exists only as a disposable test harness. |
+| **Next** | Repositories, account-scoped services, authentication, dashboard APIs, and the separately specified ingestion pipeline. |
+| **Deferred** | Carrier pickup, Calendar implementation, interrupted-run recovery, and production database/deployment topology. |
 
 ## Commands
 
 ```bash
 uv sync
 uv run fastapi dev app/main.py     # :8000
+make test-db-up                    # disposable PostgreSQL :55432
+TEST_DATABASE_URL=postgresql+psycopg://boomerang_test:boomerang_test@127.0.0.1:55432/boomerang_test make integration
+make test-db-down                  # remove container and ephemeral data
 ```
 
 `uv` manages this workspace. Don't introduce `pip` or `requirements.txt`. Python 3.13.
@@ -52,6 +52,7 @@ what the pre-commit hook enforces — if it passes, the commit will.
 |---|---|
 | Install / sync dev environment | `make install` |
 | Run tests | `make test` |
+| Run the two PostgreSQL integration tests | `TEST_DATABASE_URL=... make integration` |
 | Run tests with coverage | `make cov` |
 | Run linter | `make lint` |
 | Auto-format and auto-fix | `make fmt` |
@@ -72,6 +73,7 @@ environment rather than the ambient interpreter — you do not need an activated
 | Coverage | `pytest-cov` / `coverage.py`, branch mode | `[tool.coverage.*]` |
 | Linter + formatter + docstring coverage | `ruff` | `[tool.ruff.*]` |
 | Static analysis | `mypy --strict` | `[tool.mypy]` |
+| Persistence | SQLAlchemy 2 + Psycopg 3 | `app/db/` |
 | Dependency audit | `pip-audit` over the exported lockfile | `Makefile: audit` |
 
 All of it lives in `pyproject.toml`. There is no `setup.cfg`, `.flake8`, `ruff.toml` or
@@ -139,14 +141,27 @@ it skips the linter, the type checker and the coverage floor.
 
 ### Layout
 
-`app/` is the package under test; `tests/` mirrors it (`tests/test_bedrock.py`,
-`tests/test_main.py`) and is intentionally **not** a package — no `__init__.py`. Two config
+`app/` is the package under test; `app/models/` owns validated domain records and `app/db/` owns
+SQLAlchemy rows, constraints, mappers, and session factories. `tests/` mirrors the app and is
+intentionally **not** a package — no `__init__.py`. Two config
 lines depend on that (`pythonpath = ["."]` for pytest, `explicit_package_bases` for mypy);
 adding an `__init__.py` will quietly change how modules resolve. `tests/conftest.py` clears
 every `BEDROCK_*` and `AWS_REGION` variable before each test, so a variable exported in your
 shell can't change an outcome.
 
+The disposable PostgreSQL fixture is opt-in and reads `TEST_DATABASE_URL`. The integration module
+contains exactly two tests: schema lifecycle and a complete account-graph persistence round trip.
+The tests create their schema with `Base.metadata.create_all()` so lifecycle behavior stays
+observable; fixture cleanup defensively calls `Base.metadata.drop_all()`. This is test
+infrastructure only, not production database setup.
+
 ## Conventions
+
+**Domain and ORM models are separate.** `app.models` contains strict Pydantic records;
+`app.db.models` contains the PostgreSQL storage mapping. Pure functions in `app.db.mappers` cross
+that boundary. Future routes and services must not return ORM rows directly. Physical storage must
+never grow fields for DOM, workflow checkpoints, QR/label artifacts, addresses, barcodes, or
+protected URLs.
 
 **Bedrock access goes through `app/bedrock.py`** — a single cached `AsyncAnthropicBedrockMantle`.
 Never construct a second client, never hardcode a region. Credentials resolve through the standard
