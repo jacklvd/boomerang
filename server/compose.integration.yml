@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:17.11-alpine3.24
+    environment:
+      POSTGRES_DB: boomerang_test
+      POSTGRES_PASSWORD: boomerang_test
+      POSTGRES_USER: boomerang_test
+    ports:
+      - "127.0.0.1:${POSTGRES_TEST_PORT:-55432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boomerang_test -d boomerang_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s

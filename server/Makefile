@@ -6,7 +6,7 @@
 # ambient interpreter happens to have.
 
 .DEFAULT_GOAL := help
-.PHONY: help install test cov lint fmt fmt-check typecheck audit check setup-hooks
+.PHONY: help install test integration cov lint fmt fmt-check typecheck audit check setup-hooks test-db-up test-db-down
 
 UV := uv
 
@@ -17,11 +17,16 @@ help:  ## Show this help
 install:  ## Sync the locked environment, dev dependencies included
 	$(UV) sync --all-groups
 
-test:  ## Run the test suite
-	$(UV) run pytest
+test:  ## Run the Docker-free unit test suite
+	$(UV) run pytest -m "not integration"
+
+integration:  ## Run the two PostgreSQL integration tests (requires TEST_DATABASE_URL)
+	@test -n "$$TEST_DATABASE_URL" || \
+		(echo "TEST_DATABASE_URL must point to the disposable PostgreSQL database"; exit 1)
+	$(UV) run pytest -m integration -q
 
 cov:  ## Run tests and enforce the 95% line + branch coverage floor
-	$(UV) run pytest --cov --cov-report=term-missing
+	$(UV) run pytest -m "not integration" --cov --cov-report=term-missing
 
 lint:  ## Lint (ruff, every rule minus the documented exceptions)
 	$(UV) run ruff check .
@@ -48,3 +53,9 @@ check: fmt-check lint typecheck cov audit  ## Everything the pre-commit hook enf
 
 setup-hooks:  ## Install the repo-wide git hooks (run once per clone)
 	cd .. && ./scripts/setup-hooks.sh
+
+test-db-up:  ## Start the disposable PostgreSQL integration-test database
+	docker compose -f compose.integration.yml -p "$${COMPOSE_PROJECT_NAME:-boomerang-model-tests}" up -d --wait
+
+test-db-down:  ## Remove the disposable PostgreSQL database and ephemeral data
+	docker compose -f compose.integration.yml -p "$${COMPOSE_PROJECT_NAME:-boomerang-model-tests}" down --volumes --remove-orphans

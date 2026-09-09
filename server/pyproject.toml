@@ -103,6 +103,9 @@ addopts = [
     "-ra",
 ]
 filterwarnings = ["error"]
+markers = [
+    "integration: requires the disposable PostgreSQL integration database",
+]
 
 [tool.coverage.run]
 source = ["app"]
