@@ -37,13 +37,13 @@ in the extension; if it needs a credential, it belongs on the server.
 
 ## Phase
 
-| Phase | State |
-|---|---|
-| **Now** | Next.js starter page. `app/page.tsx` is untouched scaffolding. |
-| **Phase 1** | Landing page + install funnel. Buildable immediately — nothing blocks it. |
+| Phase       | State                                                                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Now**     | Next.js starter page. `app/page.tsx` is untouched scaffolding.                                                                                   |
+| **Phase 1** | Landing page + install funnel. Buildable immediately — nothing blocks it.                                                                        |
 | **Phase 2** | Order dashboard. Depends on the extension exposing its stored orders over `externally_connectable`, so it can't start before the extension does. |
 
-The dashboard is deliberately *not* phase 1: the extension popup is the primary surface, and a
+The dashboard is deliberately _not_ phase 1: the extension popup is the primary surface, and a
 dashboard with no data behind it is a mock, not a milestone.
 
 ## Commands
