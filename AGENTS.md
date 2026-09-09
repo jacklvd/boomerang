@@ -5,9 +5,10 @@ conventions — read this one first, then the one for the directory you're worki
 
 ## What Boomerang is
 
-A returns concierge. A browser extension reads retailer order pages the user visits, a FastAPI
-service parses them with Bedrock and ranks return-window urgency, and the agent drives the return
-to a printed label, books a free USPS pickup, and writes a calendar reminder.
+A web-first returns workspace. A browser extension reads retailer order pages in the user's active
+session and drives supervised return flows, while a FastAPI service normalizes that browser-supplied
+data with Bedrock and stores account-level orders, policies, preferences, and return summaries for
+the dashboard. Carrier pickup is outside v1; Calendar is a separately authorized later priority.
 
 Start with [`docs/SKETCH.md`](docs/SKETCH.md) for the product and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the shape and the decisions behind it.
@@ -17,9 +18,9 @@ Start with [`docs/SKETCH.md`](docs/SKETCH.md) for the product and
 | Path | Scope | Phase | Guide |
 |---|---|---|---|
 | `extension/` | Reads order pages, drives return flows, opens the calendar tab | **not built** — arrives with its own `AGENTS.md` | — |
-| `client/` | Landing page, install funnel, order dashboard | scaffolded; dashboard is phase 2 | [`client/AGENTS.md`](client/AGENTS.md) |
-| `server/` | Parsing, ranking, carrier broker, credential holder | `/health` only; ingestion is phase 1 | [`server/AGENTS.md`](server/AGENTS.md) |
-| `infra/` | Lambda + Function URL + SSM + CloudWatch, in Terraform | EC2 scaffold superseded, never applied; not PoC-critical | [`infra/AGENTS.md`](infra/AGENTS.md) |
+| `client/` | Web dashboard and account-facing product surface | scaffolded; current target is database-backed | [`client/AGENTS.md`](client/AGENTS.md) |
+| `server/` | Authenticated account data, parsing, projections, and model gateway | domain + PostgreSQL ORM model work in progress | [`server/AGENTS.md`](server/AGENTS.md) |
+| `infra/` | Earlier Lambda-oriented Terraform scaffold | not the settled production topology | [`infra/AGENTS.md`](infra/AGENTS.md) |
 | `docs/` | Product sketch, architecture decisions, narrative proposals | — | [`docs/SKETCH.md`](docs/SKETCH.md) |
 | `design/` | Requirements and high-level design — the current spec | — | [`design/boomerang-requirements.md`](design/boomerang-requirements.md) |
 | `.claude/` | Claude Code settings, raw research artifacts, tickets | — | — |
