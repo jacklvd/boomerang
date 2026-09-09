@@ -1,1 +1,41 @@
-"""Pydantic models for request and response payloads. Empty until phase 1."""
+"""Validated domain models for the Boomerang backend."""
+
+from app.models.domain import (
+    Account,
+    FactOrigin,
+    HandoffEvidence,
+    Money,
+    Order,
+    OrderItem,
+    PolicyEligibility,
+    PolicyRule,
+    Preference,
+    PreferenceSet,
+    ReturnPolicy,
+    ReturnState,
+    ReturnSummary,
+    ReturnSummaryUpdateSource,
+    SourcedDate,
+    SourcedMoney,
+    UrgencyLevel,
+)
+
+__all__ = [
+    "Account",
+    "FactOrigin",
+    "HandoffEvidence",
+    "Money",
+    "Order",
+    "OrderItem",
+    "PolicyEligibility",
+    "PolicyRule",
+    "Preference",
+    "PreferenceSet",
+    "ReturnPolicy",
+    "ReturnState",
+    "ReturnSummary",
+    "ReturnSummaryUpdateSource",
+    "SourcedDate",
+    "SourcedMoney",
+    "UrgencyLevel",
+]
