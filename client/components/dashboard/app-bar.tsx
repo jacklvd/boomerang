@@ -55,7 +55,7 @@ function ConnectionPill() {
         className={cn('size-[7px] rounded-full', connected ? 'bg-calm' : 'bg-urgent')}
         aria-hidden
       />
-      <span className="hidden sm:inline">
+      <span className="sr-only sm:not-sr-only">
         {connected ? 'Extension connected' : 'Extension not detected'}
       </span>
     </span>
