@@ -4,9 +4,10 @@ import { useState } from 'react'
 import { CheckCircle, EnvelopeSimple } from '@phosphor-icons/react/dist/ssr'
 import { Button } from '@/components/ui/button'
 
-/* dev-note: there is no subscribe endpoint yet — the server is stateless and
-   holds no list. This confirms locally so the funnel is walkable end to end.
-   Wire to POST /waitlist (or a form service) when one exists. */
+/* dev-note: there is no subscribe endpoint yet. This confirms locally so the
+   funnel is walkable end to end. Wire to POST /waitlist (or a form service)
+   when one exists — or delete it, if Google sign-in (D10) becomes the only
+   way in and the waitlist has nothing left to collect. */
 export function WaitlistForm() {
   const [email, setEmail] = useState('')
   const [sent, setSent] = useState(false)

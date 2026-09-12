@@ -13,6 +13,8 @@ import {
   Truck,
 } from '@phosphor-icons/react/dist/ssr'
 
+import Link from 'next/link'
+
 import { Button, buttonVariants } from '@/components/ui/button'
 import { OrderRow } from '@/components/order-row'
 import {
@@ -78,7 +80,7 @@ function Hero() {
           </div>
 
           <ul className="mt-8 flex flex-wrap gap-x-7 gap-y-3">
-            {['No account', 'No email access', 'Nothing to configure'].map((item) => (
+            {['No email access', 'No retailer password', 'Nothing to configure'].map((item) => (
               <li key={item} className="flex items-center gap-2 text-[13.5px] text-ink-muted">
                 <Check size={15} weight="bold" className="text-accent" />
                 {item}
@@ -260,18 +262,18 @@ function Pickup() {
 const CLAIMS = [
   {
     icon: Key,
-    title: 'No Google account. No OAuth. No scopes.',
-    body: 'Boomerang holds no OAuth grant for any user. That is why there is no background job and no nightly sync — there is no credential that would make one possible.',
+    title: 'Google sign-in, and nothing past it.',
+    body: 'You sign in with Google so we know whose returns these are. That grant carries your identity alone — no inbox scope, no Drive, no calendar — and it gives our server no way into any retailer page.',
   },
   {
     icon: EnvelopeSimpleOpen,
     title: 'No Gmail. Not the API, not scraping.',
-    body: 'Order data comes from retailer pages you are already signed into, read in your own browser session. We never see your retailer password.',
+    body: 'Order data comes from retailer pages you are already signed into, read in your own browser session. We never see your retailer password, and no Gmail scope is requested, ever.',
   },
   {
     icon: Database,
-    title: 'The server forgets everything.',
-    body: 'It parses, ranks, brokers the USPS call, and keeps nothing between requests. No database. Your orders live in your browser, on your machine.',
+    title: 'We keep the summary, never the session.',
+    body: 'We store normalized orders, deadlines and return state against your account, so the dashboard works on any device. The step-by-step state of a return in progress stays in your browser and is never uploaded.',
   },
 ]
 
@@ -288,8 +290,8 @@ function Privacy() {
           </div>
           <p className="max-w-[46ch] flex-1 self-end text-[15.5px] leading-[1.6] text-on-dark-muted">
             Most extensions ask you to trust a promise. Boomerang removes the capability instead
-            &mdash; there is no credential anywhere in the system that could reach your data while
-            you are away.
+            &mdash; signing in tells us who you are, and nothing in that grant can reach your inbox
+            or your retailer accounts while you are away.
           </p>
         </div>
 
@@ -310,15 +312,12 @@ function Privacy() {
             <ShieldCheck size={18} weight="bold" className="text-accent-bright" />
             The extension asks for activeTab, scripting and storage. Nothing else at install.
           </span>
-          {/* TODO: /privacy is designed but not built yet — it ships in the
-              follow-up PR. The Chrome Web Store listing needs this exact URL to
-              be live before submission. */}
-          <a
+          <Link
             href="/privacy"
             className="text-[14.5px] font-medium text-accent-bright hover:underline"
           >
             Read exactly what crosses the boundary &rarr;
-          </a>
+          </Link>
         </div>
       </div>
     </section>
@@ -328,7 +327,7 @@ function Privacy() {
 const FAQS = [
   {
     q: 'Does Boomerang read my email?',
-    a: 'No. There is no Gmail access of any kind — not the API, not scraping — and no Google account connection at all. Order data comes from retailer pages you are already viewing.',
+    a: 'No. There is no Gmail access of any kind — not the API, not scraping — and no Gmail scope is ever requested. Signing in with Google establishes who you are; it does not authorize inbox access. Order data comes from retailer pages you are already viewing.',
   },
   {
     q: 'What happens on the very first run?',
@@ -348,7 +347,7 @@ const FAQS = [
   },
   {
     q: 'What happens to my data if I uninstall?',
-    a: "It goes with it. Orders live in your browser's local storage, and the server keeps nothing between requests — there is no account to delete.",
+    a: 'Uninstalling removes everything the extension holds in your browser, including the detailed state of any return in progress. It does not close your web account — normalized orders live in our database so the dashboard works elsewhere. Close the account from the dashboard to remove those.',
   },
 ]
 
@@ -405,7 +404,9 @@ function FinalCta() {
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-[15px] font-bold text-ink">Boomerang &mdash; Returns Concierge</p>
-            <p className="text-[12.5px] text-ink-muted">Chrome Web Store · Free · No account</p>
+            <p className="text-[12.5px] text-ink-muted">
+              Chrome Web Store · Free · Sign in with Google
+            </p>
             <p className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-calm">
               <ShieldCheck size={14} weight="bold" />
               Asks for page access only when you tap Scan
