@@ -22,6 +22,7 @@ import {
   ArtPickup,
   ArtRank,
 } from '@/components/landing/flow-art'
+import { InstallCard } from '@/components/landing/install-card'
 import { WaitlistForm } from '@/components/landing/waitlist-form'
 import { CHROME_STORE_URL, Footer, Nav, eyebrow, shell } from '@/components/site-chrome'
 import { MOCK_ORDERS, totalAtRisk } from '@/lib/orders'
@@ -105,7 +106,7 @@ function PopupMock() {
       </div>
 
       <div className="flex flex-col gap-2 bg-bg p-3">
-        {MOCK_ORDERS.map((order) => (
+        {MOCK_ORDERS.slice(0, 4).map((order) => (
           <OrderRow key={order.id} order={order} className="border border-line" />
         ))}
       </div>
@@ -399,28 +400,7 @@ function FinalCta() {
           Install it once, open your orders page, and find out what you are still owed.
         </p>
 
-        <div className="mt-10 flex w-full max-w-120 items-center gap-4 rounded-[16px] border border-line bg-surface p-4.5 text-left">
-          <span className="flex size-14 shrink-0 items-center justify-center rounded-[15px] bg-accent-soft text-accent">
-            <ArrowArcLeft size={27} weight="bold" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-[15px] font-bold text-ink">Boomerang &mdash; Returns Concierge</p>
-            <p className="text-[12.5px] text-ink-muted">Chrome Web Store · Free · No account</p>
-            <p className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-calm">
-              <ShieldCheck size={14} weight="bold" />
-              Asks for page access only when you tap Scan
-            </p>
-          </div>
-          <a
-            href={CHROME_STORE_URL}
-            className={cn(
-              buttonVariants({ variant: 'brand', size: 'xl' }),
-              'px-5 py-3 text-[14px]',
-            )}
-          >
-            Install
-          </a>
-        </div>
+        <InstallCard className="mt-10" />
 
         <div className="mt-10 flex w-full max-w-130 items-center gap-4.5">
           <span className="h-px flex-1 bg-line" />
