@@ -17,7 +17,7 @@ Start with [`docs/SKETCH.md`](docs/SKETCH.md) for the product and
 
 | Path | Scope | Phase | Guide |
 |---|---|---|---|
-| `extension/` | Reads order pages, drives return flows, opens the calendar tab | **not built** — arrives with its own `AGENTS.md` | — |
+| `extension/` | Reads order pages, drives return flows, opens the calendar tab | WXT + MV3 manifest scaffolded; entrypoints stubbed | [`extension/AGENTS.md`](extension/AGENTS.md) |
 | `client/` | Web dashboard and account-facing product surface | scaffolded; current target is database-backed | [`client/AGENTS.md`](client/AGENTS.md) |
 | `server/` | Authenticated account data, parsing, projections, and model gateway | domain + PostgreSQL ORM model work in progress | [`server/AGENTS.md`](server/AGENTS.md) |
 | `infra/` | Earlier Lambda-oriented Terraform scaffold | not the settled production topology | [`infra/AGENTS.md`](infra/AGENTS.md) |
