@@ -1,0 +1,101 @@
+name: server
+
+# Runs the server's quality gate on anything that can change its verdict: server/ itself, or
+# this workflow file. Path filters keep unrelated client/docs/design/plan/infra changes from
+# burning CI minutes.
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/server.yml"
+  push:
+    paths:
+      - "server/**"
+      - ".github/workflows/server.yml"
+
+# Cancel a superseded run on the same branch/PR rather than letting both finish.
+concurrency:
+  group: server-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: server
+
+env:
+  # server/AGENTS.md: the disposable integration database, driven through psycopg (matches the
+  # dependency in pyproject.toml and the example in server/README.md / server/AGENTS.md).
+  TEST_DATABASE_URL: postgresql+psycopg://boomerang_test:boomerang_test@localhost:5432/boomerang_test
+
+jobs:
+  quality:
+    name: format, lint, typecheck, coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "server/uv.lock"
+
+      - name: Install dependencies (make install)
+        run: make install
+
+      - name: Formatting check (make fmt-check)
+        run: make fmt-check
+
+      - name: Lint (make lint)
+        run: make lint
+
+      - name: Static analysis (make typecheck)
+        run: make typecheck
+
+      - name: Unit tests with coverage floor (make cov)
+        run: make cov
+
+      - name: Dependency audit (make audit, advisory only)
+        # dev-note: mirrors scripts/pre-commit-server.sh — a fresh CVE in a transitive
+        # dependency must not block the build, but its output still belongs in the log.
+        run: make audit
+        continue-on-error: true
+
+  integration:
+    name: PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # Same image/tag as server/compose.integration.yml, same credentials and database name.
+        image: postgres:17.11-alpine3.24
+        env:
+          POSTGRES_DB: boomerang_test
+          POSTGRES_USER: boomerang_test
+          POSTGRES_PASSWORD: boomerang_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U boomerang_test -d boomerang_test"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "server/uv.lock"
+
+      - name: Install dependencies (make install)
+        run: make install
+
+      - name: PostgreSQL integration tests (make integration)
+        run: make integration
