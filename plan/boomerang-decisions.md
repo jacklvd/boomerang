@@ -50,13 +50,20 @@ persist a QR representation in v1.
 | `MIG-05` | Every return-flow step is agent-first. The agent proposes exactly one closed tool call; trusted extension code validates before execution or outcome publication. | Remove selector-first and model-fallback work. Selectors may assist recognition, resolution, and validation only. |
 | `MIG-06` | Recommendations do not grant authority. Preferences rank and explain; the user sees all visible methods and prices, chooses the method, edits the reason, and confirms irreversible actions. | Do not auto-select a return reason, method, or paid option. |
 | `MIG-07` | Retailer-produced QR and printable-label outcomes are valid without pickup. V1 persists `qr_ready` or `label_ready` status, not the artifact. | Make terminal sanitization and summary publication part of the return flow; do not attach carrier semantics to either state. |
-| `MIG-08` | The stable v1 HTTP contract currently covers account profile, dashboard aggregate, item detail, preferences, supported return-summary publication, and account deletion. | Build dashboard and server fixtures from the current API/data contracts. Keep ingestion, agent, Calendar, and bridge routes outside this stable surface until their respective architecture gates close. Carrier pickup routes remain deferred and require a separate future product decision and carrier contract. |
+| `MIG-08` | The stable v1 HTTP contract currently covers dashboard sign-in and extension browser linking, account profile, dashboard aggregate, item detail, preferences, supported return-summary publication, and account deletion. The authentication routes joined it on 2026-09-13 under `MIG-15`. | Build dashboard and server fixtures from the current API/data contracts. Keep ingestion, agent, Calendar, and bridge routes outside this stable surface until their respective architecture gates close. Carrier pickup routes remain deferred and require a separate future product decision and carrier contract. |
 | `MIG-09` | The extension keeps the minimal install posture: `activeTab`, `scripting`, and `storage`; first access follows a user gesture and optional standing retailer access is requested later in context. | Permission and review posture are core acceptance criteria. |
 | `MIG-10` | Raw DOM, bounded sanitized DOM, retailer cookies and authorization credentials, sensitive retailer form fields, and raw QR/label artifacts have no durable home in Boomerang storage. | Add fail-closed egress, validation, logging, model-invocation, persistence, and privacy checks across milestones. |
 | `MIG-11` | Core v1 is the database dashboard plus one visible, supervised, uninterrupted Chrome return run. QR status is priority 1. Calendar is priority 2. All carrier pickup is deferred. | Remove pickup and Calendar-template work from the core sequence; plan Calendar only after core and `ARCH-B5`. |
 | `MIG-12` | The production topology is not selected. The former Lambda Function URL/no-VPC/no-database target cannot be carried forward because a durable database and authenticated account APIs are now required. | Continue local scaffolding only as scaffolding. Re-plan core-v1 deployment after the data, authentication, AI-runtime, and bridge constraints are sufficiently settled. Priority-2 Calendar does not block that work; the core topology must preserve a clean boundary for the later `ARCH-B5` design. |
 | `MIG-13` | The old task graph is not synchronized with the current requirements. | Use milestone/workstream planning now; do not publish task totals, makespan, critical path, progress, or complete task traceability until `plan/tasks/**` is reconciled. |
 | `MIG-14` | Planning authority flows from the current source documents to the human-authored milestone plan, then to approved tasks. | Keep the authoritative milestone source separate from the future generated task plan; generated task analysis must never redefine upstream product or architecture decisions. |
+| `MIG-15` | **Extension-to-server authentication is server-brokered browser linking with proof-of-key redemption.** The extension is a public client of Boomerang, not of Google, and has no Google relationship at all. The extension presents an opaque bearer credential in `Authorization`; the dashboard presents a first-party `Secure; HttpOnly; SameSite=Lax` cookie with `Origin` matching on mutating routes. Both resolve to one account principal that also carries its client kind. Signing out of the dashboard revokes the extension grant linked from the same browser. Accepted 2026-09-13. **Scope amended 2026-09-13 by `MIG-19`: sign-out revokes every live extension grant on the account, in every linked browser.** The substance of this decision — that sign-out revokes — is unchanged and was never reopened; the same-browser clause above is superseded and retained as the record of what was first decided. | Build the pairing, redemption, refresh, revocation and linked-browsers routes, the Google credential exchange, the dashboard link-approval page and the linked-browsers list with a disconnect control. The extension manifest does not change, and must not. Never add a Google client, a scope, an identity assertion, or any Gmail access to the extension. Specification: [`../design/boomerang-extension-auth-proposal.md`](../design/boomerang-extension-auth-proposal.md), sections 6, 8, 9 and 10. Wire surface: [`../design/boomerang-api-contract.md`](../design/boomerang-api-contract.md), sections 3.2, 3.5, 4.1, 5.1 and 5.2. Closes gate `ARCH-B9`. |
+| `MIG-16` | **Account scoping is enforced by composite primary keys with composite foreign keys, plus an account-scoped repository boundary the unscoped session cannot escape.** Both mechanisms together, as one change; row-level security is the named follow-on and the ORM query filter is rejected. Accepted 2026-09-13. | Add `account_id` as the leading primary-key column on `order_items`, `return_policies`, `policy_rules` and `return_summaries`; make every child foreign key composite, explicitly `NOT DEFERRABLE` and `MATCH FULL`; keep `orders.id` a single-column, globally unique primary key and assert that in a test, because account isolation now rests on it. Route and service code takes the scoped repository and never a session or `select`. Resolves the low-level design review's `DAL-2`. Specification: [`../design/boomerang-account-scoping.md`](../design/boomerang-account-scoping.md), sections 3, 5, 5.1, 5.2 and 9. Its load-bearing claims were verified by execution against SQLAlchemy 2.0.52 and PostgreSQL 17.11. |
+| `MIG-17` | **The v1 extension-authentication posture closes the four defects that blocked the pairing-lifecycle ticket: no decline route, no same-browser correlator, no credential tombstone, and an accepted sign-out stranding residual.** The pairing lifecycle is built from `pairing_requests`, `auth_grants` and `auth_credentials` only. Pairing status is `pending`, `approved`, `redeemed`; `rejected` is not added, because no route can reach it and a pairing can be approved only by the signed-in user themselves, so an undeclined pairing is harmless and expires on its own. No correlator cookie and no correlator column on either record. Account deletion writes no tombstone, so a later call answers `not_linked` and the extension selects its terminal cleanup on whether it presented a credential — a fact it holds locally and the server cannot recover. Accepted 2026-09-13. | Drop `rejected` from the pairing status enum and its check-constraint branch; drop `approval_correlator_hash`, `browser_correlator_hash` and `ix_auth_grants_account_id_correlator`; narrow `auth_grants.revoked_reason` to `user_disconnected`, `dashboard_sign_out` and `refresh_reuse`; do not build `revoked_credentials`. `account_deleted` stays in the published `details.auth_reason` enum as reserved and unreachable in v1, because removing a value from a closed set is the breaking change. The approval copy says *close this page*, not *decline*. The sign-out stranding residual stays inside `ARCH-B1` and is mitigated only by a dashboard sign-out warning composed from the existing `in_progress_count`. Specification: [`../design/boomerang-auth-open-decisions.md`](../design/boomerang-auth-open-decisions.md), sections 2 and 5. Requires the contract and proposal amendments listed in that document's section 7. |
+| `MIG-18` | **Two standing constraints on the extension are confirmed rather than left as accidents of the authentication decision.** Linking through the dashboard is a precondition for every extension capability: an unlinked extension may show its popup and offer to link, and may not read a retailer page, start a run, publish a summary, or buffer or queue page content against a future credential. The browser-identity permission is not added to the manifest in v1, and changing that reopens `ARCH-B9` rather than arriving inside an implementation ticket. Accepted 2026-09-13. | The popup's pre-link state is the explainer and the link offer and nothing else. The manifest stays `activeTab`, `scripting` and `storage`, unchanged, as `MIG-09` already requires. The repo-wide guardrails gain a rule that the extension has no Google relationship, gains no identity permission, never puts the credential in synced storage, and never lets a content script touch the credential or the network. Closes section 13 items 3 and 6 of [`../design/boomerang-extension-auth-proposal.md`](../design/boomerang-extension-auth-proposal.md). |
+| `MIG-19` | **Dashboard sign-out revokes every live extension grant on the account, in every linked browser — not only the browser being signed out from.** This is the user's answer to the one genuinely open product question in the authentication surface, and it amends the *scope clause* of the sign-out behaviour decided under `MIG-15` earlier the same day; that decision's substance, that sign-out revokes, stands unchanged. Per-browser scoping was rejected because it cannot be made reliable. Recognising “the same browser” requires a durable per-browser marker, and in several entirely ordinary situations — cookies cleared, a private window, a sign-out from a different machine, a fresh profile — the marker is absent and **nothing is revoked at all**: the user believes they are signed out while the extension in that browser keeps working. It fails silently, and in the direction the user explicitly did not want. Account-wide revocation has no quiet failure mode and stores no new per-browser identifier. Accepted 2026-09-13. | No schema change, no route change and no contract change. The scope lives behind the single service-layer seam `revoke_grants_for_sign_out(account_id)` already required by `MIG-17`, which defaults to account-wide, so **this answer is implemented by the default** and the seam simply stops being provisional. **No correlator ships, in any form, and that is now permanent rather than provisional** — the two nullable columns, the correlator cookie and the seam predicate that `PROV-05` held open are declined outright, not deferred. Two costs widen and are recorded here rather than discovered later. Re-pairing friction now applies across every linked browser: one sign-out anywhere unlinks all of them and each costs a fresh one-time approval. And the `ARCH-B1` sign-out stranding residual widens with it — unlinking a browser ends any half-finished return in it, those returns cannot be resumed because the `ARCH-B1` reset needs a live grant, and they go back to `not_started` — which now happens in every linked browser at once rather than in one. The mitigation is unchanged and adds no architecture: the dashboard's sign-out confirmation warns when `in_progress_count` is non-zero. Resolves `PROV-05` and closes the revocation-scope question tracked under `ARCH-B9`. Amendments made: [`../design/boomerang-extension-auth-proposal.md`](../design/boomerang-extension-auth-proposal.md) sections 10 and 13 item 1, and [`../design/boomerang-api-contract.md`](../design/boomerang-api-contract.md) sections 5.1 and 15. |
+| `MIG-20` | **`details.auth_reason` of `credential_expired` is an extension-only value, and the dashboard leg has no refresh path at all.** An earlier revision of the wire contract told every client that received the value to refresh once and retry once. A dashboard principal cannot do that: `POST /v1/auth/refresh` requires an extension principal in as many words, and the contract defines no other refresh route for any leg, so the instruction told one of the two principals to perform an operation the same contract forbids it. The alternative — giving the dashboard a refresh mechanism of its own — was rejected because it invents a route, a schema and a wire surface at the end of the design, to serve a state that need never arise. What arises instead is the constraint recorded in the consequence column: with no refresh on the dashboard leg, a dashboard access credential that outlives nothing is pointless, so its lifetime *is* its grant's lifetime, and the "credential expired, grant still live" row of the resolution order has no dashboard instance to describe. That row is therefore left exactly as written and stays normative; it is vacuous for the dashboard principal rather than wrong, and the resolution order in [`../design/boomerang-auth-open-decisions.md`](../design/boomerang-auth-open-decisions.md) section 5.3 gains no case and loses none. Accepted 2026-09-13. | No route, no schema and no wire change: `details.auth_reason` keeps all five published values, and `credential_expired` is not removed from the closed enum — it is documented as reachable by one principal only. The dashboard's recovery from any `401` is a fresh credential exchange through `POST /v1/auth/google`, which mints a new dashboard grant rather than reviving the old one; that is correctness-neutral because `GET /v1/auth/grants` is extension-kind only and expiry is always evaluated at read time. One configuration constraint becomes load-bearing and belongs with the other authentication numbers under `ARCH-B4`: **a dashboard access credential's lifetime must equal its grant's lifetime**, enforced by a startup configuration check rather than by a reviewer's memory, exactly as the `last_used_at` coarsening interval is. Two contract tests carry the claim: no response to a dashboard principal ever carries `credential_expired`, and a configuration that violates the lifetime equality fails validation rather than starting. The same amendment fixed two further rows of the same table that gave extension-shaped instructions to both principals — `grant_revoked` told every client to clear its credential and local workflow records, and `not_linked` told every client to offer the linking flow; the dashboard has no local records, cannot clear its own `HttpOnly` cookie, and has no linking flow — so the whole table now states which principals can receive each value and what each is required to do. Amendments made: [`../design/boomerang-api-contract.md`](../design/boomerang-api-contract.md) sections 2, 4.1, 5.2, 13 and 14. |
+| `MIG-21` | **The double-submit token on `DELETE /v1/account` is withdrawn; strict `Origin` matching plus `SameSite=Lax` is the whole of the dashboard's forgery defence, on that route as on every other mutating one.** The requirement could not be implemented from the accepted documents: no document ever named the token, gave its cookie attributes, said where it was issued, or said how it was compared. Specifying it concretely was rejected on the merits rather than for cost. A double-submit token must be readable by page script, which means a second cookie *without* `HttpOnly`, which trades away the one property the session posture is built on; and it is the weaker control in any case, because `Origin` is set by the browser and cannot be written by script, while double-submit falls to an attacker who can write a cookie anywhere on the registrable domain — and this design's `SameSite=Lax` posture *requires* the dashboard origin and the API origin to share a registrable domain, which is precisely the configuration in which a sibling host makes double-submit weakest. Accepted 2026-09-13. | No route, no schema and no wire change, and nothing a client relies on narrows: no client ever sent such a token, because no document ever defined one to send. `DELETE /v1/account` keeps every other control it had — it requires a dashboard principal, so a stolen extension credential cannot reach it, which is where the irreversibility of deletion is actually answered — and it is refused outright when `Origin` is absent or mismatched, as every mutating dashboard route is. One contract test asserts the removal rather than assuming it: the route is refused on an absent or mismatched `Origin`, and accepted on a matching one with no forgery token of any kind presented. If a later deployment cannot put the dashboard and the API on one registrable domain, this decision is reopened together with the `SameSite=Lax` precondition it shares that dependency with, and not before. Amendments made: [`../design/boomerang-api-contract.md`](../design/boomerang-api-contract.md) sections 2, 3.5 and 14, and [`../design/boomerang-extension-auth-proposal.md`](../design/boomerang-extension-auth-proposal.md) section 8's dashboard-leg bullets and posture table. |
 
 #### MIG-14 — Separate authored milestones from the generated task plan
 
@@ -75,9 +82,13 @@ that pass. No repository hook or CI workflow currently enforces those scripts.
 | ID | Provisional boundary | What would make it final |
 |---|---|---|
 | `PROV-01` | Normalization may begin synchronously. | Measurements and the full runtime decision under `ARCH-B2`; asynchronous work is introduced only if those results require it. |
-| `PROV-02` | The stable account API can be implemented while session transport and the Google credential-exchange route remain behind an authentication adapter. | Choose cookie or bearer transport and the exchange flow without changing the stable v1 bodies. |
-| `PROV-03` | The logical data contract is sufficient for schema exploration, repositories, and frontend fixtures. | Select the database/ORM, migrations, indexes, and lifecycle behavior consistently with `ARCH-B4`. |
+| `PROV-02` | **Resolved 2026-09-13 by `MIG-15`.** Session transport and the Google credential-exchange route are decided and frozen: a first-party cookie on the dashboard leg, a bearer credential on the extension leg, one credential-exchange route called only by the dashboard. The stable v1 bodies did not change. | Nothing further. Retained here as the record of how the boundary closed. |
+| `PROV-03` | The logical data contract is sufficient for schema exploration, repositories, and frontend fixtures. **Narrowed 2026-09-13 by `MIG-16`**, which fixes the account-scoping key, constraint and index decisions now rather than after `ARCH-B4`. | Select the remaining database/ORM, migration-tooling and lifecycle behavior consistently with `ARCH-B4`. Migration tooling does not yet exist in this repository at all, which `MIG-16` makes urgent rather than optional. |
 | `PROV-04` | Existing client, server, Compose, and infrastructure files may support local development during migration. | A separate deployment decision establishes the target compute, database, network, hosting, secret, environment, and pipeline topology. |
+| `PROV-05` | **Resolved 2026-09-13 by `MIG-19`.** Dashboard sign-out revokes every extension grant on the account, behind one named service-layer revocation seam and nowhere else. This was recorded here as the interim default while the revocation-scope question was with the user; the user chose account-wide, so the default became the decision and this boundary closed as written rather than by being changed. | Nothing further. Retained here as the record of how the boundary closed. The same-browser alternative it held open — two nullable columns, one correlator cookie and one predicate inside the existing seam — is now declined permanently rather than merely unbuilt. The note that this scope widens the `ARCH-B1` sign-out stranding residual still holds, and is now a standing consequence recorded under `MIG-19` rather than a caveat on a provisional default. |
+| `PROV-06` | **No cap on how many browsers one account may link.** No uniqueness constraint is written on `auth_grants` beyond `uq_auth_grants_id`. | A product decision on a cap, which must be taken together with the grant expiry semantics because counting *live* grants means evaluating both expiries. Both behaviours at a cap are user-visible — refusing a legitimate third machine, or silently evicting a browser the user did not touch — which is why neither is chosen here. The control that already exists is the linked-browsers list, which makes every grant visible and revocable. |
+| `PROV-07` | **The approval screen shows the closed-vocabulary browser label and the request time, and no location.** Both facts are already stored for the linked-browsers list, so nothing new is collected about the user and the privacy copy gains no new claim. | The privacy-copy pass. Adding an approximate location would be a new collection and a new dependency and is a product call; it is not taken here. The label is not a phishing control — it originates with the extension, so an attacker declares a plausible one — and must not be presented as one; the short-code comparison and the absence of any code-entry path are the controls at approval time. |
+| `PROV-08` | **No authentication number is invented anywhere in code or schema.** Access and refresh credential lifetimes, grant idle and absolute limits, pairing lifetime, the refresh rotation grace window, the `last_used_at` coarsening interval and every rate-limit ceiling are configuration values with no defaults. | `ARCH-B4`. The shapes are architectural and hold whatever the numbers turn out to be. Two cross-constraints must be enforced by a configuration check rather than by review. The coarsening interval must be far smaller than the idle limit, or the idle limit is evaluated against a stale `last_used_at` and grants outlive it. And **a dashboard access credential's lifetime must equal its grant's lifetime** — added 2026-09-13 by `MIG-20`, because the dashboard leg has no refresh path, so a shorter-lived dashboard credential would end a live session with no way to continue it. A configuration violating either fails validation rather than starting. |
 
 None of these provisional boundaries authorizes invented payload ceilings, latency budgets, retry
 rules, retention windows, bridge credentials, or production resources.
@@ -93,6 +104,7 @@ rules, retention windows, bridge credentials, or production resources.
 | Asynchronous normalization | Deferred unless `ARCH-B2` measurements require it |
 | Gmail and unattended retailer access | Excluded, not queued as later v1 work |
 | Cross-browser support | Deferred; Chrome only for v1 |
+| Automatic extension linking on a dashboard visit | Deferred; an intentional follow-on once `ARCH-B6` closes, not a gap. It is a user-experience layer over an authentication design that already works, and it would reuse the pairing records `MIG-17` builds |
 
 ### Open architecture decisions
 
@@ -100,14 +112,140 @@ These entries record planning gates, not placeholder answers.
 
 | Gate | Open decision | Planning effect |
 |---|---|---|
-| `ARCH-B1` | Exact v1 behavior after user, tab, page, or worker interruption | Blocks final interruption behavior and acceptance; does not turn checkpoints into resume support |
+| `ARCH-B1` | Exact v1 behavior after user, tab, page, or worker interruption. **One sub-decision inside this gate is closed:** the terminal disposition of an in-progress summary whose run ends without an outcome, decided 2026-09-13 and recorded immediately below | Blocks final interruption behavior and acceptance; does not turn checkpoints into resume support. The closed sub-decision unblocks the summary transition table and nothing else |
 | `ARCH-B2` | AI payloads, observation binding, latency, timeout, retry, sync/async, and hosting fit | Blocks final normalization and per-step agent contracts and runtime acceptance |
 | `ARCH-B3` | Allowed evidence and publisher for `handed_to_carrier` | Blocks handoff writes; defensive reads remain allowed |
 | `ARCH-B4` | Record/checkpoint/token lifetimes, single-order deletion, cleanup, backup, recovery, and expiry | Blocks detailed lifecycle behavior beyond baseline account deletion and local clearing |
 | `ARCH-B5` | Calendar component ownership, wire contract, scope, token custody, refresh/revocation, and updates | Blocks priority-2 Calendar implementation |
-| `ARCH-B6` | Secure dashboard-to-extension binding, addressing, transport, acknowledgements, and revocation | Blocks live connection and dashboard start/focus integration |
+| `ARCH-B6` | Secure dashboard-to-extension binding, addressing, transport, acknowledgements, and revocation. **Extension-to-server authentication is not part of this gate**; it is `ARCH-B9`, decided separately and first | Blocks live connection and dashboard start/focus integration. Does not block ingestion or summary publication, which authenticate under `MIG-15` |
 | `ARCH-B7` | First retailer | Blocks adapters, retailer fixtures, policy assumptions, rescan rules, and real-browser acceptance |
 | `ARCH-B8` | Meaning, evidence, and legal transitions for `complete` | Blocks `complete` writes independently of carrier handoff |
+
+#### `ARCH-B1` sub-decision — the abandoned run and the stranded summary
+
+**Decided 2026-09-13.** An in-progress return summary whose run ends without an outcome leaves that
+state through a validated extension-published reset to `not_started`, and through nothing else.
+
+This is recorded here, inside the interruption gate, because that is where it belongs and because it
+had no owner anywhere else. The high-level design review's `DATA-4` and the low-level design review's
+`TRACE-2` both found the same hole: the interruption rule writes no summary on the way out, the
+page-diverged rule writes no summary on the way out, and the transition policy was deferred to three
+gates — the interruption gate, scoped to browser behavior; the retention gate, scoped to lifetimes;
+and the handoff and complete gates, scoped to states an abandoned item never reaches. Each gate
+disclaimed the case. `TRACE-2` recommended folding it into this gate as an explicit sub-decision so
+it could not fall between them again, and recommended the reset shape as the cheapest that fits the
+existing contract: one new row in the transition table and one relaxation of the rule that
+`not_started` is server-created only. The alternatives it costed — ageing an in-progress summary out
+of the metrics after a fixed interval, or a user-initiated reset from the dashboard — need the
+retention gate and a new wire route respectively.
+
+What it is, precisely:
+
+- **Not a new route.** It is the existing `PUT /v1/items/{item_id}/return-summary` with `state` of
+  `not_started` and `update_source` of `user_confirmed`. No new field, no new body shape, no new
+  deferred contract, and it inherits the enforceable caller column unchanged: that route already
+  requires an extension principal, and a dashboard principal is refused.
+- **Guarded, not open.** The server accepts it only from an extension principal, only with
+  `user_confirmed` as the source, only when the stored state is `in_progress` compared in the same
+  transaction as the write, only with `handoff_evidence` of `null`, and only when `observed_at` is at
+  or after the stored `observed_at`. A page observation carrying `extension_live_page` can never
+  request `not_started`.
+- **Monotonicity is relaxed and bounded, not broken as a principle.** Exactly one backward edge
+  exists. No observation can move an item backward from any state, which is what the monotonic rule
+  was protecting. The relaxation is confined to an explicit user act, which is the "explicit
+  reconciliation rule" the data model's consistency rule already reserved.
+- **It destroys nothing.** `not_started` is the state the item would have held had the run never
+  started; the summary holds no artifact, no evidence and no history. Combined with account scoping
+  and the `in_progress` precondition, a reset is not a data-loss vector.
+- **Metrics.** The item leaves `in_progress_count`. `closing_soon_count` is deliberately unchanged:
+  abandoning a run does not make the return less due.
+
+The specification is
+[`../design/boomerang-api-contract.md`](../design/boomerang-api-contract.md), section 11, which also
+states idempotency and the race semantics against a live publication from another tab.
+
+Two things this sub-decision does **not** do, stated so they are not assumed closed with it:
+
+1. It does not reach an abandonment whose trigger is the loss of the extension's grant — dashboard
+   sign-out under `MIG-15`, disconnection from the linked-browsers list, or account deletion. A
+   revoked extension cannot publish anything, and after re-linking it has already cleared the
+   workflow records that would tell it which items were stranded. Those items stay stranded, and
+   that residual stays in this gate. **It widened on 2026-09-13 under `MIG-19`**, which is recorded
+   here rather than re-registered elsewhere: this item first read “sign-out in the same browser,”
+   and sign-out is now account-wide, so one sign-out on any machine strands the in-progress returns
+   in *every* linked browser at once rather than in one. The mitigation is unchanged and is a
+   dashboard-only one — the sign-out confirmation warns from the existing `in_progress_count`.
+2. It does not add the append-only transition record that both reviews recommend. A reset that leaves
+   no trace is indistinguishable from a run that never started, and a user disputing a status has
+   nothing to appeal to. That remains open under `ARCH-B4`.
+
+A known defect compounds with this case and is **not** fixed here: the committed unique constraint on
+orders admits nulls, so a user who recovers by rescanning an order page whose retailer reference was
+unreadable creates a second order with fresh `not_started` summaries, and the dashboard shows the
+same physical item twice. That is the low-level review's `DAL-3`; it is a schema change, and it is
+recorded here only so the interaction is visible.
+
+### Closed architecture decisions
+
+| Gate | Decision it owned | Closed | Closed by |
+|---|---|---|---|
+| `ARCH-B9` | How the extension obtains, presents, renews and loses an authenticated identity at the API, where that credential lives, and the cross-origin and request-forgery posture of both client legs | 2026-09-13 | `MIG-15` |
+
+`ARCH-B9` did not exist before 2026-09-13, and that is the point of recording it here rather than
+quietly writing the decision down somewhere. The low-level design filed extension-to-server
+authentication under `ARCH-B6`, which owns how a dashboard addresses an extension — addressing, not
+credentials. The low-level design review's `TRACE-1` finding named that mis-filing as the reason the
+decision was unowned and invisible to every gate. It is registered now so the record shows both that
+it existed and that it is closed.
+
+Two items inside `ARCH-B9`'s subject matter were **not** closed by `MIG-15` and were tracked against
+it: the dashboard sign-out route, which no document enumerates, and the browser or session
+correlator that scopes sign-out revocation to a single browser, which the accepted design required
+and did not specify. **One of the two is now closed and the other has changed shape.** The
+correlator item is closed by `MIG-19`, which declines the correlator outright: nothing requires it,
+so nothing about it is open. The sign-out route remains open, but only as a wire shape — its
+behaviour is decided — and it stays in the wire contract's deferred-contracts table on that basis.
+
+#### `ARCH-B9` — the revocation-scope question, put to the user and **answered** 2026-09-13
+
+> **CLOSED 2026-09-13. The answer is account-wide, registered as `MIG-19`.** The question and the
+> argument that produced it are kept below unchanged, because the reasoning is what makes the answer
+> reviewable; the resolution is recorded at the end of this subsection.
+
+Of the two items tracked against `ARCH-B9` above, the correlator resolved into a product question that
+an engineer must not answer silently, and it is the only one in the whole open authentication surface
+that did.
+
+The correlator can be built and it cannot be made reliable. Its failure cases — the cookie absent, the
+cookie cleared, a sign-out from another browser, an incognito window — are every one of them a **silent
+fail-open**: the user signs out, believes they are signed out, and the extension in that browser keeps
+working. That is the exact direction the user's stated mental model, "sign out means signed out," was
+protecting. Account-wide revocation needs no correlator, needs no new durable per-browser identifier in
+the privacy copy, and has no silent case; it is blunter than what was decided, because signing out on
+one machine unlinks the others and each costs a re-approval.
+
+**No correlator ships in v1 either way**, and that part is an engineering call taken under `MIG-17`:
+the correlator is the irreversible direction, since it means minting and disclosing a durable
+per-browser identifier, while adding one later is a clean additive change. The scope itself is the
+user's, because account-wide changes the letter of the section 13 item 1 decision the user took on
+2026-09-13 — it satisfies that decision's intent and over-satisfies its scope clause, and the
+difference is visible to the user.
+
+`PROV-05` is the interim default and the implementation seam, so **this question blocks nothing in the
+pairing lifecycle**. It blocks the sign-out route's wire shape, the privacy copy, and the correlator
+columns if they are ever wanted. The question as drafted for the user is section 4 of
+[`../design/boomerang-auth-open-decisions.md`](../design/boomerang-auth-open-decisions.md).
+
+**The answer, 2026-09-13: account-wide.** The user chose to revoke every linked browser's grant on
+sign-out, and the reason they gave is the one this subsection argued: per-browser scoping cannot be
+made reliable, and every way it fails — a cleared cookie, a private window, a sign-out from another
+machine, a fresh profile — fails by doing nothing at all while the user believes they are signed
+out. They preferred a blunt mechanism that never lies about being signed out to a precise one that
+quietly does not run, and they accepted the two costs that come with it: a re-approval in every
+linked browser after any sign-out, and a wider `ARCH-B1` stranding residual, since a sign-out now
+ends half-finished returns in every browser rather than one and those returns go back to
+`not_started`. The decision is registered as `MIG-19`; `PROV-05` is resolved by it, the correlator is
+declined permanently, and the sign-out route's wire shape is the only part of this item still open.
 
 ### Supersession map for the 2026-08-27/2026-09-01 decisions
 
