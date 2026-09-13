@@ -18,7 +18,7 @@ export function InstallCard({ className }: { className?: string }) {
       </span>
       <div className="min-w-0 flex-1">
         <p className="text-[15px] font-bold text-ink">Boomerang &mdash; Returns Concierge</p>
-        <p className="text-[12.5px] text-ink-muted">Chrome Web Store · Free · No account</p>
+        <p className="text-[12.5px] text-ink-muted">Chrome Web Store · Free · Sign in with Google</p>
         <p className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-calm">
           <ShieldCheck size={14} weight="bold" />
           Asks for page access only when you tap Scan

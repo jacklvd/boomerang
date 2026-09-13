@@ -21,30 +21,32 @@ diff only recreates the uncommitted change. Commit it with your work. Everything
 
 Three surfaces, in order of importance to the PoC:
 
-1. **Landing page** — what Boomerang is, and the install funnel. This is the whole onboarding
-   flow: `landing → subscribe email → install extension`. There is no signup, no OAuth, no
-   account creation, because there is no Google grant to obtain (D1/D2 in
-   [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)).
-2. **Order dashboard** — the same ranked order list the extension popup shows, on a bigger canvas.
-   **Its data comes from the extension, not from the server.** The server is stateless and has no
-   `GET /orders` to call; the page talks to the extension over `externally_connectable` messaging
-   and degrades to an install prompt when the extension isn't there.
-3. **Nothing else.** No admin, no settings that duplicate extension state.
+1. **Order dashboard** — the product home (D8 in
+   [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)). It reads normalized orders, deadlines,
+   values and return state **from the server**, scoped to the signed-in account. It degrades to an
+   install prompt when the extension isn't connected, because the extension is still the only thing
+   that can read a retailer page.
+2. **Landing page** — what Boomerang is, and the install funnel:
+   `landing → sign in with Google → install extension`. Google is the v1 account provider and the
+   backend keys users by the OIDC `sub` (D10).
+3. **Privacy page** — the disclosure the Chrome Web Store listing points at.
+4. **Nothing else.** No admin, no settings that duplicate extension state.
 
-**The client is a read-only view over data the extension owns.** It never touches retailer page
-data, never holds a credential, never calls a carrier. If a feature needs page access, it belongs
-in the extension; if it needs a credential, it belongs on the server.
+**The client never touches retailer page data, never holds a retailer credential, and never calls a
+carrier.** If a feature needs page access it belongs in the extension; if it needs a credential it
+belongs on the server. Durable account state is the server's; the detailed workflow state of an
+in-progress return is the extension's, and is never uploaded (D9).
 
 ## Phase
 
-| Phase       | State                                                                                                                                            |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Now**     | Next.js starter page. `app/page.tsx` is untouched scaffolding.                                                                                   |
-| **Phase 1** | Landing page + install funnel. Buildable immediately — nothing blocks it.                                                                        |
-| **Phase 2** | Order dashboard. Depends on the extension exposing its stored orders over `externally_connectable`, so it can't start before the extension does. |
+| Phase     | State                                                                                                                              |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **Now**   | Landing, privacy and dashboard pages are built and rendering fixtures from `lib/orders.ts`.                                        |
+| **Next**  | Google sign-in, then swapping the fixture for `GET /orders`. Both need server endpoints that don't exist yet.                      |
+| **After** | Extension connectivity over `externally_connectable`, which drives the connected/disconnected state the dashboard already renders. |
 
-The dashboard is deliberately _not_ phase 1: the extension popup is the primary surface, and a
-dashboard with no data behind it is a mock, not a milestone.
+`lib/orders.ts` is the single fixture behind every surface. When the API lands it gets deleted, not
+extended — don't grow it into a mock backend.
 
 ## Commands
 
@@ -71,15 +73,15 @@ Husky + lint-staged run eslint and prettier on commit. If the pre-commit hook fa
 - **`prettier-plugin-tailwindcss` sorts class order.** Don't fight it manually.
 - **Server URL comes from `NEXT_PUBLIC_API_URL`** (`http://localhost:8000` in compose). Never
   hardcode a host.
-- **This ships as a static export** (`output: "export"`). No server components doing data fetching,
-  no route handlers, no middleware, no `next/image` optimizer — the dashboard's data comes from the
-  extension in the browser, so there is nothing for a Node runtime to do.
+- **Rendering mode is unresolved.** This file has long said static export (`output: "export"`)
+  while `next.config.ts` says `output: "standalone"`. D8 makes the dashboard read authenticated
+  server data, which a pure static export can't do on its own. Settle this before the auth PR;
+  until then, don't add route handlers or middleware on the assumption either answer won.
 
 ## Rules specific to this workspace
 
-- **No user order data in the Next.js app's own storage.** The dashboard renders what the extension
-  hands it for the current install; it doesn't cache order contents to localStorage. The extension
-  is the only place order data lives.
+- **No user order data in the Next.js app's own storage.** The dashboard renders what the server
+  returns for the signed-in account; it doesn't cache order contents to localStorage.
 - **The landing page makes the compliance promise.** Whatever it says about what leaves the
   browser has to match the extension's Chrome Web Store disclosure exactly — a reviewer will read
   both. Coordinate copy changes with the listing.
