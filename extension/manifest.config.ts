@@ -76,8 +76,9 @@ export function buildManifest(isRelease = IS_RELEASE) {
       matches: [`${DASHBOARD_ORIGIN}/*`],
     },
 
-    /* dev-note: `key` is added by Task 1.4, which pins the extension keypair so
-       the ID is stable across builds. Its absence here is sequencing, not an
-       oversight. Task 1.4 also edits this file — see its conflict note. */
+    /* dev-note: no `key` yet. Pinning the extension keypair, so the ID is
+       stable across builds and `externally_connectable` has a fixed counterpart,
+       is separate work that edits this file. Its absence is sequencing, not an
+       oversight. */
   }
 }
