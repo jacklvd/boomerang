@@ -5,9 +5,9 @@ import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 /* TODO: point at the Chrome Web Store listing once the extension is published.
-   Until then the install funnel falls back to the waitlist — there is no second
-   distribution channel to fall back to. */
-export const CHROME_STORE_URL = '/#waitlist'
+   Until then the install funnel falls back to sign-in, which is the first step
+   of the funnel anyway under D10. There is no second distribution channel. */
+export const CHROME_STORE_URL = '/signin'
 
 /* Root-relative so the same nav works from /privacy, not just the landing page. */
 export const NAV_LINKS = [
