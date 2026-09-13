@@ -65,9 +65,10 @@ def order_from_row(row: OrderRow) -> Order:
     )
 
 
-def order_item_to_row(item: OrderItem) -> OrderItemRow:
+def order_item_to_row(account_id: str, item: OrderItem) -> OrderItemRow:
     """Convert an order-item domain record to a flattened ORM row."""
     return OrderItemRow(
+        account_id=account_id,
         id=item.id,
         order_id=item.order_id,
         description=item.description,
@@ -106,8 +107,9 @@ def order_item_from_row(row: OrderItemRow) -> OrderItem:
     )
 
 
-def _policy_rule_to_row(item_id: str, rule: PolicyRule) -> PolicyRuleRow:
+def _policy_rule_to_row(account_id: str, item_id: str, rule: PolicyRule) -> PolicyRuleRow:
     return PolicyRuleRow(
+        account_id=account_id,
         item_id=item_id,
         id=rule.id,
         text=rule.text,
@@ -116,9 +118,10 @@ def _policy_rule_to_row(item_id: str, rule: PolicyRule) -> PolicyRuleRow:
     )
 
 
-def return_policy_to_row(policy: ReturnPolicy) -> ReturnPolicyRow:
+def return_policy_to_row(account_id: str, policy: ReturnPolicy) -> ReturnPolicyRow:
     """Convert a return policy and its rules to new ORM rows."""
     row = ReturnPolicyRow(
+        account_id=account_id,
         item_id=policy.item_id,
         eligibility=policy.eligibility,
         return_by_value=policy.return_by.value if policy.return_by else None,
@@ -131,7 +134,7 @@ def return_policy_to_row(policy: ReturnPolicy) -> ReturnPolicyRow:
         version=policy.version,
         updated_at=policy.updated_at,
     )
-    row.rules = [_policy_rule_to_row(policy.item_id, rule) for rule in policy.rules]
+    row.rules = [_policy_rule_to_row(account_id, policy.item_id, rule) for rule in policy.rules]
     return row
 
 
@@ -213,9 +216,9 @@ def preference_set_from_row(row: PreferenceSetRow) -> PreferenceSet:
     )
 
 
-def return_summary_to_row(summary: ReturnSummary) -> ReturnSummaryRow:
+def return_summary_to_row(account_id: str, summary: ReturnSummary) -> ReturnSummaryRow:
     """Convert a return summary domain record to a new ORM row."""
-    return ReturnSummaryRow(**summary.model_dump())
+    return ReturnSummaryRow(account_id=account_id, **summary.model_dump())
 
 
 def return_summary_from_row(row: ReturnSummaryRow) -> ReturnSummary:
