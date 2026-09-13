@@ -32,8 +32,11 @@ export function SignInScreen() {
             whatever device you open it on.
           </p>
 
-          {/* dev-note: no auth endpoint yet. This goes to the dashboard so the
-              funnel is walkable; swap for the Google authorization redirect. */}
+          {/* dev-note: inert — there is no authorization endpoint to send the
+              visitor to. It points at /dashboard, which routes straight back
+              here while CURRENT_ACCOUNT is null. Flip that fixture to walk the
+              signed-in dashboard; swap this href for the Google redirect when
+              auth exists. */}
           <Link
             href="/dashboard"
             className="mt-8 inline-flex items-center gap-2.5 rounded-[10px] bg-ink px-6.5 py-[15px] text-[15px] font-semibold text-surface transition-colors hover:bg-ink/90"
