@@ -54,13 +54,23 @@ ignore = [
     "PLR2004",  # magic values are the fixtures
     "INP001",   # tests/ is intentionally not a package
     "ARG",      # unused args are how monkeypatch stubs match a signature
+    "TID251",   # tests build fixtures and verify boundary failures directly against the
+                # schema (e.g. composite-FK rejection, cross-account setup); the app-code
+                # boundary this rule protects is app/db/ vs everything above it, not tests/
 ]
+# app/db/ is the only place allowed to construct an unscoped query or hold a bare
+# AsyncSession - see app/db/repository.py. TID251 below bans both everywhere else.
+"app/db/*" = ["TID251"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.flake8-annotations]
 mypy-init-return = true
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"sqlalchemy.select".msg = "Unscoped queries are confined to app/db/. Use app.db.repository.ScopedRepository instead."
+"sqlalchemy.ext.asyncio.AsyncSession".msg = "Bare AsyncSession use is confined to app/db/. Use app.db.repository.ScopedRepository instead."
 
 # ---------------------------------------------------------------------------
 # mypy — static analysis, strict
