@@ -103,3 +103,31 @@ describe('built manifest', () => {
     expect(built).not.toHaveProperty('key')
   })
 })
+
+/**
+ * The popup is contributed by WXT from `entrypoints/popup/`, not by
+ * `manifest.config.ts`, so only the built artifact can prove it landed — and
+ * that adding it did not quietly widen the install-time permission set, which
+ * is the thing D7 actually constrains.
+ */
+describe('popup entrypoint', () => {
+  const builtPath = new URL('../.output/chrome-mv3/manifest.json', import.meta.url)
+  const built = JSON.parse(readFileSync(builtPath, 'utf8'))
+
+  it('registers the popup as the browser action', () => {
+    expect(built.action.default_popup).toBe('popup.html')
+  })
+
+  it('adds no permission in exchange for having a UI', () => {
+    expect(built.permissions).toEqual(['activeTab', 'scripting', 'storage'])
+    expect(built).not.toHaveProperty('host_permissions')
+  })
+
+  /* The popup bundles React and two font families. Nothing it renders may be
+     fetched at runtime, or the CSP would have to be loosened to allow it. */
+  it('keeps the no-remote-script policy the popup has to live within', () => {
+    expect(built.content_security_policy.extension_pages).toBe(
+      "script-src 'self'; object-src 'self'",
+    )
+  })
+})
