@@ -18,21 +18,26 @@ export function MethodPicker({
   selectedId,
   onSelect,
   onContinue,
+  title = 'How should it go back?',
+  body = "Ranked against your preference for no printer. Prices are the retailer's.",
+  /** Frame I1: the method the user is replacing, marked so it is not re-picked
+   *  by accident. Its own row says so rather than a legend elsewhere. */
+  previouslyChosenId,
 }: {
   options: ReturnMethodOption[]
   selectedId: string | null
   onSelect: (methodId: string) => void
   onContinue: () => void
+  title?: string
+  body?: string
+  previouslyChosenId?: string
 }) {
   const paid = options.filter(isPaid)
   const selected = options.find((option) => option.methodId === selectedId)
 
   return (
     <>
-      <Heading
-        title="How should it go back?"
-        body="Ranked against your preference for no printer. Prices are the retailer's."
-      />
+      <Heading title={title} body={body} />
 
       <ul className="flex flex-col gap-2">
         {options.map((option) => (
@@ -42,7 +47,11 @@ export function MethodPicker({
             onSelect={() => onSelect(option.methodId)}
             label={option.label}
             description={option.description}
-            badge={option.recommendedBecause}
+            badge={
+              option.methodId === previouslyChosenId
+                ? 'Previously chosen'
+                : option.recommendedBecause
+            }
             trailing={<Price option={option} />}
           />
         ))}

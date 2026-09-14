@@ -16,6 +16,9 @@ export type PreviewScreen =
   | 'policy'
   | 'method'
   | 'review'
+  | 'change-method'
+  | 'manual'
+  | 'resume'
   | 'standing-access'
 
 export const PREVIEW: PreviewScreen | null = null
