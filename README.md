@@ -10,7 +10,7 @@ Boomerang keeps the return visible — and carries out the tedious parts for you
 <br>
 
 [![Status](https://img.shields.io/badge/status-in%20development-0c6e6b?style=for-the-badge)](docs/ARCHITECTURE.md)
-[![License](https://img.shields.io/badge/license-TBD-565248?style=for-the-badge)](#license)
+[![License](https://img.shields.io/badge/license-MIT-565248?style=for-the-badge)](LICENSE)
 [![No Gmail scopes](https://img.shields.io/badge/Google%20restricted%20scopes-none-387046?style=for-the-badge)](#the-rules-that-arent-style-preferences)
 
 <br>
@@ -240,4 +240,4 @@ the same PR.
 
 ## License
 
-Not yet chosen.
+[MIT](LICENSE) © 2026 jacklvd
