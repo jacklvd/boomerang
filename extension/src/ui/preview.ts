@@ -9,6 +9,13 @@
  * dev-note: flip by hand, the way `CURRENT_ACCOUNT` does on the dashboard.
  * Delete the constant once the extractor feeds these screens for real.
  */
-export type PreviewScreen = 'reading' | 'order' | 'standing-access'
+export type PreviewScreen =
+  | 'reading'
+  | 'order'
+  | 'reason'
+  | 'policy'
+  | 'method'
+  | 'review'
+  | 'standing-access'
 
 export const PREVIEW: PreviewScreen | null = null

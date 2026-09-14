@@ -14,6 +14,12 @@ import { Button } from './button'
 import { OrderReview } from './order-review'
 import { PopupHeader } from './popup-header'
 import { PREVIEW, type PreviewScreen } from './preview'
+import { FIXTURE_POLICY } from '@/src/model/policy'
+import { initialSelection, FIXTURE_METHODS, FIXTURE_REASONS } from '@/src/model/return-flow'
+import { MethodPicker } from './method-picker'
+import { PolicySummary } from './policy-summary'
+import { ReasonPicker } from './reason-picker'
+import { ReviewSubmit } from './review-submit'
 import { ScanProgress } from './scan-progress'
 import { StandingAccess } from './standing-access'
 
@@ -70,22 +76,63 @@ export function App({ tabs, scripting }: { tabs: TabsArea; scripting: ScriptingA
   )
 }
 
+const STATUS: Record<PreviewScreen, string> = {
+  reading: 'Step 1 of 6',
+  order: 'Step 2 of 6',
+  reason: 'Step 3 of 6',
+  policy: 'Step 4 of 6',
+  method: 'Step 5 of 6',
+  review: 'Step 6 of 6',
+  'standing-access': 'Optional',
+}
+
 /* dev-note: reachable only by editing PREVIEW. See the note on that constant. */
 function Preview({ screen }: { screen: PreviewScreen }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(
     () => new Set(FIXTURE_ORDER.items.map((item) => item.localId)),
   )
+  const [reasonId, setReasonId] = useState<string | null>(FIXTURE_REASONS[0]?.id ?? null)
+  const [methodId, setMethodId] = useState<string | null>(() => initialSelection(FIXTURE_METHODS))
 
   return (
     <div className="bg-bg">
-      <PopupHeader
-        status={
-          screen === 'reading' ? 'Step 1 of 6' : screen === 'order' ? 'Step 2 of 6' : 'Optional'
-        }
-        onClose={() => window.close()}
-      />
+      <PopupHeader status={STATUS[screen]} onClose={() => window.close()} />
       <main className="flex flex-col gap-4 px-4 pt-[18px] pb-5">
-        {screen === 'standing-access' ? (
+        {screen === 'reason' ? (
+          <ReasonPicker
+            reasons={FIXTURE_REASONS}
+            selectedId={reasonId}
+            onSelect={setReasonId}
+            onContinue={() => {}}
+            onSkip={() => {}}
+          />
+        ) : screen === 'policy' ? (
+          <PolicySummary
+            retailerName="Nordstrom"
+            policy={FIXTURE_POLICY}
+            onContinue={() => {}}
+            onOpenDashboard={() => {}}
+          />
+        ) : screen === 'method' ? (
+          <MethodPicker
+            options={FIXTURE_METHODS}
+            selectedId={methodId}
+            onSelect={setMethodId}
+            onContinue={() => {}}
+          />
+        ) : screen === 'review' ? (
+          <ReviewSubmit
+            summary={{
+              items: 'Wool Overcoat, Charcoal · $180.00',
+              reason: FIXTURE_REASONS.find((r) => r.id === reasonId)?.label ?? null,
+              method: FIXTURE_METHODS.find((m) => m.methodId === methodId)?.label ?? null,
+              refundTo: 'Original payment method',
+            }}
+            onEdit={() => {}}
+            onSubmit={() => {}}
+            onChangeMethod={() => {}}
+          />
+        ) : screen === 'standing-access' ? (
           <StandingAccess
             hostname="nordstrom.com"
             onAllow={() => {}}
