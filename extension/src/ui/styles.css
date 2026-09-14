@@ -1,0 +1,61 @@
+@import 'tailwindcss';
+
+/* Self-hosted, not fetched. The extension CSP is `script-src 'self'` and a
+   popup has to render offline and instantly — a Google Fonts round trip would
+   give the first paint a network dependency the rest of the popup does not
+   have.
+
+   Both name the `wght` axis explicitly. Fraunces also ships `opsz` and `soft`
+   axes, and its package root pulls all of them; naming the axis on both keeps
+   the two lines answering the same question rather than one resolving by
+   default. */
+@import '@fontsource-variable/fraunces/wght.css';
+@import '@fontsource-variable/instrument-sans/wght.css';
+
+/**
+ * dev-note: duplicated from client/app/globals.css rather than shared. The two
+ * workspaces install separately — there is no root package.json — so a shared
+ * stylesheet needs a real extraction, and doing that now would touch a file
+ * four open client PRs are already editing. Extract to design/tokens.css once
+ * those land. Both copies mirror the Color System board in the Pencil doc,
+ * which is the actual source.
+ */
+@theme {
+  --color-bg: #f7f4ef;
+  --color-surface: #ffffff;
+  --color-ink: #1a1917;
+  --color-ink-muted: #565248;
+  --color-ink-faint: #726d61;
+  --color-line: #e3ded4;
+  --color-accent: #0c6e6b;
+  --color-accent-soft: #e0efee;
+  --color-accent-bright: #5fb8b4;
+  --color-on-accent: #ffffff;
+  --color-urgent: #b33517;
+  --color-urgent-soft: #fbe7e1;
+  --color-warn: #8e5e06;
+  --color-warn-soft: #fbf0da;
+  --color-calm: #387046;
+  --color-calm-soft: #e5f0e7;
+  --color-dark: #141512;
+  --color-dark-soft: #2a2c26;
+  --color-on-dark: #f2efe8;
+  --color-on-dark-muted: #9a968c;
+
+  --font-sans: 'Instrument Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Fraunces Variable', ui-serif, Georgia, serif;
+}
+
+/* A popup is a fixed-size window, not a page. 400px matches the Pencil frames;
+   Chrome caps a popup at 800x600 and will scroll past that on its own. */
+html {
+  width: 400px;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
