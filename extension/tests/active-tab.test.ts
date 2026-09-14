@@ -150,6 +150,27 @@ describe('scanActivePage', () => {
     expect(await scanActivePage(scripting, 2)).toMatchObject({ nodeCount: 0 })
   })
 
+  /* `executeScript` types its result `any`. A page-side throw comes back as an
+     error object, and a cast would have handed that straight to the guard —
+     which would have counted no redactions in a tree it never read. */
+  it('refuses an answer that is not a capture at all', async () => {
+    for (const answer of [
+      { message: 'ReferenceError: x is not defined' },
+      'the page returned a string',
+      captureOf({ tag: 'div', attrs: {} }, '3' as unknown as number),
+      captureOf({ attrs: {} }),
+      42,
+    ]) {
+      /* A fresh double per case: staging repeats its last result rather than
+         replacing it, so one shared double would re-read the first answer. */
+      const scripting = new FakeChromeScripting()
+      scripting.stage(1, answer)
+      await expect(scanActivePage(scripting, 1), JSON.stringify(answer)).rejects.toThrow(
+        'did not answer',
+      )
+    }
+  })
+
   it('fails loudly when nothing was staged, rather than reading an empty page', async () => {
     await expect(scanActivePage(new FakeChromeScripting(), 1)).rejects.toThrow('No DOM staged')
   })

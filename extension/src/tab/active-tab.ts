@@ -10,7 +10,7 @@
  * Written against injected surfaces rather than the `chrome` global so the
  * fakes can drive it. The popup passes the real ones in.
  */
-import { captureOrderSubtree, type Capture } from '@/src/extract/capture'
+import { captureOrderSubtree, isCapture } from '@/src/extract/capture'
 import { redactionTotal, sanitize, type SanitizeReport } from '@/src/extract/sanitize'
 import { describe, looksLikeOrderPage } from './order-page'
 
@@ -104,17 +104,20 @@ export async function scanActivePage(
     func: captureOrderSubtree,
   })
 
-  /* An injection that returns nothing is a page that refused us — a navigation
-     mid-scan, or a frame Chrome declined to enter. Reporting an empty capture
-     would be indistinguishable from an empty page. */
-  if (!injection || injection.result === undefined || injection.result === null) {
+  /* An injection that returns nothing, or returns something that is not a
+     capture, is a page that refused us — a navigation mid-scan, a frame Chrome
+     declined to enter, a page-side throw arriving as an error object. All of
+     them are one answer: we did not read this page. Reporting an empty capture
+     instead would be indistinguishable from an empty page, and sanitizing an
+     unchecked shape would put a redaction count on a tree nobody parsed. */
+  if (!injection || !isCapture(injection.result)) {
     throw new Error('the page did not answer the scan')
   }
 
   /* Sanitize immediately, in the same expression that receives the capture.
      The raw tree must not outlive this line: every later step works from the
      guarded version, so there is no path on which an unguarded one is handy. */
-  const { report } = sanitize(injection.result as Capture)
+  const { report } = sanitize(injection.result)
 
   return {
     nodeCount: report.nodeCount,

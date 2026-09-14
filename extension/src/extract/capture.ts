@@ -39,6 +39,27 @@ export type Capture = {
   truncated: boolean
 }
 
+/**
+ * Does an injection result actually have the shape this module promises?
+ *
+ * `executeScript` types `result` as `any`, and a page can answer with something
+ * that is not a capture at all: a page-side throw surfaces as an error object,
+ * a frame Chrome entered but did not run our function in returns whatever it
+ * had. Casting instead would hand `sanitize` garbage, and a report counting
+ * zero redactions in a tree it never understood is worse than no report.
+ *
+ * The top level is the whole check. Everything below `root` was built by
+ * `captureOrderSubtree` in one pass or does not exist — a tree that starts
+ * right does not go wrong halfway down, and validating every node would be a
+ * parser guarding against a bug we would rather fix than tolerate.
+ */
+export function isCapture(value: unknown): value is Capture {
+  if (typeof value !== 'object' || value === null) return false
+  const { root, nodeCount, truncated } = value as Capture
+  if (typeof nodeCount !== 'number' || typeof truncated !== 'boolean') return false
+  return root === null || (typeof root === 'object' && typeof root.tag === 'string')
+}
+
 export const CAPTURE_LIMITS = {
   maxNodes: 1500,
   maxDepth: 24,
