@@ -33,7 +33,11 @@ export function ScanProgress({ stages }: { stages: Stage[] }) {
           const { Icon, className } = MARK[state]
           return (
             <li key={label} className="flex items-center gap-2.5">
-              <Icon size={15} weight={state === 'pending' ? 'regular' : 'fill'} className={className} />
+              <Icon
+                size={15}
+                weight={state === 'done' ? 'fill' : 'bold'}
+                className={className}
+              />
               <span
                 className={`text-[13px] ${state === 'pending' ? 'text-ink-faint' : 'text-ink'}`}
               >
