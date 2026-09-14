@@ -25,7 +25,7 @@ import {
   ArtRank,
 } from '@/components/landing/flow-art'
 import { InstallCard } from '@/components/landing/install-card'
-import { WaitlistForm } from '@/components/landing/waitlist-form'
+// import { WaitlistForm } from '@/components/landing/waitlist-form'
 import { CHROME_STORE_URL, Footer, Nav, eyebrow, shell } from '@/components/site-chrome'
 import { MOCK_ORDERS, totalAtRisk } from '@/lib/orders'
 import { cn } from '@/lib/utils'
@@ -72,12 +72,19 @@ function Hero() {
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-5">
-            <a href={CHROME_STORE_URL} className={buttonVariants({ variant: 'brand', size: 'xl' })}>
+            <Link
+              href={CHROME_STORE_URL}
+              className={buttonVariants({ variant: 'brand', size: 'xl' })}
+            >
               Add to Chrome &mdash; free
-            </a>
+            </Link>
+            {/* Waitlist retired with D10 — Google sign-in is the way in, and an
+                email list collects nothing sign-in does not. Restore this, the
+                block in FinalCta, and the import above if it comes back.
             <a href="#waitlist" className="text-[15px] text-ink-muted underline hover:text-ink">
               or join the waitlist
             </a>
+            */}
           </div>
 
           <ul className="mt-8 flex flex-wrap gap-x-7 gap-y-3">
@@ -390,7 +397,7 @@ function Faq() {
 
 function FinalCta() {
   return (
-    <section id="waitlist" className="scroll-mt-20">
+    <section className="scroll-mt-20">
       <div className={cn(shell, 'flex flex-col items-center px-6 py-26 text-center md:px-18')}>
         <h2 className="max-w-[18ch] font-display text-[36px] leading-[1.05] font-semibold tracking-[-0.02em] text-ink md:text-[50px]">
           Something in your house is still returnable.
@@ -401,6 +408,9 @@ function FinalCta() {
 
         <InstallCard className="mt-10" />
 
+        {/* Waitlist retired with D10. components/landing/waitlist-form.tsx is
+            left in the tree deliberately — the plan is still moving, and this is
+            cheaper to restore than to rewrite.
         <div className="mt-10 flex w-full max-w-130 items-center gap-4.5">
           <span className="h-px flex-1 bg-line" />
           <span className="text-[13px] font-medium tracking-[0.08em] text-ink-faint uppercase">
@@ -412,6 +422,7 @@ function FinalCta() {
         <div className="mt-7 flex w-full justify-center text-left">
           <WaitlistForm />
         </div>
+        */}
       </div>
     </section>
   )
