@@ -15,6 +15,7 @@ import { OrderReview } from './order-review'
 import { PopupHeader } from './popup-header'
 import { PREVIEW, type PreviewScreen } from './preview'
 import { ScanProgress } from './scan-progress'
+import { StandingAccess } from './standing-access'
 
 type Scan =
   | { status: 'idle' }
@@ -77,9 +78,20 @@ function Preview({ screen }: { screen: PreviewScreen }) {
 
   return (
     <div className="bg-bg">
-      <PopupHeader status={screen === 'reading' ? 'Step 1 of 6' : 'Step 2 of 6'} />
+      <PopupHeader
+        status={
+          screen === 'reading' ? 'Step 1 of 6' : screen === 'order' ? 'Step 2 of 6' : 'Optional'
+        }
+        onClose={() => window.close()}
+      />
       <main className="flex flex-col gap-4 px-4 pt-[18px] pb-5">
-        {screen === 'reading' ? (
+        {screen === 'standing-access' ? (
+          <StandingAccess
+            hostname="nordstrom.com"
+            onAllow={() => {}}
+            onDecline={() => {}}
+          />
+        ) : screen === 'reading' ? (
           <ScanProgress
             stages={[
               { label: 'Found the order list', state: 'done' },
