@@ -1,5 +1,6 @@
 import Link from 'next/link'
 
+import { AccountMenu } from '@/components/dashboard/account-menu'
 import { Wordmark } from '@/components/site-chrome'
 import { cn } from '@/lib/utils'
 
@@ -36,6 +37,7 @@ export function AppBar({ current }: { current: string }) {
             </Link>
           ))}
           <ConnectionPill />
+          <AccountMenu />
         </nav>
       </div>
     </header>
