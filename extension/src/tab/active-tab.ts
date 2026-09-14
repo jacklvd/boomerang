@@ -10,6 +10,8 @@
  * Written against injected surfaces rather than the `chrome` global so the
  * fakes can drive it. The popup passes the real ones in.
  */
+import { captureOrderSubtree, type Capture } from '@/src/extract/capture'
+import { redactionTotal, sanitize, type SanitizeReport } from '@/src/extract/sanitize'
 import { describe, looksLikeOrderPage } from './order-page'
 
 export type TabsArea = {
@@ -75,40 +77,49 @@ export async function readActiveTab(tabs: TabsArea): Promise<ActiveTab> {
 }
 
 /**
- * What one scan currently reports back.
+ * What one scan produced.
  *
- * Counts, never content. The extractor that turns a page into normalized orders
- * does not exist yet, and this is not a down payment on it — it is the smallest
- * result that proves the injection actually ran. Nothing here is page text, so
- * nothing here needs the egress guard that the real extraction will.
+ * The sanitized tree itself is deliberately not here. Nothing may send it yet —
+ * the ingestion endpoint is a deferred contract — and holding it on a result
+ * object invites some future caller to log it or stash it, which the zero
+ * durable retention rule forbids. The caller that eventually posts it will take
+ * it straight from `sanitize()`.
  */
-export type PageProbe = {
-  rowCount: number
-}
-
-/* Serialized and run in the page, so it closes over nothing and calls nothing
-   from this module. dev-note: a structural guess with an obvious ceiling — it
-   counts elements that name themselves, and a retailer whose markup does not
-   will report zero. The adapter that knows better replaces it. */
-function countOrderRows(): { rowCount: number } {
-  const selectors = '[class*="order" i], [data-testid*="order" i], [id*="order" i]'
-  return { rowCount: document.querySelectorAll(selectors).length }
+export type ScanResult = {
+  /** Elements captured, after the excluded tags were dropped. */
+  nodeCount: number
+  /** A cap stopped the walk, so the tree is partial. */
+  truncated: boolean
+  /** What the egress guard removed, by kind. */
+  redactions: SanitizeReport['redactions']
+  redactionCount: number
 }
 
 export async function scanActivePage(
   scripting: ScriptingArea,
   tabId: number,
-): Promise<PageProbe> {
+): Promise<ScanResult> {
   const [injection] = await scripting.executeScript({
     target: { tabId },
-    func: countOrderRows,
+    func: captureOrderSubtree,
   })
 
-  /* An injection that returns nothing is a page that refused us — a
-     navigation mid-scan, or a frame Chrome declined to enter. Reporting zero
-     rows would be indistinguishable from an empty order list. */
+  /* An injection that returns nothing is a page that refused us — a navigation
+     mid-scan, or a frame Chrome declined to enter. Reporting an empty capture
+     would be indistinguishable from an empty page. */
   if (!injection || injection.result === undefined || injection.result === null) {
     throw new Error('the page did not answer the scan')
   }
-  return injection.result
+
+  /* Sanitize immediately, in the same expression that receives the capture.
+     The raw tree must not outlive this line: every later step works from the
+     guarded version, so there is no path on which an unguarded one is handy. */
+  const { report } = sanitize(injection.result as Capture)
+
+  return {
+    nodeCount: report.nodeCount,
+    truncated: report.truncated,
+    redactions: report.redactions,
+    redactionCount: redactionTotal(report),
+  }
 }
