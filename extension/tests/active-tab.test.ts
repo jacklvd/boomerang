@@ -81,6 +81,19 @@ describe('readActiveTab', () => {
     expect(await readActiveTab(tabs)).toEqual({ kind: 'unavailable' })
   })
 
+  /* `tabs.query` itself can reject — "Extension context invalidated" when the
+     extension is reloaded while the popup is open, for one. That rejection is
+     not caught here: the caller decides, and the popup's answer is the
+     unavailable screen rather than a spinner that never resolves. */
+  it('lets a rejecting query through rather than swallowing it', async () => {
+    const broken = {
+      query: async () => {
+        throw new Error('Extension context invalidated.')
+      },
+    }
+    await expect(readActiveTab(broken)).rejects.toThrow('Extension context invalidated')
+  })
+
   it('reports a closed tab as unavailable instead of returning a dead handle', async () => {
     const { tabs, tab } = await withTab('https://nordstrom.com/orders')
     await tabs.remove(tab.id)

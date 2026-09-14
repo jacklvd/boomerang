@@ -34,6 +34,12 @@ export function App({ tabs, scripting }: { tabs: TabsArea; scripting: ScriptingA
   const [scan, setScan] = useState<Scan>({ status: 'idle' })
 
   useEffect(() => {
+    /* The rejection handler is not dead: `readActiveTab` resolves `unavailable`
+       for every *expected* shape, but `tabs.query` itself can reject — chiefly
+       "Extension context invalidated", when the extension reloads while the
+       popup is open. Without this the promise rejects unhandled and `tab` stays
+       null, so the popup sits on "Checking this tab…" forever. An honest
+       "cannot see this tab" beats a spinner that never resolves. */
     readActiveTab(tabs).then(setTab, () => setTab({ kind: 'unavailable' }))
   }, [tabs])
 
