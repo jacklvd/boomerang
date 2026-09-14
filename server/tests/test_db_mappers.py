@@ -73,7 +73,7 @@ def test_simple_records_round_trip_between_domain_and_orm():
 
     assert account_from_row(account_to_row(account)) == account
     assert order_from_row(order_to_row(order)) == order
-    assert order_item_from_row(order_item_to_row(item)) == item
+    assert order_item_from_row(order_item_to_row(account.id, item)) == item
 
 
 def test_return_policy_round_trip_preserves_sourced_values_and_rules():
@@ -101,7 +101,7 @@ def test_return_policy_round_trip_preserves_sourced_values_and_rules():
         version=1,
         updated_at=NOW,
     )
-    assert return_policy_from_row(return_policy_to_row(policy)) == policy
+    assert return_policy_from_row(return_policy_to_row("acct_01", policy)) == policy
 
 
 def test_nullable_policy_and_preferences_round_trip():
@@ -120,7 +120,7 @@ def test_nullable_policy_and_preferences_round_trip():
         updated_at=NOW,
     )
 
-    assert return_policy_from_row(return_policy_to_row(policy)) == policy
+    assert return_policy_from_row(return_policy_to_row("acct_01", policy)) == policy
     assert preference_set_from_row(preference_set_to_row(preferences)) == preferences
 
 
@@ -149,7 +149,7 @@ def test_return_summary_states_round_trip(state, evidence):
         observed_at=NOW,
         updated_at=NOW,
     )
-    assert return_summary_from_row(return_summary_to_row(summary)) == summary
+    assert return_summary_from_row(return_summary_to_row("acct_01", summary)) == summary
 
 
 def test_mapper_rejects_partial_money_columns():
