@@ -20,6 +20,11 @@ import { MethodPicker } from './method-picker'
 import { PolicySummary } from './policy-summary'
 import { ReasonPicker } from './reason-picker'
 import { ReviewSubmit } from './review-submit'
+import { FIXTURE_MANUAL_FIELDS } from '@/src/model/manual-entry'
+import { formatSavedAt, resumeView } from '@/src/model/resume'
+import { WORKFLOW_SCHEMA_VERSION } from '@/src/model/workflow'
+import { ManualForm } from './manual-form'
+import { ResumeRun } from './resume-run'
 import { ScanProgress } from './scan-progress'
 import { StandingAccess } from './standing-access'
 
@@ -76,10 +81,33 @@ export function App({ tabs, scripting }: { tabs: TabsArea; scripting: ScriptingA
   )
 }
 
+const PREVIEW_SESSION = {
+  schema_version: WORKFLOW_SCHEMA_VERSION,
+  id: 'wfs_preview',
+  account_id: 'acct_1',
+  order_id: 'order_1',
+  item_id: 'read_1',
+  run_status: 'awaiting_user',
+  retailer_step: 'select_method',
+  tab_id: 42,
+  last_validated_url: 'https://retailer.example/returns',
+  safe_checkpoint: null,
+  fields_filled: [],
+  suggested_reason: 'too_small',
+  user_confirmed_reason: 'Too small',
+  selected_return_method: null,
+  attempt_count: 1,
+  started_at: '2026-09-03T21:14:00Z',
+  updated_at: '2026-09-03T21:14:00Z',
+} as const
+
 const STATUS: Record<PreviewScreen, string> = {
   reading: 'Step 1 of 6',
   order: 'Step 2 of 6',
   reason: 'Step 3 of 6',
+  'change-method': 'Step 5 of 6 · Editing',
+  manual: 'Step 5 of 6 · Manual',
+  resume: 'Resumed',
   policy: 'Step 4 of 6',
   method: 'Step 5 of 6',
   review: 'Step 6 of 6',
@@ -98,7 +126,36 @@ function Preview({ screen }: { screen: PreviewScreen }) {
     <div className="bg-bg">
       <PopupHeader status={STATUS[screen]} onClose={() => window.close()} />
       <main className="flex flex-col gap-4 px-4 pt-[18px] pb-5">
-        {screen === 'reason' ? (
+        {screen === 'change-method' ? (
+          /* The user arrived here by rejecting the pre-filled method, so the
+             previously chosen one is marked and something else is selected. */
+          <MethodPicker
+            options={FIXTURE_METHODS}
+            selectedId={methodId === 'qr_dropoff' ? 'in_store' : methodId}
+            onSelect={setMethodId}
+            onContinue={() => {}}
+            title="Pick a different method"
+            body="Your item and reason are kept. Only this choice changes."
+            previouslyChosenId="qr_dropoff"
+          />
+        ) : screen === 'manual' ? (
+          <ManualForm
+            fields={FIXTURE_MANUAL_FIELDS}
+            values={{ return_method: 'QR code drop-off', reason: 'Too small' }}
+            onChange={() => {}}
+            onSubmit={() => {}}
+            onBack={() => {}}
+          />
+        ) : screen === 'resume' ? (
+          <ResumeRun
+            view={resumeView(PREVIEW_SESSION, { returnBy: '2026-09-16', tabIsLive: true })}
+            itemDescription="Wool Overcoat, Charcoal"
+            retailerName="Nordstrom"
+            savedAt={formatSavedAt(PREVIEW_SESSION.updated_at)}
+            onContinue={() => {}}
+            onStartOver={() => {}}
+          />
+        ) : screen === 'reason' ? (
           <ReasonPicker
             reasons={FIXTURE_REASONS}
             selectedId={reasonId}
