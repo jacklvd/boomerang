@@ -17,7 +17,7 @@ import { PopupHeader } from './popup-header'
 export function App() {
   return (
     <div className="bg-bg">
-      <PopupHeader status="Start" />
+      <PopupHeader status="Start" onClose={() => window.close()} />
 
       <main className="flex flex-col gap-4 px-4 pt-[18px] pb-5">
         <span className="flex w-fit items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5">
