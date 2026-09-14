@@ -21,7 +21,9 @@
  * The structural rules below catch the case that actually occurs on an order
  * page — the address sits in something labelled "shipping-address" — and the
  * residual gap is a real open risk for the terminal-page sanitizer, which is
- * where addresses are most likely to appear free-form.
+ * where addresses are most likely to appear free-form. Tracked as issue #34,
+ * which should be settled before `report_outcome` is built: do not reach for
+ * this guard to sanitize a terminal page without reading it first.
  */
 import type { Capture, CapturedNode } from './capture'
 
