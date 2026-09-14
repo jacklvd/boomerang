@@ -8,7 +8,18 @@ import {
   FIXTURE_ORDER,
 } from '../src/model/read-order'
 
-const on = (iso: string) => new Date(`${iso}T12:00:00Z`)
+/**
+ * Midday on that *local* calendar day.
+ *
+ * Not `new Date('...T12:00:00Z')`: noon UTC lands on the following local day
+ * east of UTC+12, so the helper would silently hand `daysUntil` a different
+ * "today" than the one the test names, and the assertions would be off by one
+ * in Kiritimati while passing everywhere else.
+ */
+const on = (iso: string) => {
+  const [y, m, d] = iso.split('-').map(Number) as [number, number, number]
+  return new Date(y, m - 1, d, 12)
+}
 
 describe('daysUntil', () => {
   it('counts whole days to the deadline', () => {
