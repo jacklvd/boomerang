@@ -13,7 +13,8 @@ again.
 
 from fastapi import APIRouter
 
-from app.routes import me
+from app.routes import items, me
 
 api_router = APIRouter(prefix="/v1")
 api_router.include_router(me.router)
+api_router.include_router(items.router)
