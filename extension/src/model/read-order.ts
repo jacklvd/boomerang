@@ -37,7 +37,8 @@ export type ReadOrder = {
   items: ReadItem[]
 }
 
-const DATE = /^\d{4}-\d{2}-\d{2}$/
+/** §6.4 dates are `YYYY-MM-DD`. Anything else is not a date we will do arithmetic on. */
+export const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 /**
  * Whole days from today to an ISO date. Negative means the deadline has passed.
@@ -50,7 +51,7 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/
  * wearing the vocabulary's clothes.
  */
 export function daysUntil(isoDate: string, today = new Date()): number | null {
-  if (!DATE.test(isoDate)) return null
+  if (!ISO_DATE.test(isoDate)) return null
 
   const [y, m, d] = isoDate.split('-').map(Number) as [number, number, number]
   const deadline = Date.UTC(y, m - 1, d)
@@ -70,7 +71,7 @@ export function formatMoney({ amount_minor, currency }: Money): string {
 
 /** `5 September 2026`. Parsed as UTC so the day never slips backwards. */
 export function formatDate(isoDate: string): string {
-  if (!DATE.test(isoDate)) return isoDate
+  if (!ISO_DATE.test(isoDate)) return isoDate
   return new Intl.DateTimeFormat('en-GB', {
     day: 'numeric',
     month: 'long',

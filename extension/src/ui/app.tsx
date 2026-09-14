@@ -23,7 +23,13 @@ import { ReviewSubmit } from './review-submit'
 import { FIXTURE_MANUAL_FIELDS } from '@/src/model/manual-entry'
 import { formatSavedAt, resumeView } from '@/src/model/resume'
 import { WORKFLOW_SCHEMA_VERSION } from '@/src/model/workflow'
+import { FIXTURE_RUNNING, FIXTURE_STUCK } from '@/src/model/agent-log'
+import { FIXTURE_EPHEMERAL } from '@/src/model/outcome'
+import { CalendarOffer } from './calendar-offer'
+import { DriverLog } from './driver-log'
+import { Finished } from './finished'
 import { ManualForm } from './manual-form'
+import { OutcomeReady } from './outcome-ready'
 import { ResumeRun } from './resume-run'
 import { ScanProgress } from './scan-progress'
 import { StandingAccess } from './standing-access'
@@ -108,6 +114,11 @@ const STATUS: Record<PreviewScreen, string> = {
   'change-method': 'Step 5 of 6 · Editing',
   manual: 'Step 5 of 6 · Manual',
   resume: 'Resumed',
+  driving: 'Working',
+  stuck: 'Stopped',
+  outcome: 'Done',
+  calendar: 'Optional',
+  finished: 'Complete',
   policy: 'Step 4 of 6',
   method: 'Step 5 of 6',
   review: 'Step 6 of 6',
@@ -126,7 +137,41 @@ function Preview({ screen }: { screen: PreviewScreen }) {
     <div className="bg-bg">
       <PopupHeader status={STATUS[screen]} onClose={() => window.close()} />
       <main className="flex flex-col gap-4 px-4 pt-[18px] pb-5">
-        {screen === 'change-method' ? (
+        {screen === 'driving' ? (
+          <DriverLog entries={FIXTURE_RUNNING} onTakeOver={() => {}} />
+        ) : screen === 'stuck' ? (
+          <DriverLog
+            entries={FIXTURE_STUCK}
+            deadlineNote="The window still closes on 17 September. The tab is open on the right page — finish it by hand and we will pick the record back up."
+            onTakeOver={() => {}}
+            onReport={() => {}}
+          />
+        ) : screen === 'outcome' ? (
+          <OutcomeReady
+            outcome="qr_ready"
+            details={FIXTURE_EPHEMERAL}
+            onAddReminder={() => {}}
+            onSaveCode={() => {}}
+          />
+        ) : screen === 'calendar' ? (
+          <CalendarOffer
+            retailerName="Nordstrom"
+            returnBy="2026-09-17"
+            onOpenCalendar={() => {}}
+            onDecline={() => {}}
+          />
+        ) : screen === 'finished' ? (
+          <Finished
+            summary={{
+              item: 'Wool Overcoat, Charcoal',
+              method: 'QR code drop-off · Free',
+              reference: 'RMA 8842-QK21',
+              refund: '$180.00 to original card',
+              dropOffBy: '2026-09-17',
+            }}
+            onSeeReturns={() => {}}
+          />
+        ) : screen === 'change-method' ? (
           /* The user arrived here by rejecting the pre-filled method, so the
              previously chosen one is marked and something else is selected. */
           <MethodPicker

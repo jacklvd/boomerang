@@ -19,6 +19,11 @@ export type PreviewScreen =
   | 'change-method'
   | 'manual'
   | 'resume'
+  | 'driving'
+  | 'stuck'
+  | 'outcome'
+  | 'calendar'
+  | 'finished'
   | 'standing-access'
 
 export const PREVIEW: PreviewScreen | null = null
