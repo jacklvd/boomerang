@@ -1,6 +1,6 @@
 import { CalendarBlankIcon, InfoIcon } from '@phosphor-icons/react/dist/ssr'
 
-import { formatDate } from '@/src/model/read-order'
+import { ISO_DATE, formatDate } from '@/src/model/read-order'
 import { Button } from './button'
 import { Heading, Notice } from './primitives'
 
@@ -27,6 +27,11 @@ export function CalendarOffer({
   onOpenCalendar: () => void
   onDecline: () => void
 }) {
+  /* Same guard as `formatDate`: a string that is not `YYYY-MM-DD` would render
+     an "Invalid Date" tile. A reminder needs a day; without one there is no
+     offer to make, and the caller should not have reached this frame. */
+  if (!ISO_DATE.test(returnBy)) return null
+
   const date = new Date(`${returnBy}T00:00:00Z`)
   const month = new Intl.DateTimeFormat('en-GB', { month: 'short', timeZone: 'UTC' })
     .format(date)

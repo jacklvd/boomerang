@@ -55,6 +55,8 @@ describe('a log line records the step, never the page', () => {
 
   it('carries no page content in either shipped fixture', () => {
     const serialized = JSON.stringify([...FIXTURE_RUNNING, ...FIXTURE_STUCK])
+    /* 'Alder' is the street in the address every sanitize test plants. If it
+       ever turns up here, a log line was built from page content. */
     for (const leaked of ['<', 'http', 'value=', 'class=', 'Alder']) {
       expect(serialized, leaked).not.toContain(leaked)
     }

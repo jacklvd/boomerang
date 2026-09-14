@@ -85,6 +85,9 @@ export const FIXTURE_RUNNING: LogEntry[] = [
   logEntry('click', 'the overcoat', 'done'),
   logEntry('select_option', 'the reason to “Too small”', 'done'),
   logEntry('select_option', 'the return method', 'running'),
+  /* No target: the tool has nothing it acts on, and its verb ignores the
+     argument. An empty string is the truthful value — a sentinel like
+     'confirmation' would be a fake target dressed as a semantic one. */
   logEntry('report_outcome', '', 'pending'),
 ]
 

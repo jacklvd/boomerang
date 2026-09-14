@@ -58,8 +58,10 @@ export function DriverLog({
       />
 
       <ul className="flex flex-col gap-2.5">
-        {entries.map((entry) => (
-          <Step key={`${entry.tool}:${entry.target}`} label={entry.label} state={entry.state} />
+        {/* The log is append-only, so position is the identity of a line. Tool and
+            target are not: a run can click the same control twice. */}
+        {entries.map((entry, index) => (
+          <Step key={index} label={entry.label} state={entry.state} />
         ))}
       </ul>
 
