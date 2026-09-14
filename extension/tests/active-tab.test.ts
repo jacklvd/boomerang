@@ -102,19 +102,73 @@ describe('readActiveTab', () => {
 })
 
 describe('scanActivePage', () => {
-  it('returns what the injected probe reported', async () => {
-    const scripting = new FakeChromeScripting()
-    scripting.stage(1, { rowCount: 6 })
-    expect(await scanActivePage(scripting, 1)).toEqual({ rowCount: 6 })
+  const captureOf = (root: unknown, nodeCount = 3, truncated = false) => ({
+    root,
+    nodeCount,
+    truncated,
   })
 
-  it('distinguishes a page that refused from a page with no orders', async () => {
+  it('reports what was captured and what the guard removed', async () => {
+    const scripting = new FakeChromeScripting()
+    scripting.stage(
+      1,
+      captureOf({
+        tag: 'div',
+        attrs: {},
+        children: [
+          { tag: 'p', attrs: {}, text: 'Wool Overcoat · $180.00' },
+          { tag: 'p', attrs: {}, text: 'jack@example.com' },
+        ],
+      }),
+    )
+
+    const result = await scanActivePage(scripting, 1)
+    expect(result).toMatchObject({ nodeCount: 3, truncated: false, redactionCount: 1 })
+    expect(result.redactions.email).toBe(1)
+  })
+
+  it('carries truncation through so a partial tree is never read as a whole one', async () => {
+    const scripting = new FakeChromeScripting()
+    scripting.stage(1, captureOf({ tag: 'div', attrs: {} }, 1500, true))
+    expect(await scanActivePage(scripting, 1)).toMatchObject({ truncated: true })
+  })
+
+  /* The guarded tree is not on the result at all — nothing may send it yet,
+     and an object carrying it would invite a caller to log or store it. */
+  it('returns no page content, only counts', async () => {
+    const scripting = new FakeChromeScripting()
+    scripting.stage(1, captureOf({ tag: 'p', attrs: {}, text: 'Wool Overcoat' }, 1))
+    expect(JSON.stringify(await scanActivePage(scripting, 1))).not.toContain('Wool Overcoat')
+  })
+
+  it('distinguishes a page that refused from a page with nothing on it', async () => {
     const scripting = new FakeChromeScripting()
     scripting.stage(1, undefined)
     await expect(scanActivePage(scripting, 1)).rejects.toThrow('did not answer')
 
-    scripting.stage(2, { rowCount: 0 })
-    expect(await scanActivePage(scripting, 2)).toEqual({ rowCount: 0 })
+    scripting.stage(2, captureOf(null, 0))
+    expect(await scanActivePage(scripting, 2)).toMatchObject({ nodeCount: 0 })
+  })
+
+  /* `executeScript` types its result `any`. A page-side throw comes back as an
+     error object, and a cast would have handed that straight to the guard —
+     which would have counted no redactions in a tree it never read. */
+  it('refuses an answer that is not a capture at all', async () => {
+    for (const answer of [
+      { message: 'ReferenceError: x is not defined' },
+      'the page returned a string',
+      captureOf({ tag: 'div', attrs: {} }, '3' as unknown as number),
+      captureOf({ attrs: {} }),
+      42,
+    ]) {
+      /* A fresh double per case: staging repeats its last result rather than
+         replacing it, so one shared double would re-read the first answer. */
+      const scripting = new FakeChromeScripting()
+      scripting.stage(1, answer)
+      await expect(scanActivePage(scripting, 1), JSON.stringify(answer)).rejects.toThrow(
+        'did not answer',
+      )
+    }
   })
 
   it('fails loudly when nothing was staged, rather than reading an empty page', async () => {

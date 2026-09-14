@@ -5,7 +5,7 @@ import {
   readActiveTab,
   scanActivePage,
   type ActiveTab,
-  type PageProbe,
+  type ScanResult,
   type ScriptingArea,
   type TabsArea,
 } from '@/src/tab/active-tab'
@@ -19,7 +19,7 @@ import { ScanProgress } from './scan-progress'
 type Scan =
   | { status: 'idle' }
   | { status: 'scanning' }
-  | { status: 'scanned'; probe: PageProbe }
+  | { status: 'scanned'; result: ScanResult }
   | { status: 'failed'; message: string }
 
 /**
@@ -50,7 +50,7 @@ export function App({ tabs, scripting }: { tabs: TabsArea; scripting: ScriptingA
   async function onScan(tabId: number) {
     setScan({ status: 'scanning' })
     try {
-      setScan({ status: 'scanned', probe: await scanActivePage(scripting, tabId) })
+      setScan({ status: 'scanned', result: await scanActivePage(scripting, tabId) })
     } catch (error) {
       setScan({ status: 'failed', message: messageFor(error) })
     }
@@ -137,10 +137,7 @@ function Screen({
     <>
       <Chip label={tab.label} />
       {scan.status === 'scanned' ? (
-        <Copy
-          title="Read it."
-          body={`Found ${plural(scan.probe.rowCount, 'candidate row')} on the page. Nothing has left your browser.`}
-        />
+        <Copy title="Read it." body={scanSummary(scan.result)} />
       ) : (
         <Copy
           title={tab.looksLikeOrders ? 'This looks like an order page.' : 'Scan this one anyway?'}
@@ -174,10 +171,25 @@ function Screen({
   )
 }
 
-/* dev-note: the designed flow answers a finished scan with frame 02 and then
-   frame 03, which show progress and the normalised order. Neither exists yet
-   and neither can until the extractor does, so a scan reports a count and
-   stops. Replace this branch, not the wiring above it. */
+/**
+ * dev-note: the designed flow answers a finished scan with frames 02 and 03.
+ * Those need normalized data, which is produced by the parsing pipeline behind
+ * an endpoint that is still a deferred contract — so a scan stops here. Replace
+ * this branch, not the wiring above it.
+ *
+ * The wording is careful on one point: nothing has been sent, because there is
+ * nowhere to send it. Saying "kept on this machine" would be true today and
+ * quietly false the day the endpoint lands.
+ */
+function scanSummary({ nodeCount, truncated, redactionCount }: ScanResult) {
+  const read = `Read ${plural(nodeCount, 'element')}${truncated ? ', capped before the end of the page' : ''}.`
+  const guarded =
+    redactionCount > 0
+      ? ` The guard removed ${plural(redactionCount, 'item')} before anything could be sent.`
+      : ' The guard found nothing it had to remove.'
+  return `${read}${guarded} Nothing has been sent anywhere yet.`
+}
+
 function plural(count: number, noun: string) {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
