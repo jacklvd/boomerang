@@ -9,8 +9,12 @@ import {
   type ScriptingArea,
   type TabsArea,
 } from '@/src/tab/active-tab'
+import { FIXTURE_ORDER, toggleSelection } from '@/src/model/read-order'
 import { Button } from './button'
+import { OrderReview } from './order-review'
 import { PopupHeader } from './popup-header'
+import { PREVIEW, type PreviewScreen } from './preview'
+import { ScanProgress } from './scan-progress'
 
 type Scan =
   | { status: 'idle' }
@@ -52,6 +56,8 @@ export function App({ tabs, scripting }: { tabs: TabsArea; scripting: ScriptingA
     }
   }
 
+  if (PREVIEW) return <Preview screen={PREVIEW} />
+
   return (
     <div className="bg-bg">
       <PopupHeader status="Start" onClose={() => window.close()} />
@@ -62,6 +68,40 @@ export function App({ tabs, scripting }: { tabs: TabsArea; scripting: ScriptingA
     </div>
   )
 }
+
+/* dev-note: reachable only by editing PREVIEW. See the note on that constant. */
+function Preview({ screen }: { screen: PreviewScreen }) {
+  const [selected, setSelected] = useState<ReadonlySet<string>>(
+    () => new Set(FIXTURE_ORDER.items.map((item) => item.localId)),
+  )
+
+  return (
+    <div className="bg-bg">
+      <PopupHeader status={screen === 'reading' ? 'Step 1 of 6' : 'Step 2 of 6'} />
+      <main className="flex flex-col gap-4 px-4 pt-[18px] pb-5">
+        {screen === 'reading' ? (
+          <ScanProgress
+            stages={[
+              { label: 'Found the order list', state: 'done' },
+              { label: 'Normalising items and prices', state: 'done' },
+              { label: 'Reading delivery dates', state: 'running' },
+              { label: 'Checking return windows', state: 'pending' },
+            ]}
+          />
+        ) : (
+          <OrderReview
+            order={FIXTURE_ORDER}
+            selected={selected}
+            onToggle={(id) => setSelected((prev) => toggleSelection(prev, id))}
+            onConfirm={() => {}}
+            onReject={() => {}}
+          />
+        )}
+      </main>
+    </div>
+  )
+}
+
 
 function Screen({
   tab,
