@@ -22,6 +22,20 @@ from app.api.deps import database_lifespan
 from app.api.errors import install_error_handling
 from app.routes import api_router
 
+# dev-note: app.config.Settings (the authentication configuration surface: credential and
+# grant lifetimes, pairing, rate limits, CORS/origin policy) deliberately is NOT
+# constructed here yet, even though app.config.settings_lifespan exists and is ready to be
+# composed exactly like database_lifespan below. No route currently depends on it — see
+# app/api/auth.py, which is still fully unimplemented — and this codebase's test suite has
+# no fixture supplying values for it (unlike DATABASE_URL, which tests/conftest.py stubs
+# for every test via an autouse fixture). Composing it into this lifespan unconditionally
+# makes every test that drives this app through its real lifespan (see
+# tests/test_main.py::test_health_reports_ok) fail with a pydantic ValidationError, since
+# none of the ~20 required settings have -- or should have -- a default. Wire
+# `settings_lifespan(app)` in here, the same way `database_lifespan(app)` is used below,
+# in the same change that adds the first route depending on app.config.SettingsDep and
+# a conftest.py fixture supplying it a value for tests.
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
