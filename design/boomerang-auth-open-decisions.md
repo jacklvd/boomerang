@@ -1,6 +1,7 @@
 # Boomerang — Extension Authentication: the Open Decisions, Closed
 
-> **STATUS: RULING — 2026-09-13. One question outstanding with the user; everything else is closed.**
+> **STATUS: RULING — 2026-09-13. Every question is closed.** The one that was outstanding — the
+> revocation scope — was answered by the user the same day: **account-wide, registered as `MIG-19`.**
 >
 > The pairing-lifecycle implementation ticket cannot be written honestly against the accepted
 > authentication design as it stands. Four defects surfaced during implementation, and six of the
@@ -27,7 +28,7 @@
 > ideal, we ship it and record the debt," that is what is written.
 >
 > The decisions are registered in [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md)
-> as `MIG-17`, `MIG-18` and `PROV-05` through `PROV-08`.
+> as `MIG-17`, `MIG-18`, `MIG-19` and `PROV-05` through `PROV-08`.
 
 ---
 
@@ -61,7 +62,7 @@ placed in users' browsers and their privacy policy.
 |---|---|---|---|---|
 | 1 | There is no decline route; the approval copy promises one and the `rejected` pairing status is unreachable | **The copy and the status are wrong, not the route list.** No decline route in v1. `rejected` is not added to the pairing status enum. The approval page says *close this page*, not *decline* | **No**, once applied. It blocks the pairing schema only until answered, and the answer is cheap | Pairing status is a three-value enum: `pending`, `approved`, `redeemed`. The approval-copy bullet in the accepted proposal's section 6 needs one word changed |
 | 2 | The `account_deleted` 401 discriminator cannot be returned once the account row is gone | **The server returns `not_linked`, and no credential tombstone is built.** The extension selects its cleanup branch on whether *it presented a credential*, which it knows locally and the server cannot tell it | **Yes** — the implementer must know whether to build `revoked_credentials`. This ruling unblocks it: do not build it | Nothing survives account deletion. `account_deleted` stays in the published enum as reserved and unreachable in v1. The contract's section 12 sentence promising it is wrong as written and must be amended |
-| 3 | The same-browser correlator fails open silently in every ordinary case | **No correlator ships in v1** — no correlator cookie, no column on either record. The extension-grant revocation scope on dashboard sign-out is a single predicate behind one named seam, defaulting to account-wide | **No.** The seam makes the pairing lifecycle safe to build before the question is answered | This changes the *letter* of the DECIDED section 13 item 1 while satisfying its stated intent strictly. It is therefore a question for the user, drafted in section 4, and not a call taken here |
+| 3 | The same-browser correlator fails open silently in every ordinary case | **No correlator ships in v1** — no correlator cookie, no column on either record. The extension-grant revocation scope on dashboard sign-out is a single predicate behind one named seam, defaulting to account-wide | **No.** The seam made the pairing lifecycle safe to build before the question was answered | This changed the *letter* of the DECIDED section 13 item 1 while satisfying its stated intent strictly, which is why it was put to the user in section 4 rather than ruled here. The user answered account-wide, registered as `MIG-19`, and the correlator this ruling declines is now declined permanently |
 | 4 | The abandonment reset cannot reach an item stranded by sign-out, disconnect or deletion | **V1 accepts the stranding.** The residual stays where it already lives, in `ARCH-B1`. One mitigation ships, and it is pure dashboard UI over a field the frozen contract already returns | **No** | The dashboard's sign-out confirmation warns when `in_progress_count` is non-zero. No new route, no contract change, no server behaviour. Under the account-wide default the residual is wider, and that widening is part of the user's trade in section 4 |
 
 ### 2.2 Defect 1 — the decline route
@@ -163,18 +164,18 @@ function over `auth_grants`; account-wide is that function without a correlator 
 same-browser is that function with one. The implementer builds the function, the seam, and the tests,
 and the user's answer later changes the predicate and adds two columns.
 
-**Third — and this is not mine — shipping account-wide as anything other than a placeholder changes the
-letter of a DECIDED item.** Section 13 item 1 was decided by the user on 2026-09-13 and reads "signing
-out of the dashboard revokes the extension's grant in the same browser." Account-wide revocation
-satisfies that decision's *stated intent* strictly and over-satisfies its *scope clause*. That
-over-satisfaction is user-visible: signing out on a work laptop unlinks the home browser, and the user
-re-does the one-time approval there. A user did not ask for that and an engineer must not decide it
-silently.
+**Third — and this was not mine to decide — shipping account-wide as anything other than a placeholder
+changed the letter of a DECIDED item.** Section 13 item 1 was decided by the user on 2026-09-13 and
+read "signing out of the dashboard revokes the extension's grant in the same browser." Account-wide
+revocation satisfies that decision's *stated intent* strictly and over-satisfies its *scope clause*.
+That over-satisfaction is user-visible: signing out on a work laptop unlinks the home browser, and the
+user re-does the one-time approval there. A user did not ask for that, an engineer could not decide it
+silently, and it was put to the user in section 4.
 
-**Ruling: build with no correlator, default the seam to account-wide, and put the scope question to the
-user.** It is section 4. Until it is answered, the interim default is account-wide because it is the only
-option that does not contradict the decided intent — "sign-out revokes nothing" would, and same-browser
-cannot be built without the correlator this ruling declines to ship.
+**Ruling: build with no correlator, and default the seam to account-wide.** The scope question in
+section 4 is closed: the user answered account-wide, later the same day, registered as `MIG-19`. The
+seam's default is therefore the decision itself rather than an interim placeholder, and the correlator
+this ruling declines to ship is declined permanently, not merely deferred.
 
 ### 2.5 Defect 4 — sign-out stranding
 
@@ -218,8 +219,9 @@ to the user's trade in section 4, where it is stated.
 | **7.** Should automatic linking be layered on once the bridge gate closes? | **Yes, as an intentional follow-on against `ARCH-B6`.** Not v1 scope | **(a)** | No v1 consequence at all, except that the pairing records must not be built as though manual approval is the only path forever — and they are not, because automatic linking would reuse the same records |
 
 Every item is **(a)**. That is the finding, and it is worth stating rather than leaving as an absence:
-the open product surface in section 13 contains one question that genuinely needs the user, and it is
-item 1's scope, which item 1 appeared to have closed.
+the open product surface in section 13 contained one question that genuinely needed the user, and it
+was item 1's scope, which item 1 appeared to have closed. That question is now closed too; see
+section 4.
 
 ### 3.2 Where the reasoning is not obvious
 
@@ -253,11 +255,15 @@ strategy. An unrecorded "we didn't need it" becomes a "nothing said we couldn't.
 
 ---
 
-## 4. The question for the user
+## 4. The revocation scope — put to the user, and answered
 
-One question. It is the revocation scope, and it is a question because answering it either way changes
-behaviour the user can see, and because one of the two answers changes the letter of a decision the user
-already made.
+> **CLOSED 2026-09-13. The answer is account-wide, registered as `MIG-19`.** The question and the
+> argument that produced it are kept below exactly as they were put to the user, because the reasoning
+> is what makes the answer reviewable; the resolution is recorded at the end of this section.
+
+One question was put to the user. It was the revocation scope, and it was a question because answering
+it either way changes behaviour the user can see, and because one of the two answers changes the letter
+of a decision the user already made.
 
 > **When you sign out of the Boomerang dashboard, we can unlink the Boomerang extension in *that
 > browser only*, or in *every browser you've linked*. We need you to pick, because we can't build both.**
@@ -286,9 +292,15 @@ already made.
 > **So: every browser — blunt, reliable, nothing new stored about you? Or that browser only — precise
 > when it works, silently does nothing when it doesn't, and we start keeping a per-browser identifier?**
 >
-> If you don't answer now, we build **every browser**, because it's the only one of the two that never
-> lies to you about being signed out, and switching to "that browser only" later is a clean change we
-> can make without disturbing anything.
+> **The user answered: every browser.** Signing out of the Boomerang dashboard revokes every live
+> extension grant on the account, in every linked browser — decided 2026-09-13 and registered as
+> `MIG-19`. It's the only one of the two that never lies to you about being signed out, and switching
+> to "that browser only" later remains a clean change that would not disturb anything already shipped.
+
+The correlator that "that browser only" would have needed — a durable per-browser cookie and marker,
+on both the pairing and the grant — is therefore not merely unbuilt; it is declined permanently.
+Nothing on the account or the wire reserves a place for it, and adding it later is the same clean,
+additive change it always would have been, not the completion of something left open.
 
 ---
 
@@ -445,9 +457,12 @@ the schema, and all of them belong to `ARCH-B4`: access-credential lifetime, ref
 lifetime, grant idle limit, grant absolute limit, pairing lifetime, the rotation grace window, the
 `last_used_at` coarsening interval, and every rate-limit ceiling.
 
-Two constraints on the coarsening interval hold whatever the numbers are, and both must be enforced by
-a configuration check rather than by a reviewer's memory: it must be far smaller than the idle limit, or
-the idle limit is evaluated against a stale value and grants outlive it.
+Two constraints hold whatever the numbers are, and both must be enforced by a configuration check
+rather than by a reviewer's memory. The coarsening interval must be far smaller than the idle limit, or
+the idle limit is evaluated against a stale value and grants outlive it. And, added 2026-09-13 by
+`MIG-20`, **a dashboard access credential's lifetime must equal its grant's lifetime**: the dashboard
+leg has no refresh path, so a shorter-lived dashboard credential would end a live session with no way
+to continue it. A configuration violating either constraint fails validation rather than starting.
 
 Rate limits on pairing creation and redemption are a named phishing mitigation. Implement the limiter
 behind an interface with an in-process implementation, and record plainly that an in-process counter is
@@ -503,7 +518,7 @@ Beyond the contract's existing list, this ticket's rulings require:
 
 | Unresolved | What it blocks |
 |---|---|
-| **The revocation scope** — account-wide or same-browser | Nothing in the pairing lifecycle, because of the seam in section 5.4. It blocks the sign-out route's wire shape, the privacy copy, and the correlator columns if they are ever wanted. It is section 4's question |
+| **The dashboard sign-out route's wire shape** | Nothing in the pairing lifecycle, because of the seam in section 5.4. The revocation *scope* itself is closed — account-wide, decided 2026-09-13 and registered as `MIG-19`, with the correlator declined permanently — and only the route's contract entry remains to be written; see section 4 |
 | **The `SameSite=Lax` registrable-domain precondition** | Deployment, not implementation. The dashboard origin and the API origin must share a registrable domain or the dashboard session cookie does not survive a cross-site POST at all. The accepted design states this conditionally and relies on it absolutely, and the production hostname is unchosen. The implementer must assume a shared registrable domain and fail configuration validation loudly if the configured origins do not share one |
 | **The rate-limit store** | Not implementation — the limiter ships behind an interface. It blocks the honesty of the phishing mitigation the accepted design claims, and it cannot be settled before the deployment topology is |
 | **Migration tooling** | Everything, eventually. These three tables land in `Base.metadata` with no migration path, in the same window as the account-scoping change that already made this urgent. Not created here; made worse here |
@@ -529,8 +544,8 @@ under-specified**; the rest are consequences of the rulings above.
 | [`boomerang-api-contract.md`](boomerang-api-contract.md) | §13, the `401 unauthenticated` bullet | Same split as §4.1 |
 | [`boomerang-api-contract.md`](boomerang-api-contract.md) | §5.1, `GET /v1/auth/grants` | "One entry per live grant on the account" becomes extension-kind grants only, so the route and the linked-browsers list describe the same set |
 | [`boomerang-api-contract.md`](boomerang-api-contract.md) | §14, contract tests | Add the not-linked-after-deletion test; the existing tests 18 and 19 are unaffected |
-| [`boomerang-api-contract.md`](boomerang-api-contract.md) | §15, deferred contracts, the sign-out/correlator row | Amend to record that no correlator ships in v1 and that the revocation scope is with the user |
-| [`boomerang-extension-auth-proposal.md`](boomerang-extension-auth-proposal.md) | §13 item 1 | Do **not** edit until the user answers section 4. If they choose account-wide, the scope clause is amended there and nowhere else |
+| [`boomerang-api-contract.md`](boomerang-api-contract.md) | §15, deferred contracts, the sign-out/correlator row | Amend to record that no correlator ships in v1, permanently, and that the revocation scope is closed account-wide (`MIG-19`); only the sign-out route's wire shape remains deferred |
+| [`boomerang-extension-auth-proposal.md`](boomerang-extension-auth-proposal.md) | §13 item 1 | **Already amended.** The user answered account-wide on 2026-09-13; the scope clause is amended in place there and registered as `MIG-19`. No further edit is pending |
 | `AGENTS.md` (repo root) | The rules list | Add: the extension has no Google relationship and gains no identity permission; the credential never enters synced storage; no content script touches the credential or the network |
 
 ---
@@ -539,11 +554,13 @@ under-specified**; the rest are consequences of the rulings above.
 
 [`../plan/boomerang-decisions.md`](../plan/boomerang-decisions.md) carries them as `MIG-17` (the v1
 authentication posture: no decline route, no correlator, no tombstone), `MIG-18` (the two standing
-constraints from section 13 items 3 and 6), `PROV-05` (account-wide sign-out revocation pending the
-user's answer), `PROV-06` (no cap on linked browsers), `PROV-07` (what the approval screen shows), and
-`PROV-08` (no invented numbers). Automatic linking after the bridge gate joins the deferred-capabilities
-table. The revocation-scope question is recorded against `MIG-15` and `ARCH-B9`, where the two
-already-tracked open items from that gate live.
+constraints from section 13 items 3 and 6), `MIG-19` (the revocation scope, closed account-wide),
+`PROV-05` (account-wide sign-out revocation, resolved by `MIG-19`), `PROV-06` (no cap on linked
+browsers), `PROV-07` (what the approval screen shows), and `PROV-08` (no invented numbers, including the
+`MIG-20` dashboard-credential-lifetime constraint in section 5.6). Automatic linking after the bridge
+gate joins the deferred-capabilities table. The revocation-scope question is recorded as closed against
+`MIG-15` and `ARCH-B9`; the sign-out route's wire shape is the one item from that gate that remains
+open.
 
 The sign-out stranding residual is **not** re-registered here. It is already recorded inside the
 `ARCH-B1` sub-decision, which names it precisely, and duplicating it would create a second place for it
